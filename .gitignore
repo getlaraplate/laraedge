@@ -1,0 +1,28 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Coverage and profiling
+coverage.*
+*.prof
+
+# Local runtime data (data_dir, bootstrap with secret references)
+/data/
+/bootstrap.local.yaml
+
+# Environment and secrets
+.env
+.env.*
+
+# Editors and agents
+/.idea
+/.vscode
+/.zed
+/.cursor/
+/.codex
+/.worktrees/
+.DS_Store
+Thumbs.db

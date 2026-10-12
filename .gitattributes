@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+*.go diff=golang
+*.md diff=markdown
+
+*.pb.go linguist-generated=true
+go.sum linguist-generated=true
+
+/.github export-ignore
