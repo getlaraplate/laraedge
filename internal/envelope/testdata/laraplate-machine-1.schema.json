@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laraplate.dev/schemas/laraplate-machine-1.schema.json",
+  "title": "laraplate-machine/1 envelope",
+  "type": "object",
+  "required": ["protocol", "message_id", "source_seq", "sent_at", "devices"],
+  "properties": {
+    "protocol": { "const": "laraplate-machine/1" },
+    "message_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "source_seq": { "type": "integer", "minimum": 0 },
+    "sent_at": { "type": "string", "format": "date-time" },
+    "devices": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/device" }
+    },
+    "losses": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/loss" }
+    }
+  },
+  "$defs": {
+    "device": {
+      "type": "object",
+      "required": ["device", "type"],
+      "properties": {
+        "device": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "enum": ["data", "birth", "death"] },
+        "samples": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sample" } },
+        "signals": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/birthSignal" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "data" } } },
+          "then": { "required": ["samples"], "not": { "required": ["signals"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "birth" } } },
+          "then": { "required": ["signals"], "not": { "required": ["samples"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "death" } } },
+          "then": { "not": { "anyOf": [{ "required": ["samples"] }, { "required": ["signals"] }] } }
+        }
+      ]
+    },
+    "sample": {
+      "type": "object",
+      "required": ["signal", "ts", "value"],
+      "properties": {
+        "signal": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "ts": { "type": "string", "format": "date-time" },
+        "value": { "type": ["number", "boolean", "string"] },
+        "quality": { "enum": ["good", "uncertain", "bad"] },
+        "context": {
+          "type": "object",
+          "properties": {
+            "order_ref": { "type": "string" },
+            "operation_ref": { "type": "string" },
+            "serial": { "type": "string" },
+            "lot": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "loss": {
+      "type": "object",
+      "required": ["priority", "from_ts", "to_ts", "samples", "reason"],
+      "properties": {
+        "priority": { "enum": ["critical", "bulk"] },
+        "from_ts": { "type": "string", "format": "date-time" },
+        "to_ts": { "type": "string", "format": "date-time" },
+        "samples": { "type": "integer", "minimum": 1 },
+        "reason": { "enum": ["buffer_full", "rejected_invalid"] }
+      },
+      "additionalProperties": false
+    },
+    "birthSignal": {
+      "type": "object",
+      "required": ["signal", "data_type"],
+      "properties": {
+        "signal": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "data_type": { "enum": ["number", "boolean", "string"] },
+        "unit": { "type": ["string", "null"], "maxLength": 16 }
+      }
+    }
+  }
+}

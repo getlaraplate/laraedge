@@ -69,9 +69,9 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 **Interfaces:**
 - Produces: `model.Quality` (`Good`, `Uncertain`, `Bad`), `model.Priority` (`Critical`, `Bulk`), `model.Sample{Device, Signal string; TS time.Time; Value model.Value; Quality model.Quality; Priority model.Priority}` with `model.Value` holding exactly one of float64, int64, bool, string; `model.DeviceEvent{Kind: Birth|Death; Device string; Signals []model.SignalInfo; TS time.Time}`; `model.Loss{Priority; FromTS, ToTS time.Time; Samples int; Reason string}`; `envelope.Build(messageID string, seq uint64, sentAt time.Time, records []model.Record, losses []model.Loss) ([]byte, error)` where `model.Record` is a sample or a device event; `envelope.NewMessageID(clock.Clock) string` (UUIDv7).
 
-- [ ] **Step 1: Failing tests.** `Build` output validates against the copied backend schema for data, birth, death, mixed devices (C3) and losses; timestamps are UTC with millisecond precision; message ids are UUIDv7, time-ordered, unique over 10 000 calls.
-- [ ] **Step 2: Model and envelope.**
-- [ ] **Step 3: Run tests, commit.**
+- [x] **Step 1: Failing tests.** `Build` output validates against the copied backend schema for data, birth, death, mixed devices (C3) and losses; timestamps are UTC with millisecond precision; message ids are UUIDv7, time-ordered, unique over 10 000 calls.
+- [x] **Step 2: Model and envelope.**
+- [x] **Step 3: Run tests, commit.**
 
 ### Task 3: Bootstrap and secrets
 

@@ -1,0 +1,1 @@
+- `laraplate-machine-1.schema.json`: copied verbatim from `laraplate/Modules/MES/resources/protocol/laraplate-machine-1.schema.json`, last changed in the MES repository at commit 2b46a6a.
