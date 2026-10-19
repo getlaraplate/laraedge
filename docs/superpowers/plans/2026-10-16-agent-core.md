@@ -1,0 +1,177 @@
+---
+status: open
+created_on: 2026-10-16
+---
+# laraplate-edge agent core. Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block. A step dropped on purpose is `- [-]` with its reason on the same line.
+
+**Status:** Open. No task started.
+
+**Goal:** a runnable `laraplate-edge` binary that reads the `simulated` driver, buffers on disk without losing confirmed data, and delivers `laraplate-machine/1` envelopes to Laraplate over HTTP, configured by a versioned document from a file or from the backend.
+
+**Architecture:** one Go module; `cmd/laraplate-edge` holds the CLI; `internal/` packages for the model, bootstrap and secrets, configuration, buffer, envelope, HTTP output, pipeline and supervisor, the `simulated` input and the status endpoint. Inputs feed a router that fans samples out to per-output buffers; each output's sender seals batches from its buffer and delivers them. Transforms, CEL expressions, the real drivers, the MQTT output, plugins and packaging are later plans.
+
+**Tech Stack:** Go 1.27 (`go 1.27`, `toolchain go1.27.2` in `go.mod`), standard library first (`log/slog`, `net/http`, `hash/crc32` Castagnoli, `crypto/rand`, `flag`). No CGO.
+
+**Spec:** `../../../../docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md` (stack root), sections 4, 5, 6, 9.2 (`simulated`), 10 (status endpoint, logs, watchdog) and 11. Backend contract: `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md` and the schemas `laraplate/Modules/MES/resources/protocol/laraplate-machine-1.schema.json` and `laraplate/Modules/MES/resources/edge/laraplate-edge-config-1.schema.json`.
+
+## Dependencies needing approval (before Task 1)
+
+| Need | Candidate | Licence to verify at adoption | Why not the standard library |
+|---|---|---|---|
+| YAML (bootstrap file, hand-written configuration) | the maintained YAML v3 module for Go | MIT / Apache-2.0 | no YAML parser in the standard library |
+| JSON Schema validation of the configuration document | `github.com/santhosh-tekuri/jsonschema` (v6) | Apache-2.0 | the spec validates against a published JSON Schema (5.3, 5.4) |
+
+Everything else is written with the standard library: UUIDv7 (`crypto/rand` and the clock), Prometheus text exposition, `sd_notify` (a datagram to `NOTIFY_SOCKET`), file watching (polling the modification time, no `fsnotify`). Each adoption checks the licence (permissive only, AGENTS.md) and records it in the task's commit.
+
+## Global Constraints
+
+- AGPL-3.0 repository; dependencies permissive only (MIT, BSD, Apache); no CGO; module path `github.com/swolley/laraplate-edge`.
+- `go fmt ./...`, `go vet ./...` and `go test ./...` (with `-race` for concurrent packages) before every commit; table-driven tests; fakes over mocks; no timing assertions (a fake clock behind `internal/clock.Clock`).
+- Errors wrapped with `%w` and context; `context.Context` first on anything that blocks; every goroutine has an owner that stops it; no `panic` outside `main`; exported identifiers documented.
+- Drivers read only; the agent produces values, never meanings; secrets only as `secret://` references and never logged; sample values never logged at `info`; no telemetry to the vendor; no option disables TLS verification.
+- Spec values: bootstrap keys `agent_id`, `config.provider` (`file` | `laraplate`), `config.file`, `config.laraplate.url`, `config.laraplate.token`, `config.laraplate.poll_seconds`, `data_dir`, `status_listen` (default `127.0.0.1:9180`); document `schema: laraplate-edge-config/1`, integer `version`, `inputs`, `outputs`, `plugins`; priorities `critical`, `bulk`; qualities `good`, `uncertain`, `bad`; segments 16 MiB with length and CRC32C per record; `fsync_interval` default 200 ms; `buffer.max_size` default 1 GiB; minimum free disk 5%; batch `max_samples`, `max_body`, `max_wait`; HTTP outcomes `202`/`200 duplicate` advance, `401`/`403` suspend (retry every 5 minutes, at once on bootstrap reload), `413` split reusing the refused `source_seq`, `422` drop plus a `rejected_invalid` loss marker, `429`/`5xx`/network backoff 1 s to 5 min with jitter honouring `Retry-After`; loss markers `{priority, from_ts, to_ts, samples, reason}` with `reason` `buffer_full` | `rejected_invalid`; backend routes `POST {url}/api/v1/insert/mes/machine-messages`, `GET {url}/api/v1/detail/mes/machine-agent-configs?version=N` (`304` when unchanged, `404` when none), `POST {url}/api/v1/insert/mes/machine-agent-config-reports` with `{version, outcome: applied|rejected|rolled_back, errors, agent_version}`.
+- Commit only your own files; never push; commit trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; after commits here, bump the stack pointer (`git add laraplate-edge` at the stack root).
+
+## Decisions taken in this plan
+
+- **C1. Scope of the core.** Transforms and CEL (spec 7), the real drivers (9.2 except `simulated`), the MQTT output (6.6), plugins (8), `debug --for`, `support-bundle`, the OS keystore for `secret://keystore/...` and packaging (10.1.2) are later plans. In this plan a `secret://keystore/...` reference is refused at validation with "not available in this build".
+- **C2. Configuration schema.** The agent publishes the authoritative `schema/laraplate-edge-config-1.schema.json` (embedded in the binary). The backend keeps its structural copy (MES D3); this plan adds a test that the agent schema accepts every document the backend's structural schema accepts in its fixtures, and the backend copy is replaced from here in a later backend change.
+- **C3. One envelope per batch.** A sealed batch is one envelope; its devices are grouped from the batch's samples in record order; `birth`/`death` records are their own device entries.
+- **C4. Loss markers travel once.** A marker is stored with the batch that carries it; once that batch is confirmed the marker is gone; a `413` split keeps markers in the first half.
+
+## Review Focus
+
+- A crash between sealing a batch and writing `inflight`: on restart the same records are resealed into a batch with the next `source_seq`, never with a `source_seq` already sent. Test in Task 5.
+- A `413` on a batch of one sample: the agent cannot split further; it drops the sample with a `rejected_invalid` loss marker instead of looping. Test in Task 6.
+- Disk full while writing a record (the free-disk floor reached between checks): the write fails, the bulk eviction runs, a `buffer_full` marker is produced, the agent keeps running. Test in Task 4.
+- A configuration poll returning a document whose `version` is lower than the applied one: refused, reported as `rejected`, the running configuration untouched. Test in Task 8.
+- The bootstrap file referencing a token through `secret://env/NAME` with `NAME` unset: the output starts suspended (`suspended_auth`), buffers, and recovers on `SIGHUP` once the variable exists. Test in Task 3 and Task 8.
+
+---
+
+### Task 1: Module, CLI skeleton, CI
+
+**Files:** create `go.mod`, `cmd/laraplate-edge/main.go`, `internal/clock/clock.go` (+ `fake.go`), `internal/version/version.go`, `.github/workflows/ci.yml`; modify `README.md` (build and run).
+
+**Interfaces:**
+- Produces: `clock.Clock` (`Now() time.Time`, `NewTimer(d time.Duration) clock.Timer`, `Sleep(ctx, d) error`), `clock.Real()`, `clock.NewFake(t time.Time) *clock.Fake` with `Advance(d)`; CLI subcommands `run --bootstrap <path>`, `config validate <file>`, `status [--listen addr]`, `version`; `version.String()` (set by `-ldflags`).
+
+- [ ] **Step 1: Failing tests.** `laraplate-edge version` prints the version; an unknown subcommand exits with code 2 and usage on stderr; the fake clock fires timers only on `Advance`.
+- [ ] **Step 2: Module and skeleton.** CI runs `go vet`, `go test -race ./...` and `govulncheck` on Linux amd64 and arm64 and Windows amd64, and a build on Linux armv7 (spec 10.1.1).
+- [ ] **Step 3: Run tests, commit, bump the stack pointer.**
+
+### Task 2: Internal model and envelope
+
+**Files:** create `internal/model/model.go`, `internal/envelope/envelope.go`, `internal/envelope/uuid.go`, `internal/envelope/testdata/laraplate-machine-1.schema.json` (copied from the backend, header comment naming its source path and commit).
+
+**Interfaces:**
+- Produces: `model.Quality` (`Good`, `Uncertain`, `Bad`), `model.Priority` (`Critical`, `Bulk`), `model.Sample{Device, Signal string; TS time.Time; Value model.Value; Quality model.Quality; Priority model.Priority}` with `model.Value` holding exactly one of float64, int64, bool, string; `model.DeviceEvent{Kind: Birth|Death; Device string; Signals []model.SignalInfo; TS time.Time}`; `model.Loss{Priority; FromTS, ToTS time.Time; Samples int; Reason string}`; `envelope.Build(messageID string, seq uint64, sentAt time.Time, records []model.Record, losses []model.Loss) ([]byte, error)` where `model.Record` is a sample or a device event; `envelope.NewMessageID(clock.Clock) string` (UUIDv7).
+
+- [ ] **Step 1: Failing tests.** `Build` output validates against the copied backend schema for data, birth, death, mixed devices (C3) and losses; timestamps are UTC with millisecond precision; message ids are UUIDv7, time-ordered, unique over 10 000 calls.
+- [ ] **Step 2: Model and envelope.**
+- [ ] **Step 3: Run tests, commit.**
+
+### Task 3: Bootstrap and secrets
+
+**Files:** create `internal/bootstrap/bootstrap.go`, `internal/secrets/secrets.go`; YAML dependency (approved).
+
+**Interfaces:**
+- Produces: `bootstrap.Load(path string) (bootstrap.File, error)` with the spec keys and defaults, plus `status_token` (a `secret://` reference, required by Task 10 when `status_listen` is not a loopback address); `secrets.Resolver` with `Resolve(ctx, ref string) (string, error)` for `secret://env/NAME` and `secret://file/PATH` (file mode must not be group- or world-readable on Linux); `secrets.IsReference(s string) bool`; `secrets.ErrUnavailable` for `secret://keystore/...` (C1).
+
+- [ ] **Step 1: Failing tests.** Defaults (`status_listen`, `poll_seconds` 60); a plain token value in `config.laraplate.token` is refused; an unknown key is refused; `secret://file` with mode `0644` refused on Linux; an unset env variable resolves to an error naming the reference, never a value; a keystore reference gives `ErrUnavailable`.
+- [ ] **Step 2: Implementation.**
+- [ ] **Step 3: Run tests, commit.**
+
+### Task 4: Disk buffer
+
+**Files:** create `internal/buffer/segment.go`, `internal/buffer/queue.go`, `internal/buffer/buffer.go`, fuzz test `internal/buffer/record_fuzz_test.go`.
+
+**Interfaces:**
+- Produces: `buffer.Open(dir string, opts buffer.Options) (*buffer.Buffer, error)` with `Options{MaxSize int64; MinFreeRatio float64; FsyncInterval time.Duration; SegmentSize int64; Clock clock.Clock}`; `(*Buffer).Append(r model.Record) error`; `(*Buffer).Read(p model.Priority, from buffer.Position, max int) ([]buffer.Entry, error)`; `(*Buffer).Ack(p model.Priority, upTo buffer.Position) error`; `(*Buffer).TakeLosses() []model.Loss`; `(*Buffer).Stats() buffer.Stats`; `(*Buffer).Close() error`.
+
+- [ ] **Step 1: Failing tests.** Records round-trip; a truncated last record (bad CRC) is cut on reopen and every confirmed record survives; a fully acked segment is deleted; at `MaxSize` the oldest bulk segments go first, critical only when it alone fills the buffer, each eviction yields one `buffer_full` loss with the evicted `ts` range and count; the free-disk floor triggers the same path (fake filesystem stats); fuzzing the record decoder never panics.
+- [ ] **Step 2: Segments and records.**
+- [ ] **Step 3: Queues, ack, eviction, losses.**
+- [ ] **Step 4: Run tests with `-race`, commit.**
+
+### Task 5: Sealed batches
+
+**Files:** create `internal/output/batch.go`, `internal/output/inflight.go`.
+
+**Interfaces:**
+- Consumes: `buffer.Buffer` (Task 4), `envelope.Build` and `NewMessageID` (Task 2).
+- Produces: `output.Batcher` with `Next(ctx) (*output.Batch, error)` (critical first, then bulk, up to `MaxSamples`, `MaxBody`, `MaxWait`); `output.Batch{MessageID string; Seq uint64; Body []byte; Positions map[model.Priority]buffer.Position; Losses []model.Loss}`; `output.Inflight` persisting the sealed batch and the next `source_seq` in `data_dir/outputs/{id}/inflight`, `Load() (*output.Batch, error)`, `Save(*output.Batch) error`, `Clear() error`.
+
+- [ ] **Step 1: Failing tests.** Batches respect the three limits and the priority order; a sealed batch survives a restart and is resent byte-identical; `source_seq` strictly grows across restarts (Review Focus: crash before `inflight` write).
+- [ ] **Step 2: Batcher and inflight.**
+- [ ] **Step 3: Run tests, commit.**
+
+### Task 6: HTTP output
+
+**Files:** create `internal/output/http.go`, `internal/output/backoff.go`, `internal/output/fakebackend_test.go`.
+
+**Interfaces:**
+- Consumes: Batcher, Inflight (Task 5), `secrets.Resolver` (Task 3).
+- Produces: `output.HTTP` implementing `output.Output` (`Run(ctx) error`, `State() output.State`, `ReloadCredentials()`), states `Sending`, `Backoff`, `SuspendedAuth`; `output.ClockOffset() time.Duration` from the `Date` header.
+
+- [ ] **Step 1: Failing tests** against an `httptest` fake backend: `202` and `200 duplicate` advance and clear `inflight`; `401`/`403` suspend, retry after 5 minutes (fake clock), resume at once on `ReloadCredentials`; `413` splits and the first half reuses the refused `source_seq`; a one-sample `413` drops with a `rejected_invalid` loss (Review Focus); `422` drops and adds a `rejected_invalid` loss; `429` honours `Retry-After`; `5xx` and network errors back off from 1 s to 5 min with jitter; TLS verification cannot be disabled; the token never appears in logs.
+- [ ] **Step 2: Implementation.**
+- [ ] **Step 3: Run tests with `-race`, commit.**
+
+### Task 7: Configuration document
+
+**Files:** create `schema/laraplate-edge-config-1.schema.json`, `internal/config/config.go`, `internal/config/store.go`; JSON Schema dependency (approved).
+
+**Interfaces:**
+- Produces: `config.Parse(data []byte) (config.Document, []string, error)` (JSON or YAML, validated against the embedded schema, errors as human messages); `config.Document` typed (`Version int`, `Inputs`, `Outputs`, `Plugins` with the spec fields used by this plan: input `id`, `driver`, `connection`, `devices[].device`, `points[]` with `signal`, `address`, `read`, `priority`; output `id`, `type` = `laraplate-http`, `url`, `token`, `route.include`, `batch`, `buffer`); `config.Store` in `data_dir` with `LastValid() (config.Document, bool, error)` and `SaveValid(config.Document) error`; `laraplate-edge config validate <file>` wired.
+
+- [ ] **Step 1: Failing tests.** The spec 5.3 example parses (minus transforms and derived, refused with "not available in this build" — C1); a plain value in a secret field (`token`, `password`) refused; `max_samples` above 5000 or `max_body` above 1024 KiB refused (the backend defaults `mes.machine.max_samples` and `mes.machine.max_body_kb`; an installation that raises them raises the agent's caps in a later change); an unknown driver or output type refused; YAML and JSON give the same document; every valid fixture of the backend structural schema validates here (C2); `config validate` exits 0 or 1 with the messages.
+- [ ] **Step 2: Schema, parser, store, command.**
+- [ ] **Step 3: Run tests, commit.**
+
+### Task 8: Pipeline, supervisor, providers
+
+**Files:** create `internal/input/input.go` (the interface), `internal/pipeline/router.go`, `internal/supervisor/supervisor.go`, `internal/provider/file.go`, `internal/provider/laraplate.go`; wire `run` in `cmd/laraplate-edge/main.go`.
+
+**Interfaces:**
+- Consumes: everything above.
+- Produces (first): `input.Input` with `Start(ctx, emit func(model.Record)) error` and `Probe(ctx) ([]model.Sample, error)`, developed against a fake input; Task 9 implements it.
+- Produces: `supervisor.Supervisor` with `Apply(ctx, config.Document) error` (by difference: unchanged inputs and outputs keep running; a component that does not start within the timeout rolls back to the last valid document), `Status() supervisor.Status`; `provider.File` (polling modification time, reload on `SIGHUP`), `provider.Laraplate` (poll every `poll_seconds`, `?version=` the applied version, `304` no-op, reports `applied` / `rejected` / `rolled_back` with errors and the agent version).
+
+- [ ] **Step 1: Failing tests.** Router fans a sample to every output whose `route.include` matches (default `*`); `birth` on start, on a configuration change touching the device and on output reconnection; `death` after the tolerance; apply by difference keeps an unchanged output's buffer and `source_seq`; a failing new input rolls back and reports `rolled_back`; an older `version` is refused and reported `rejected` (Review Focus); the laraplate provider sends `?version=` and treats `304` as no change against a fake backend; `SIGHUP` reloads the bootstrap and calls `ReloadCredentials` (Review Focus).
+- [ ] **Step 2: Router and supervisor.**
+- [ ] **Step 3: Providers and `run`.**
+- [ ] **Step 4: Run tests with `-race`, commit.**
+
+### Task 9: `simulated` input
+
+**Files:** create `internal/input/simulated/simulated.go`, `internal/input/simulated/scenario.go`, `examples/simulated/scenario.yaml`, `examples/simulated/config.yaml`.
+
+**Interfaces:**
+- Consumes: `input.Input` (Task 8).
+- Produces: `simulated.New(cfg config.Input, clk clock.Clock, seed int64) (*simulated.Input, error)`; scenario: state machine with transition probabilities, cycle time, scrap rate, measurements with mean and standard deviation, per device.
+
+- [ ] **Step 1: Failing tests.** With a fixed seed and the fake clock the emitted sequence is identical across runs; states, `good_count`/`scrap_count` cumulative counters and measurements follow the scenario; `Probe` returns one sample per point; qualities are `good`.
+- [ ] **Step 2: Implementation and examples.**
+- [ ] **Step 3: Run tests, commit.**
+
+### Task 10: Status endpoint, logs, watchdog
+
+**Files:** create `internal/status/server.go`, `internal/status/metrics.go`, `internal/logging/logging.go`, `internal/watchdog/sdnotify.go`; wire `status` subcommand.
+
+**Interfaces:**
+- Produces: HTTP server on `status_listen` with `/healthz`, `/readyz`, `/status` (JSON: applied version, inputs, outputs with state and buffer stats, clock offset) and `/metrics` (Prometheus text: per output and queue depth, oldest unconfirmed age, bytes, drops by reason, last confirmation, state); binding a non-loopback address requires `status_token` (read-only bearer); JSON `slog` logger that never prints secrets or sample values at `info`; `sd_notify` `READY=1` and `WATCHDOG=1` at half of `WATCHDOG_USEC` when `NOTIFY_SOCKET` is set (Linux only).
+
+- [ ] **Step 1: Failing tests.** Endpoints answer with the fields above; `/metrics` parses as Prometheus text; a non-loopback bind without a token refuses to start; a log scanner over the test logs finds no token and no sample value at `info`; the watchdog sends to a fake `NOTIFY_SOCKET`.
+- [ ] **Step 2: Implementation.**
+- [ ] **Step 3: Run tests, commit.**
+
+### Task 11: End to end, documentation, closing
+
+**Files:** create `internal/e2e/e2e_test.go` (build tag `e2e`), `docs/USAGE.md`, `docs/CONFIGURATION.md`; modify `README.md`, this plan, `docs/superpowers/plans/INDEX.md`; stack root: the agent spec status line.
+
+- [ ] **Step 1: End to end.** The built binary runs the `simulated` example against a fake backend that validates every envelope against the backend schema: a network cut of 10 minutes (fake backend down) loses nothing and resends nothing as new; a `kill -9` mid-run and a restart lose no confirmed record; the configuration provider `laraplate` applies a new version and reports it. Optional real backend run, documented: a local Laraplate with a service account and the `mes-machine-agent` role.
+- [ ] **Step 2: Docs.** Build, run, bootstrap, configuration (fields of this build and what later plans add), buffer behaviour and limits, status endpoint and metrics, troubleshooting `401`/`403`/`413`/`422`.
+- [ ] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, index; stack spec status line; commit, bump the stack pointer.
