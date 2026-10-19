@@ -1055,45 +1055,82 @@ func TestCrashBetweenConfirmAckAndClear(t *testing.T) {
 
 // TestShrinkCountsAnInteriorGap: a corrupt record in an older segment drops
 // the rest of that segment at recovery, leaving a gap inside the batch's
-// records while those after it survive. A split counts the gap.
+// records while those after it survive. A split counts the gap, also when
+// held records of the remainder lie on both sides of it.
 func TestShrinkCountsAnInteriorGap(t *testing.T) {
+	tests := []struct {
+		name     string
+		corrupt  int // index of the bulk record corrupted in the older segment
+		gone     [2]int
+		wantRest []string
+	}{
+		{name: "gap at the start of the remainder", corrupt: 1, gone: [2]int{1, 2}, wantRest: []string{"temp=13", "temp=14", "temp=15"}},
+		{name: "held records on both sides of the gap", corrupt: 2, gone: [2]int{2, 2}, wantRest: []string{"temp=11", "temp=13", "temp=14", "temp=15"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := bulkFrameSize(t)
+			h := newHarness(t, output.BatchLimits{MaxSamples: 6, MaxBody: 1 << 20})
+			h.opts.SegmentSize = 3*f + f/2
+			h.open()
+			h.append(bulk(0), bulk(1), bulk(2), bulk(3), bulk(4), bulk(5))
+			sealed := h.next()
+
+			if err := h.buf.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			h.buf = nil
+			segments, err := filepath.Glob(filepath.Join(h.dir, "bulk", "*.seg"))
+			if err != nil || len(segments) < 2 {
+				t.Fatalf("bulk segments %v, %v; want at least two", segments, err)
+			}
+
+			sort.Strings(segments)
+			corruptByte(t, segments[0], int64(tc.corrupt)*f+f/2) // inside the payload of bulk(corrupt)
+
+			h.open()
+			resent := h.next()
+			assertSameBatch(t, resent, sealed)
+			first, err := h.bt.Shrink(resent, 1)
+			if err != nil {
+				t.Fatalf("Shrink() = %v", err)
+			}
+
+			from, to := bulk(tc.gone[0]), bulk(tc.gone[1])
+			want := []model.Loss{markerOf(model.Bulk, from, to, tc.gone[1]-tc.gone[0]+1, model.LossBufferFull)}
+			if pending := h.buf.PendingLosses(); !sameLosses(pending, want) {
+				t.Fatalf("pending losses after Shrink: %v, want %v", pending, want)
+			}
+
+			h.confirm(first)
+			rest := h.next()
+			if got := bodySamples(t, rest.Body); !reflect.DeepEqual(got, tc.wantRest) {
+				t.Fatalf("remainder samples %v, want %v", got, tc.wantRest)
+			}
+		})
+	}
+}
+
+// TestShrinkHandsTheRestBackToEviction: after a split the batch no longer
+// carries the rest, so evicting it later is a loss the buffer counts.
+func TestShrinkHandsTheRestBackToEviction(t *testing.T) {
 	f := bulkFrameSize(t)
-	h := newHarness(t, output.BatchLimits{MaxSamples: 6, MaxBody: 1 << 20})
+	h := newHarness(t, output.BatchLimits{MaxSamples: 3, MaxBody: 1 << 20})
 	h.opts.SegmentSize = 3*f + f/2
+	h.opts.MaxSize = 6*f + f/2
 	h.open()
-	h.append(bulk(0), bulk(1), bulk(2), bulk(3), bulk(4), bulk(5))
-	sealed := h.next()
 
-	if err := h.buf.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	h.buf = nil
-	segments, err := filepath.Glob(filepath.Join(h.dir, "bulk", "*.seg"))
-	if err != nil || len(segments) < 2 {
-		t.Fatalf("bulk segments %v, %v; want at least two", segments, err)
-	}
-
-	sort.Strings(segments)
-	corruptByte(t, segments[0], f+f/2) // inside the payload of bulk(1)
-
-	h.open()
-	resent := h.next()
-	assertSameBatch(t, resent, sealed)
-	first, err := h.bt.Shrink(resent, 1)
-	if err != nil {
+	h.append(bulk(0), bulk(1), bulk(2))
+	if _, err := h.bt.Shrink(h.next(), 1); err != nil {
 		t.Fatalf("Shrink() = %v", err)
 	}
 
+	h.append(bulk(3), bulk(4), bulk(5), bulk(6))
+
 	want := []model.Loss{markerOf(model.Bulk, bulk(1), bulk(2), 2, model.LossBufferFull)}
 	if pending := h.buf.PendingLosses(); !sameLosses(pending, want) {
-		t.Fatalf("pending losses after Shrink: %v, want %v", pending, want)
-	}
-
-	h.confirm(first)
-	rest := h.next()
-	if got, want := bodySamples(t, rest.Body), []string{"temp=13", "temp=14", "temp=15"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("remainder samples %v, want %v", got, want)
+		t.Fatalf("pending losses after evicting the handed back records: %v, want %v", pending, want)
 	}
 }
 
