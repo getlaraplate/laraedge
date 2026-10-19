@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/swolley/laraplate-edge/internal/buffer"
@@ -125,7 +124,69 @@ type runningInput struct {
 	cfg    config.Input
 	in     input.Input
 	cancel context.CancelFunc
-	live   *atomic.Bool
+	inst   *inputInstance
+}
+
+// inputInstance is one start of an input, as the router sees it. It
+// registers the input on its first record or when Start returns, whichever
+// comes first, and routes its records; retire ends both, before the input is
+// closed. mu makes the live check, the registration and each routed record
+// one step with retire, so after retire nothing is registered or routed for
+// this instance, and its router registration, owned by its token, is removed
+// without touching one of a later instance of the same id (ruling R50).
+type inputInstance struct {
+	router *pipeline.Router
+	cfg    config.Input
+
+	mu         sync.Mutex
+	live       bool
+	registered bool
+	token      pipeline.InputToken
+}
+
+// emit routes rec once the instance is registered; after retire it drops it.
+func (i *inputInstance) emit(rec model.Record) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if i.registerLocked() {
+		i.router.Emit(rec)
+	}
+}
+
+// register registers the instance's devices and sends their births, once,
+// unless it is retired.
+func (i *inputInstance) register() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	i.registerLocked()
+}
+
+func (i *inputInstance) registerLocked() bool {
+	if !i.live {
+		return false
+	}
+	if !i.registered {
+		i.registered = true
+		i.token = i.router.SetInput(i.cfg)
+		i.router.BirthInput(i.cfg.ID)
+	}
+
+	return true
+}
+
+// retire ends the instance's emits and removes its own registration. Later
+// calls do nothing.
+func (i *inputInstance) retire() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	i.live = false
+	if i.registered {
+		i.registered = false
+		i.router.RemoveInput(i.cfg.ID, i.token)
+	}
 }
 
 type runningOutput struct {
@@ -620,65 +681,32 @@ func (s *Supervisor) stopOutput(id string, how outputStop, holdRoute config.Rout
 // startInput starts in within the start timeout. Its devices are registered
 // with the router, and their births sent, once the input is live: before its
 // first record or when Start returns, whichever comes first. Until then an
-// output reconnecting sends no birth for them.
+// output reconnecting sends no birth for them. A failed or abandoned start is
+// retired before the input is closed: a goroutine it left behind cannot
+// register it or send a record, and its late cleanup cannot unregister the
+// instance a rollback started meanwhile.
 func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.Input) error {
 	lifeCtx, cancel := context.WithCancel(s.ctx)
-	live := &atomic.Bool{}
-	live.Store(true)
+	inst := &inputInstance{router: s.router, cfg: cfg, live: true}
 
-	// regMu makes the live check and the registration one step, shared with
-	// the failure path: an emit racing a failed start cannot register the
-	// input after the failure removed it.
-	var regMu sync.Mutex
-	registered := false
-	register := func() bool {
-		regMu.Lock()
-		defer regMu.Unlock()
-
-		if !live.Load() {
-			return false
-		}
-		if !registered {
-			registered = true
-			s.router.SetInput(cfg)
-			s.router.BirthInput(cfg.ID)
-		}
-
-		return true
-	}
-	emit := func(rec model.Record) {
-		if register() {
-			s.router.Emit(rec)
-		}
-	}
-
-	// retire ends the input's emits before it is closed, so a goroutine of a
-	// failed start cannot register it or send a record meanwhile.
-	retire := func() {
-		regMu.Lock()
-		defer regMu.Unlock()
-
-		live.Store(false)
-		s.router.RemoveInput(cfg.ID)
-	}
-	err := s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, emit) }, func() {
-		retire()
+	err := s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, inst.emit) }, func() {
+		inst.retire()
 		if err := in.Close(); err != nil {
 			s.log.Warn("supervisor: cannot close an input that did not start", "input", cfg.ID, "error", err)
 		}
 	})
 	if err != nil {
-		retire()
+		inst.retire()
 		cancel()
 
 		return err
 	}
 
-	register()
+	inst.register()
 	s.step("input " + cfg.ID)
 
 	s.mu.Lock()
-	s.inputs[cfg.ID] = &runningInput{cfg: cfg, in: in, cancel: cancel, live: live}
+	s.inputs[cfg.ID] = &runningInput{cfg: cfg, in: in, cancel: cancel, inst: inst}
 	delete(s.failedIn, cfg.ID)
 	s.mu.Unlock()
 
@@ -725,19 +753,19 @@ func (s *Supervisor) startBounded(ctx context.Context, cancelStart context.Cance
 	}
 }
 
-// stopInput stops the input and forgets its devices.
+// stopInput retires the input, which forgets its devices, then stops it:
+// nothing it emits while it closes is routed.
 func (s *Supervisor) stopInput(id string) config.Input {
 	s.mu.Lock()
 	ri := s.inputs[id]
 	delete(s.inputs, id)
 	s.mu.Unlock()
 
+	ri.inst.retire()
 	ri.cancel()
 	if err := ri.in.Close(); err != nil {
 		s.log.Warn("supervisor: cannot close an input", "input", id, "error", err)
 	}
-	ri.live.Store(false)
-	s.router.RemoveInput(id)
 
 	return ri.cfg
 }

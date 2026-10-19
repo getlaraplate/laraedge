@@ -36,7 +36,19 @@ type Router struct {
 	mu      sync.RWMutex
 	outputs map[string]target
 	order   []string // output ids, sorted
-	inputs  map[string]config.Input
+	inputs  map[string]registeredInput
+	// lastToken is the token of the latest input registration.
+	lastToken InputToken
+}
+
+// InputToken identifies one registration of an input with the router: the
+// running instance that made it. Only that instance's RemoveInput removes it
+// (ruling R50).
+type InputToken uint64
+
+type registeredInput struct {
+	cfg   config.Input
+	token InputToken
 }
 
 type target struct {
@@ -110,7 +122,7 @@ func NewRouter(clk clock.Clock, log *slog.Logger) *Router {
 		log = slog.Default()
 	}
 
-	return &Router{clk: clk, log: log, outputs: map[string]target{}, inputs: map[string]config.Input{}}
+	return &Router{clk: clk, log: log, outputs: map[string]target{}, inputs: map[string]registeredInput{}}
 }
 
 // SetOutput routes to buf the records matching route, from now on, after
@@ -249,20 +261,29 @@ func (r *Router) discard(id, reason string, q *holdQueue) {
 }
 
 // SetInput registers the devices and signals of a running input: they make
-// the births and decide where its device events go.
-func (r *Router) SetInput(in config.Input) {
+// the births and decide where its device events go. It replaces any earlier
+// registration of the same id and returns the token of this one, which its
+// RemoveInput must give.
+func (r *Router) SetInput(in config.Input) InputToken {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.inputs[in.ID] = in
+	r.lastToken++
+	r.inputs[in.ID] = registeredInput{cfg: in, token: r.lastToken}
+
+	return r.lastToken
 }
 
-// RemoveInput forgets the devices of input id.
-func (r *Router) RemoveInput(id string) {
+// RemoveInput forgets the devices of input id when token is that of its
+// current registration. A token of an earlier registration removes nothing:
+// an instance that ended late cannot unregister the one that replaced it.
+func (r *Router) RemoveInput(id string, token InputToken) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	delete(r.inputs, id)
+	if reg, ok := r.inputs[id]; ok && reg.token == token {
+		delete(r.inputs, id)
+	}
 }
 
 // Emit routes one record. A birth of a registered device lists the device's
@@ -298,12 +319,12 @@ func (r *Router) BirthInput(id string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	in, ok := r.inputs[id]
+	reg, ok := r.inputs[id]
 	if !ok {
 		return
 	}
 
-	for _, device := range devicesOf(in) {
+	for _, device := range devicesOf(reg.cfg) {
 		ev := r.birth(device)
 		for _, out := range r.order {
 			r.event(out, ev)
@@ -327,7 +348,7 @@ func (r *Router) birthTo(id string) {
 
 	seen := map[string]bool{}
 	for _, inID := range r.inputIDs() {
-		for _, device := range devicesOf(r.inputs[inID]) {
+		for _, device := range devicesOf(r.inputs[inID].cfg) {
 			if seen[device] {
 				continue
 			}
@@ -402,7 +423,7 @@ func (r *Router) deviceSignals(device string) ([]model.SignalInfo, bool) {
 	var out []model.SignalInfo
 	known := false
 	for _, id := range r.inputIDs() {
-		for _, d := range r.inputs[id].Devices {
+		for _, d := range r.inputs[id].cfg.Devices {
 			if d.Device == device {
 				known = true
 				out = append(out, input.Signals(d)...)

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -918,4 +919,89 @@ func TestInputEmittingAfterAFailedStartRegistersNothing(t *testing.T) {
 	if slices.Contains(got, birthB1) || slices.Contains(got, "b1/state") {
 		t.Fatalf("main received %q, with records of an input whose start failed", got)
 	}
+}
+
+// TestAbandonedStartDoesNotUnregisterTheRestoredInput: a changed input that
+// does not start within the timeout is abandoned and the previous one is
+// restarted by the rollback; when the abandoned Start returns later, its
+// cleanup leaves the restored input registered with the router (ruling
+// R50): its births reach the outputs on BirthTo and its deaths are routed.
+func TestAbandonedStartDoesNotUnregisterTheRestoredInput(t *testing.T) {
+	f := newFixture(t)
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(f.drv.blockRelease) }) })
+
+	f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	f.be.waitItem(t, "main", birthA1)
+
+	f.drv.blockNth["a"] = 2
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- f.apply(f.document(2, []inSpec{{id: "a", variant: 1, devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	}()
+	select {
+	case <-f.drv.blockStarted:
+	case <-time.After(guard):
+		t.Fatal("the changed input a did not start")
+	}
+	f.clk.Advance(DefaultStartTimeout)
+	select {
+	case out := <-done:
+		if out.Result != ResultRolledBack {
+			t.Fatalf("Apply() = %+v, want rolled_back", out)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return after the start timeout")
+	}
+	births := func() int { return countItems(f.be.got("main"), birthA1) }
+	f.be.waitUntil(t, "main receiving the birth of the restored a", func() bool { return births() == 2 })
+
+	// The abandoned Start returns now, after the rollback restarted a.
+	release.Do(func() { close(f.drv.blockRelease) })
+	select {
+	case <-f.drv.blockClosed:
+	case <-time.After(guard):
+		t.Fatal("the abandoned input was not closed")
+	}
+
+	f.sup.router.BirthTo("main")
+	a := f.drv.instance(t, "a")
+	a.sendDeath("a1")
+	a.send("a1", "count")
+
+	got := f.be.waitItem(t, "main", "a1/count")
+	if n := countItems(got, birthA1); n != 3 {
+		t.Errorf("main received %q: %d births of a1, want 3 (start, rollback, BirthTo)", got, n)
+	}
+	if !slices.Contains(got, "death a1") {
+		t.Errorf("main received %q, without the death of the restored input's device", got)
+	}
+}
+
+// TestStoppedInputSendsNothingWhileItCloses: a record emitted while a stopped
+// input closes is not routed (ruling R50).
+func TestStoppedInputSendsNothingWhileItCloses(t *testing.T) {
+	f := newFixture(t)
+	f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	f.be.waitItem(t, "main", birthA1)
+
+	f.drv.closeEmit["a"] = true
+	f.mustApply(f.document(2, []inSpec{{id: "b", devices: []string{"b1"}}}, []outSpec{{id: "main"}}))
+	f.drv.instance(t, "b").send("b1", "count")
+
+	got := f.be.waitItem(t, "main", "b1/count")
+	if slices.Contains(got, "a1/state") {
+		t.Fatalf("main received %q, with a record emitted while the stopped input closed", got)
+	}
+}
+
+func countItems(items []string, item string) int {
+	n := 0
+	for _, it := range items {
+		if it == item {
+			n++
+		}
+	}
+
+	return n
 }

@@ -148,26 +148,26 @@ func TestRouterDeviceEventsFollowTheRoutedSignals(t *testing.T) {
 }
 
 func TestRouterBirths(t *testing.T) {
-	newRouter := func() (*pipeline.Router, map[string]*sink) {
+	newRouter := func() (*pipeline.Router, map[string]*sink, pipeline.InputToken) {
 		r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
 		sinks := map[string]*sink{"all": {}, "ovens": {}, "none": {}}
 		r.SetOutput("all", config.Route{Include: []string{"*"}}, sinks["all"])
 		r.SetOutput("ovens", config.Route{Include: []string{"oven-02/temp"}}, sinks["ovens"])
 		r.SetOutput("none", config.Route{Include: []string{"mill"}}, sinks["none"])
-		r.SetInput(line())
+		lineToken := r.SetInput(line())
 		r.SetInput(config.Input{ID: "mixer", Devices: []config.Device{{Device: "mixer-1", Points: []config.Point{{Signal: "rpm"}}}}})
 
-		return r, sinks
+		return r, sinks, lineToken
 	}
 
 	tests := []struct {
 		name string
-		act  func(*pipeline.Router)
+		act  func(r *pipeline.Router, lineToken pipeline.InputToken)
 		want map[string][]string
 	}{
 		{
 			name: "births of one input go to every output, filtered",
-			act:  func(r *pipeline.Router) { r.BirthInput("line") },
+			act:  func(r *pipeline.Router, _ pipeline.InputToken) { r.BirthInput("line") },
 			want: map[string][]string{
 				"all":   {"birth press-07 [state temp]", "birth oven-02 [temp]"},
 				"ovens": {"birth oven-02 [temp]"},
@@ -175,27 +175,40 @@ func TestRouterBirths(t *testing.T) {
 		},
 		{
 			name: "births to one output cover every input routed to it",
-			act:  func(r *pipeline.Router) { r.BirthTo("all") },
+			act:  func(r *pipeline.Router, _ pipeline.InputToken) { r.BirthTo("all") },
 			want: map[string][]string{
 				"all": {"birth press-07 [state temp]", "birth oven-02 [temp]", "birth mixer-1 [rpm]"},
 			},
 		},
 		{
 			name: "births to an output filtered by its route",
-			act:  func(r *pipeline.Router) { r.BirthTo("ovens") },
+			act:  func(r *pipeline.Router, _ pipeline.InputToken) { r.BirthTo("ovens") },
 			want: map[string][]string{"ovens": {"birth oven-02 [temp]"}},
 		},
 		{
 			name: "a removed input has no births",
-			act: func(r *pipeline.Router) {
-				r.RemoveInput("line")
+			act: func(r *pipeline.Router, lineToken pipeline.InputToken) {
+				r.RemoveInput("line", lineToken)
 				r.BirthTo("all")
 			},
 			want: map[string][]string{"all": {"birth mixer-1 [rpm]"}},
 		},
 		{
+			name: "removing with the token of a previous instance keeps the input",
+			act: func(r *pipeline.Router, lineToken pipeline.InputToken) {
+				r.SetInput(line())
+				r.RemoveInput("line", lineToken)
+				r.BirthTo("all")
+				r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: "oven-02", TS: start}))
+			},
+			want: map[string][]string{
+				"all":   {"birth press-07 [state temp]", "birth oven-02 [temp]", "birth mixer-1 [rpm]", "death oven-02 []"},
+				"ovens": {"death oven-02 []"},
+			},
+		},
+		{
 			name: "a removed output receives nothing",
-			act: func(r *pipeline.Router) {
+			act: func(r *pipeline.Router, _ pipeline.InputToken) {
 				r.RemoveOutput("all", "removed")
 				r.BirthInput("line")
 				r.Emit(sample("press-07", "state"))
@@ -206,8 +219,8 @@ func TestRouterBirths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, sinks := newRouter()
-			tt.act(r)
+			r, sinks, lineToken := newRouter()
+			tt.act(r, lineToken)
 			for name, s := range sinks {
 				if got := s.got(); !reflect.DeepEqual(got, tt.want[name]) {
 					t.Errorf("%s got %q, want %q", name, got, tt.want[name])
