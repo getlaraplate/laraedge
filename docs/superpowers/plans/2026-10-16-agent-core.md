@@ -164,9 +164,9 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 **Interfaces:**
 - Produces: HTTP server on `status_listen` with `/healthz`, `/readyz`, `/status` (JSON: applied version, inputs, outputs with state and buffer stats, clock offset) and `/metrics` (Prometheus text: per output and queue depth, oldest unconfirmed age, bytes, drops by reason, last confirmation, state); binding a non-loopback address requires `status_token` (read-only bearer); JSON `slog` logger that never prints secrets or sample values at `info`; `sd_notify` `READY=1` and `WATCHDOG=1` at half of `WATCHDOG_USEC` when `NOTIFY_SOCKET` is set (Linux only).
 
-- [ ] **Step 1: Failing tests.** Endpoints answer with the fields above; `/metrics` parses as Prometheus text; a non-loopback bind without a token refuses to start; a log scanner over the test logs finds no token and no sample value at `info`; the watchdog sends to a fake `NOTIFY_SOCKET`.
-- [ ] **Step 2: Implementation.**
-- [ ] **Step 3: Run tests, commit.**
+- [x] **Step 1: Failing tests.** Endpoints answer with the fields above; `/metrics` parses as Prometheus text; a non-loopback bind without a token refuses to start; a log scanner over the test logs finds no token and no sample value at `info`; the watchdog sends to a fake `NOTIFY_SOCKET`.
+- [x] **Step 2: Implementation.**
+- [x] **Step 3: Run tests, commit.**
 
 ### Task 11: End to end, documentation, closing
 

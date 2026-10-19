@@ -188,3 +188,23 @@ func doc(version int) string {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// attempts counts the calls of a provider's Attempted hook.
+type attempts struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (a *attempts) hook() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.n++
+}
+
+func (a *attempts) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.n
+}

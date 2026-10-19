@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/swolley/laraplate-edge/internal/config"
+	"github.com/swolley/laraplate-edge/internal/logging"
 	"github.com/swolley/laraplate-edge/internal/version"
 )
 
@@ -25,13 +26,13 @@ const (
 const usageText = `usage: laraplate-edge <command> [arguments]
 
 commands:
-  run --bootstrap <path>     run the agent
+  run --bootstrap <path> [--log-level debug|info|warn|error]
+                             run the agent (default log level info)
   config validate <file>     validate a configuration document
-  status [--listen addr]     query a running agent (default ` + defaultListen + `)
+  status [--listen addr]     query a running agent (default ` + defaultListen + `);
+                             the token, if any, from ` + statusTokenEnv + `
   version                    print the version
 `
-
-var errNotImplemented = errors.New("not implemented yet")
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -52,7 +53,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "config":
 		return runConfig(args[1:], stdout, stderr)
 	case "status":
-		return runStatus(args[1:], stderr)
+		return runStatus(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return exitOK
@@ -76,6 +77,7 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 func runRun(args []string, stderr io.Writer) int {
 	fs := newFlagSet("run", stderr)
 	bootstrap := fs.String("bootstrap", "", "path to the bootstrap file")
+	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	if code, ok := parse(fs, args); !ok {
 		return code
 	}
@@ -83,6 +85,13 @@ func runRun(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "laraplate-edge run: --bootstrap <path> is required\n")
 		return exitUsage
 	}
+	level, err := logging.ParseLevel(*logLevel)
+	if err != nil {
+		fmt.Fprintf(stderr, "laraplate-edge run: --log-level: %v\n", err)
+		return exitUsage
+	}
+	deps := productionDeps()
+	deps.logger = logging.New(stderr, level)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -91,7 +100,7 @@ func runRun(args []string, stderr io.Writer) int {
 	stopReload := notifyReload(reload)
 	defer stopReload()
 
-	if err := runAgent(ctx, *bootstrap, productionDeps(), reload, stderr); err != nil {
+	if err := runAgent(ctx, *bootstrap, deps, reload, stderr); err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge run: %v\n", err)
 		return exitFailure
 	}
@@ -151,9 +160,9 @@ func readDocument(file string) ([]byte, error) {
 	return data, nil
 }
 
-func runStatus(args []string, stderr io.Writer) int {
+func runStatus(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("status", stderr)
-	fs.String("listen", defaultListen, "address of the status endpoint")
+	listen := fs.String("listen", defaultListen, "address of the status endpoint")
 	if code, ok := parse(fs, args); !ok {
 		return code
 	}
@@ -162,7 +171,14 @@ func runStatus(args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	return notImplemented(stderr, "status")
+	out, err := fetchStatus(*listen, os.Getenv(statusTokenEnv))
+	if err != nil {
+		fmt.Fprintf(stderr, "laraplate-edge status: %v\n", err)
+		return exitFailure
+	}
+	_, _ = stdout.Write(out)
+
+	return exitOK
 }
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
@@ -183,10 +199,4 @@ func parse(fs *flag.FlagSet, args []string) (code int, ok bool) {
 	}
 
 	return exitOK, true
-}
-
-func notImplemented(stderr io.Writer, command string) int {
-	fmt.Fprintf(stderr, "laraplate-edge %s: %v\n", command, errNotImplemented)
-
-	return exitFailure
 }

@@ -183,8 +183,10 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// bootstrapYAML returns a bootstrap file of the file provider whose status
+// endpoint binds a free loopback port.
 func bootstrapYAML(agentID, configFile, dataDir string) string {
-	return "agent_id: " + agentID + "\nconfig:\n  provider: file\n  file: " + configFile + "\ndata_dir: " + dataDir + "\n"
+	return "agent_id: " + agentID + "\nconfig:\n  provider: file\n  file: " + configFile + "\ndata_dir: " + dataDir + "\nstatus_listen: 127.0.0.1:0\n"
 }
 
 // TestRunAgentReloadResumesAnOutputWhoseTokenWasUnset is the Review Focus

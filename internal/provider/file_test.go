@@ -187,3 +187,37 @@ func TestApplyLastValid(t *testing.T) {
 		t.Fatalf("applied version %d, want the last valid 7", got.Version)
 	}
 }
+
+// TestFileAttemptedIsCalledOnceAfterTheFirstLoad covers the readiness hook
+// (systemd READY=1): it follows the first load whatever its outcome, here a
+// missing file, and never again.
+func TestFileAttemptedIsCalledOnceAfterTheFirstLoad(t *testing.T) {
+	clk := clock.NewFake(start)
+	path := filepath.Join(t.TempDir(), "missing.json")
+	var hook attempts
+	p, err := provider.NewFile(provider.FileConfig{
+		Path:      path,
+		Applier:   newFakeApplier(),
+		Clock:     clk,
+		Logger:    slog.New(slog.DiscardHandler),
+		Attempted: hook.hook,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(t, p.Run)
+
+	waitTimers(t, clk, 1)
+	if got := hook.count(); got != 1 {
+		t.Fatalf("Attempted called %d times after the first load, want 1", got)
+	}
+
+	if err := os.WriteFile(path, []byte(doc(1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(provider.DefaultFileInterval)
+	waitTimers(t, clk, 1)
+	if got := hook.count(); got != 1 {
+		t.Fatalf("Attempted called %d times after a later load, want 1", got)
+	}
+}

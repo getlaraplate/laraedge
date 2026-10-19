@@ -31,6 +31,9 @@ type FileConfig struct {
 	Logger *slog.Logger
 	// Interval is the polling period; zero means DefaultFileInterval.
 	Interval time.Duration
+	// Attempted, when set, is called once, from Run, when the first load
+	// ended, whatever its outcome (systemd readiness).
+	Attempted func()
 }
 
 // File applies the document of a local file: at start, whenever its
@@ -39,12 +42,13 @@ type FileConfig struct {
 // messages and the running configuration stays; an equal version applies
 // (hand edits, ruling R9).
 type File struct {
-	path     string
-	applier  Applier
-	reload   <-chan struct{}
-	clk      clock.Clock
-	log      *slog.Logger
-	interval time.Duration
+	path      string
+	applier   Applier
+	reload    <-chan struct{}
+	clk       clock.Clock
+	log       *slog.Logger
+	interval  time.Duration
+	attempted func()
 
 	// seen is the file as last loaded; owned by Run.
 	seen stamp
@@ -70,7 +74,7 @@ func NewFile(cfg FileConfig) (*File, error) {
 		return nil, errors.New("provider: file provider without an applier")
 	}
 
-	f := &File{path: cfg.Path, applier: cfg.Applier, reload: cfg.Reload, clk: cfg.Clock, log: cfg.Logger, interval: cfg.Interval}
+	f := &File{path: cfg.Path, applier: cfg.Applier, reload: cfg.Reload, clk: cfg.Clock, log: cfg.Logger, interval: cfg.Interval, attempted: cfg.Attempted}
 	if f.clk == nil {
 		f.clk = clock.Real()
 	}
@@ -87,6 +91,9 @@ func NewFile(cfg FileConfig) (*File, error) {
 // Run loads the file, then watches it until ctx is done; it returns nil.
 func (f *File) Run(ctx context.Context) error {
 	f.load(ctx)
+	if f.attempted != nil {
+		f.attempted()
+	}
 
 	for {
 		timer := f.clk.NewTimer(f.interval)

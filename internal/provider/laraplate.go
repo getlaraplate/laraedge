@@ -73,6 +73,9 @@ type LaraplateConfig struct {
 	// Client is a test seam; production code leaves it nil for the
 	// verifying default client of output.NewClient.
 	Client *http.Client
+	// Attempted, when set, is called once, from Run, when the first poll
+	// ended, whatever its outcome (systemd readiness).
+	Attempted func()
 }
 
 // Laraplate polls the backend for the active configuration of this agent's
@@ -100,6 +103,7 @@ type Laraplate struct {
 	log       *slog.Logger
 	client    *http.Client
 	interval  time.Duration
+	attempted func()
 
 	// Owned by Run.
 	lastAttempt attempt
@@ -154,6 +158,7 @@ func NewLaraplate(cfg LaraplateConfig) (*Laraplate, error) {
 		log:       cfg.Logger,
 		client:    client,
 		interval:  cfg.PollInterval,
+		attempted: cfg.Attempted,
 	}
 	if l.clk == nil {
 		l.clk = clock.Real()
@@ -190,8 +195,13 @@ func baseURL(raw string) (string, error) {
 // Run polls at once, then every poll interval, until ctx is done; it
 // returns nil.
 func (l *Laraplate) Run(ctx context.Context) error {
+	attempted := l.attempted
 	for {
 		l.poll(ctx)
+		if attempted != nil {
+			attempted()
+			attempted = nil
+		}
 
 		timer := l.clk.NewTimer(l.interval)
 		select {

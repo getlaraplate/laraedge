@@ -17,24 +17,31 @@ import (
 	"github.com/swolley/laraplate-edge/internal/config"
 	"github.com/swolley/laraplate-edge/internal/input"
 	"github.com/swolley/laraplate-edge/internal/input/simulated"
+	"github.com/swolley/laraplate-edge/internal/logging"
 	"github.com/swolley/laraplate-edge/internal/provider"
 	"github.com/swolley/laraplate-edge/internal/secrets"
+	"github.com/swolley/laraplate-edge/internal/status"
 	"github.com/swolley/laraplate-edge/internal/supervisor"
 	"github.com/swolley/laraplate-edge/internal/version"
+	"github.com/swolley/laraplate-edge/internal/watchdog"
 )
 
 // agentDeps are what runAgent takes from its environment; tests replace them.
 type agentDeps struct {
-	// lookupEnv reads the environment for secret://env/ references.
+	// lookupEnv reads the environment for secret://env/ references and the
+	// systemd notification variables.
 	lookupEnv func(string) (string, bool)
 	// clock drives every timer.
 	clock clock.Clock
 	// drivers replaces or adds to the built-in input drivers (tests).
 	drivers map[string]input.Factory
-	// logger receives the logs; nil means JSON on stderr.
+	// logger receives the logs; nil means JSON on stderr at info.
 	logger *slog.Logger
 	// started, when set, receives the supervisor once it exists (tests).
 	started func(*supervisor.Supervisor)
+	// listening, when set, receives the address the status endpoint bound
+	// (tests).
+	listening func(addr string)
 }
 
 // productionDeps are the dependencies of the real agent.
@@ -47,11 +54,17 @@ func productionDeps() agentDeps {
 }
 
 // runAgent runs the agent of the bootstrap file until ctx is done (SIGINT,
-// SIGTERM), then stops the provider and closes the supervisor, which syncs
-// and closes every buffer. Each value received on reload (SIGHUP) reloads
-// the bootstrap file: the outputs resolve their tokens again, the file
-// provider rereads its file, and changed settings, which need a restart, are
-// logged.
+// SIGTERM), then stops the provider and the status endpoint and closes the
+// supervisor, which syncs and closes every buffer. Each value received on
+// reload (SIGHUP) reloads the bootstrap file: the outputs resolve their
+// tokens again, the file provider rereads its file, and changed settings,
+// which need a restart, are logged.
+//
+// Under systemd it sends READY=1 once a configuration is applied or the
+// provider's first attempt ended, WATCHDOG=1 while it runs, until it
+// returns, and STOPPING=1 when the shutdown starts. A status endpoint that
+// cannot start (a non-loopback status_listen without status_token, a port
+// in use) stops the agent at start.
 func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload <-chan struct{}, stderr io.Writer) (err error) {
 	boot, err := bootstrap.Load(bootstrapPath)
 	if err != nil {
@@ -60,12 +73,23 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 
 	log := deps.logger
 	if log == nil {
-		log = slog.New(slog.NewJSONHandler(stderr, nil))
+		log = logging.New(stderr, slog.LevelInfo)
 	}
 
 	if err := prepareDataDir(boot.DataDir); err != nil {
 		return err
 	}
+
+	// The watchdog pings until runAgent returns, closing the supervisor
+	// included.
+	wd := watchdog.New(watchdog.Config{LookupEnv: deps.lookupEnv, Clock: deps.clock, Logger: log})
+	pingCtx, stopPings := context.WithCancel(context.Background())
+	var pings sync.WaitGroup
+	pings.Go(func() { _ = wd.Run(pingCtx) })
+	defer func() {
+		stopPings()
+		pings.Wait()
+	}()
 
 	store := config.NewStore(boot.DataDir)
 	resolver := secrets.NewResolver(secrets.WithLookupEnv(deps.lookupEnv))
@@ -86,24 +110,52 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 	}()
 
 	fileReload := make(chan struct{}, 1)
-	runProvider, err := newProvider(boot, sup, resolver, fileReload, deps.clock, log)
+	runProvider, err := newProvider(boot, sup, resolver, fileReload, deps.clock, log, wd.Ready)
 	if err != nil {
 		return err
+	}
+
+	srv, err := status.Listen(ctx, status.Config{
+		Listen:   boot.StatusListen,
+		TokenRef: boot.StatusToken,
+		Resolver: resolver,
+		AgentID:  boot.AgentID,
+		Version:  version.String(),
+		Source:   sup,
+		Clock:    deps.clock,
+		Logger:   log,
+	})
+	if err != nil {
+		return err
+	}
+	serveCtx, stopServing := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if err := srv.Serve(serveCtx); err != nil {
+			log.Error("agent: the status endpoint stopped", "error", err)
+		}
+	})
+	if deps.listening != nil {
+		deps.listening(srv.Addr().String())
 	}
 
 	if deps.started != nil {
 		deps.started(sup)
 	}
-	log.Info("agent: starting", "agent_id", boot.AgentID, "version", version.String(), "provider", boot.Config.Provider, "data_dir", boot.DataDir)
+	log.Info("agent: starting", "agent_id", boot.AgentID, "version", version.String(), "provider", boot.Config.Provider, "data_dir", boot.DataDir, "status_listen", srv.Addr().String())
 
 	provider.ApplyLastValid(ctx, store, sup, log)
+	if sup.Status().Applied {
+		wd.Ready()
+	}
 
 	reloadCtx, stopReloads := context.WithCancel(ctx)
-	var wg sync.WaitGroup
 	wg.Go(func() { handleReloads(reloadCtx, bootstrapPath, boot, sup, fileReload, reload, log) })
 
 	err = runProvider(ctx)
+	wd.Stopping()
 	stopReloads()
+	stopServing()
 	wg.Wait()
 
 	return err
@@ -137,16 +189,18 @@ func configBaseDir(boot bootstrap.File) string {
 	return filepath.Dir(file)
 }
 
-// newProvider builds the provider the bootstrap names and returns its Run.
-func newProvider(boot bootstrap.File, sup *supervisor.Supervisor, resolver *secrets.Resolver, fileReload <-chan struct{}, clk clock.Clock, log *slog.Logger) (func(context.Context) error, error) {
+// newProvider builds the provider the bootstrap names and returns its Run;
+// attempted is called once the provider's first attempt ended.
+func newProvider(boot bootstrap.File, sup *supervisor.Supervisor, resolver *secrets.Resolver, fileReload <-chan struct{}, clk clock.Clock, log *slog.Logger, attempted func()) (func(context.Context) error, error) {
 	switch boot.Config.Provider {
 	case bootstrap.ProviderFile:
 		p, err := provider.NewFile(provider.FileConfig{
-			Path:    boot.Config.File,
-			Applier: sup,
-			Reload:  fileReload,
-			Clock:   clk,
-			Logger:  log,
+			Path:      boot.Config.File,
+			Applier:   sup,
+			Reload:    fileReload,
+			Clock:     clk,
+			Logger:    log,
+			Attempted: attempted,
 		})
 		if err != nil {
 			return nil, err
@@ -163,6 +217,7 @@ func newProvider(boot bootstrap.File, sup *supervisor.Supervisor, resolver *secr
 			DataDir:      boot.DataDir,
 			Clock:        clk,
 			Logger:       log,
+			Attempted:    attempted,
 		})
 		if err != nil {
 			return nil, err

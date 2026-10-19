@@ -162,6 +162,8 @@ type laraplateFixture struct {
 	logs    *lockedBuffer
 	env     map[string]string
 	envMu   sync.Mutex
+	// attempted is the provider's Attempted hook; nil means none.
+	attempted func()
 }
 
 func newLaraplateFixture(t *testing.T) *laraplateFixture {
@@ -199,6 +201,7 @@ func (f *laraplateFixture) start(a provider.Applier) *runner {
 		DataDir:      f.dataDir,
 		Clock:        f.clk,
 		Logger:       slog.New(slog.NewJSONHandler(f.logs, nil)),
+		Attempted:    f.attempted,
 	})
 	if err != nil {
 		f.t.Fatalf("NewLaraplate() = %v", err)
@@ -714,5 +717,25 @@ func TestLaraplateAppliedDuringShutdownIsStillReported(t *testing.T) {
 	f.be.waitReports(t, 1)
 	if got := f.be.reportsSoFar(); !reflect.DeepEqual(got, []map[string]any{report(9, "applied")}) {
 		t.Fatalf("reports = %v, want the applied report after the restart", got)
+	}
+}
+
+// TestLaraplateAttemptedIsCalledOnceAfterTheFirstPoll covers the readiness
+// hook (systemd READY=1): it follows the first poll whatever its outcome,
+// here a backend without a configuration, and never again.
+func TestLaraplateAttemptedIsCalledOnceAfterTheFirstPoll(t *testing.T) {
+	f := newLaraplateFixture(t)
+	var hook attempts
+	f.attempted = hook.hook
+	f.start(newFakeApplier())
+
+	waitTimers(t, f.clk, 1)
+	if got := hook.count(); got != 1 {
+		t.Fatalf("Attempted called %d times after the first poll, want 1", got)
+	}
+
+	f.pollAgain(2)
+	if got := hook.count(); got != 1 {
+		t.Fatalf("Attempted called %d times after a later poll, want 1", got)
 	}
 }
