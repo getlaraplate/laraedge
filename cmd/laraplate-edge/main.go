@@ -49,7 +49,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	case "run":
-		return runRun(args[1:], stderr)
+		return runRun(args[1:], stdout, stderr)
 	case "config":
 		return runConfig(args[1:], stdout, stderr)
 	case "status":
@@ -74,7 +74,9 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-func runRun(args []string, stderr io.Writer) int {
+// runRun runs the agent. Its logs go to stdout as JSON lines (spec 10.5); the
+// usage and the error that stops it go to stderr.
+func runRun(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("run", stderr)
 	bootstrap := fs.String("bootstrap", "", "path to the bootstrap file")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
@@ -91,7 +93,7 @@ func runRun(args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 	deps := productionDeps()
-	deps.logger = logging.New(stderr, level)
+	deps.logger = logging.New(stdout, level)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -100,7 +102,7 @@ func runRun(args []string, stderr io.Writer) int {
 	stopReload := notifyReload(reload)
 	defer stopReload()
 
-	if err := runAgent(ctx, *bootstrap, deps, reload, stderr); err != nil {
+	if err := runAgent(ctx, *bootstrap, deps, reload, stdout); err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge run: %v\n", err)
 		return exitFailure
 	}

@@ -1,12 +1,12 @@
 ---
-status: open
+status: closed
 created_on: 2026-10-16
 ---
 # laraplate-edge agent core. Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block. A step dropped on purpose is `- [-]` with its reason on the same line.
 
-**Status:** In progress (subagent-driven execution).
+**Status:** Closed (2026-10-19): delivered, see "Delivery status" at the end.
 
 **Goal:** a runnable `laraplate-edge` binary that reads the `simulated` driver, buffers on disk without losing confirmed data, and delivers `laraplate-machine/1` envelopes to Laraplate over HTTP, configured by a versioned document from a file or from the backend.
 
@@ -172,6 +172,107 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 
 **Files:** create `internal/e2e/e2e_test.go` (build tag `e2e`), `docs/USAGE.md`, `docs/CONFIGURATION.md`; modify `README.md`, this plan, `docs/superpowers/plans/INDEX.md`; stack root: the agent spec status line.
 
-- [ ] **Step 1: End to end.** The built binary runs the `simulated` example against a fake backend that validates every envelope against the backend schema: a network cut of 10 minutes (fake backend down) loses nothing and resends nothing as new; a `kill -9` mid-run and a restart lose no confirmed record; the configuration provider `laraplate` applies a new version and reports it. Optional real backend run, documented: a local Laraplate with a service account and the `mes-machine-agent` role.
-- [ ] **Step 2: Docs.** Build, run, bootstrap, configuration (fields of this build and what later plans add), buffer behaviour and limits, status endpoint and metrics, troubleshooting `401`/`403`/`413`/`422`.
-- [ ] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, index; stack spec status line; commit, bump the stack pointer.
+- [x] **Step 1: End to end.** The built binary runs the `simulated` example against a fake backend that validates every envelope against the backend schema: a network cut of 10 minutes (fake backend down) loses nothing and resends nothing as new; a `kill -9` mid-run and a restart lose no confirmed record; the configuration provider `laraplate` applies a new version and reports it. Optional real backend run, documented: a local Laraplate with a service account and the `mes-machine-agent` role.
+- [x] **Step 2: Docs.** Build, run, bootstrap, configuration (fields of this build and what later plans add), buffer behaviour and limits, status endpoint and metrics, troubleshooting `401`/`403`/`413`/`422`.
+- [x] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, index; stack spec status line; commit, bump the stack pointer.
+
+## Delivery status (2026-10-19): shipped
+
+All eleven tasks are built, each reviewed. The binary runs the `simulated` driver, buffers per output on
+disk with durable loss markers, seals batches and delivers them to the Laraplate ingest route over HTTP,
+applies versioned documents from the `file` or `laraplate` provider by difference with rollback, and
+exposes `/healthz`, `/readyz`, `/status` and `/metrics`, JSON logs on stdout and the systemd watchdog.
+The end-to-end test (`go test -tags e2e -race ./internal/e2e`) runs the built binary through a network
+cut, two `kill -9` with restarts and a configuration change served by the `laraplate` provider, against
+a fake backend validating every envelope with the backend schema. Rulings R1 to R51 were taken during
+the execution (the controller's ledger); the divergences from the plan text, each with its reason:
+
+- **Buffer interface (Task 4).** Loss markers are durable in the output directory: `AddLoss`,
+  `PendingLosses`, `AckLosses` and `SyncLosses` replace `TakeLosses`, so a crash between taking the
+  markers and saving the batch loses none (R1, R41). Added `MarkSealed`, so eviction does not count the
+  records of a sealed batch as lost (R21), `Head` for the split accounting (R38), `Changed`, so the
+  batcher waits without polling (R25), and `Options.DiskUsage` and `Options.Logger` (R12). Disk full on
+  write evicts and retries once, then drops with a marker (R22); under a free-disk floor breach with only
+  the active segments left, incoming records are dropped and their markers coalesce (R37 amended, R39);
+  a corrupt record inside an older segment drops the rest of that segment without a marker (R20).
+- **Envelope and batches (Tasks 2, 5).** `envelope.IDGenerator` (`NewIDGenerator(clock)`, `New()`)
+  instead of the free function `NewMessageID`: no global state (R16). `Build` refuses zero records, so a
+  marker rides only with a batch that has records (R15); non-finite floats are refused by the model
+  (R17); protocol string lengths are enforced by the configuration schema (R19). A batch carries its
+  entries, persisted in `inflight`, so a `413` split rebuilds two envelopes (R2); the batcher exposes
+  `Next`, `Confirm`, `Shrink` and `Drop`; `Inflight.Load` returns `(*Batch, nextSeq, error)`, with
+  `NextSeq` and `ClearRefused` (the batch after a drop reuses the refused seq, R24). A crash between
+  saving a batch and acknowledging its markers may report them twice: over-report, never silent (R40).
+- **HTTP output (Task 6).** `ClockOffset` is a method per output (R4); an `OnReconnect` hook sends the
+  births again after a backoff or a suspension (R5); any `2xx` confirms, `3xx` and other `4xx` back off
+  with an error log and never drop (R26); `Retry-After` is capped at 5 minutes and the clock warning
+  fires above 2 s (R27); a record whose envelope alone exceeds `max_body` is dropped with a
+  `rejected_invalid` marker (R23).
+- **Configuration (Task 7).** Two validation layers: the embedded schema describes the full spec format,
+  and `config.CheckBuild` refuses what this build lacks with "not available in this build" (R6, R30);
+  `version` optional and `int64` (R9, R43); point `type` (the spec 7.1 decoding types, which give the
+  birth data type) and `unit` (R3 revised), `death_tolerance` (R8), point `priority` defaulting to
+  `critical` (R14); id pattern, route patterns, batch and buffer keys (R29); `/` forbidden in device and
+  signal names, `min_free_percent` above 0, secret keys matched case-insensitively by suffix (R44).
+- **Pipeline, supervisor, providers (Task 8).** `Apply` returns an `Outcome` (`applied`, `rejected`,
+  `rolled_back`, with errors) and an error; the input start timeout is 30 s (R10). The input contract is
+  `Start` returning once running, `Close` and `Probe`; `Start` fails only on configuration or local
+  resource errors (R33, R47). The records of a restarting or failed output are held in memory up to
+  10,000, the overflow becoming markers (R46, R48, R49); input registrations are owned by an instance
+  token (R50). The `laraplate` provider persists its last attempt with its outcome and the undelivered
+  reports in `data_dir/config` (R32, R45).
+- **`simulated` (Task 9).** `simulated.Factory(baseDir)` is what the agent uses; the connection holds an
+  inline `scenario` or a `scenario_file` relative to the configuration file, and `seed` (R7, R34). The
+  counters start at 0, so the backend's baseline does not swallow the first part.
+- **Status and logs (Tasks 10, 11).** With a status token every path but `/healthz` needs the bearer;
+  metric names are prefixed `laraplate_edge_`; the `status` command reads `LARAPLATE_EDGE_STATUS_TOKEN`
+  (R35). Logs go to stdout, as spec 10.5 says; Task 10 had written them to stderr (R51, fixed in Task 11
+  with its test).
+- **Added from the spec (R36).** The HTTP client honours `HTTPS_PROXY`; outputs keep their last
+  confirmation and last error; `data_dir/format` is written at start and a newer one is refused. Shared
+  helpers `internal/docrules` (the URL rule, YAML errors without values) and `internal/atomicfile`.
+- **End to end (Task 11).** The 10-minute network cut is a cut of a few seconds spanning several backoff
+  steps (`503`, then dropped connections); the long outage is covered by the unit tests with the fake
+  clock (R13). The kill test kills twice: once with a batch held unanswered (resent and accepted), once
+  after the backend accepted a batch whose answer never left (resent and answered as a duplicate). The
+  test is Unix only, behind the `e2e` tag, and not run by CI; under `-race` it builds the agent with the
+  race detector too. The run against a real Laraplate is documented in `docs/USAGE.md`, not automated.
+- **Not built.** A custom CA bundle (spec 10.2) is not in this plan (R36): networks that inspect TLS
+  cannot use this build yet.
+
+**Follow-ups.**
+
+- Backend: replace the module's structural copy of the configuration schema
+  (`laraplate/Modules/MES/resources/edge/laraplate-edge-config-1.schema.json`) with this repository's
+  `schema/laraplate-edge-config-1.schema.json` (C2), in a `laraplate` plan.
+- The custom CA bundle (spec 10.2) and TLS on the status endpoint.
+- Run the end-to-end test in CI on Linux.
+- Deferred minor findings of the task reviews, for the final review:
+  - clock and CLI: the fake clock's tests poll with a real 1 ms sleep, `Advance` accepts a negative
+    duration, `PendingTimers` is exported for tests, `run --bootstrap x extra` gives a misleading
+    message, the help branch is untested;
+  - envelope: invalid UTF-8 strings are replaced silently by the JSON encoder, `EventRecord` copies its
+    signals shallowly, two UUID test names overstate;
+  - buffer: a frame corrupted after open wedges eviction and reads of its segment (incoming records are
+    then dropped with markers), `Ack` re-reads frames, the `Append` doc comment is stale, no test that a
+    lasting floor breach rotates the bulk active segment only once, the failed-retry path logs one error
+    per dropped record;
+  - batches and output: the `max_wait` timer starts when `Next` observes records, `Run` does not close
+    idle connections, the unchecked `http.DefaultTransport` assertion can panic, a base URL ending in a
+    bare `?` breaks the ingest path, a permanently failing `Drop` or `Shrink` retries forever without a
+    metric, a failing `Drop` on a one-record `413` is untested and the token-leak test checks only the
+    token's suffix;
+  - configuration: `config.go` is long and its messages sort lexicographically (`inputs.10` before
+    `inputs.2`), the `CheckBuild` doc comment wraps badly;
+  - supervisor and provider: an abandoned start goroutine may close an old instance while a rollback
+    restarts the same id, an older active document is downloaded at every poll if the backend misbehaves,
+    a crash between an `applied` apply and the state save loses that report, the emits of one input
+    serialize on its mutex and the lock order is not written down;
+  - `simulated`: an oversized `scenario_file` fails at `Start`, `emitAll` does not check the context,
+    two doc comments are stale;
+  - status: no negative self-test of the metrics validator, the bearer comparison leaks the token length
+    and is case-sensitive on `Bearer`, no `ReadTimeout`, the uptime counts from `Listen`, integer sample
+    values are not covered by the log scan, an answer above 4 MiB is reported by `status` as invalid
+    JSON.
+
+**Documented in:** `docs/USAGE.md`, `docs/CONFIGURATION.md` (and `README.md`).

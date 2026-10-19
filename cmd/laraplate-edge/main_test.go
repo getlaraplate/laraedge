@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -196,5 +198,47 @@ func TestConfigValidate(t *testing.T) {
 				t.Errorf("stderr echoes a value: %q", stderr.String())
 			}
 		})
+	}
+}
+
+// TestRunLogsToStdout checks that run writes its JSON logs to stdout (spec
+// 10.5) and only its own failure message to stderr. The status port is taken,
+// so the agent stops at start after logging.
+func TestRunLogsToStdout(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+
+	dir := t.TempDir()
+	bootstrapFile := filepath.Join(dir, "bootstrap.yaml")
+	boot := "agent_id: logs-01\n" +
+		"config: {provider: file, file: " + filepath.Join(dir, "agent.yaml") + "}\n" +
+		"data_dir: " + filepath.Join(dir, "data") + "\n" +
+		"status_listen: " + taken.Addr().String() + "\n"
+	if err := os.WriteFile(bootstrapFile, []byte(boot), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"run", "--bootstrap", bootstrapFile}, &stdout, &stderr)
+
+	if code != exitFailure {
+		t.Fatalf("exit code = %d, want %d (stderr: %q)", code, exitFailure, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "laraplate-edge run:") || !strings.Contains(stderr.String(), "status_listen") {
+		t.Errorf("stderr = %q, want the failure naming status_listen", stderr.String())
+	}
+	if strings.Contains(stderr.String(), `"level"`) {
+		t.Errorf("stderr = %q, want no log line", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"msg":"agent: stopped"`) {
+		t.Fatalf("stdout = %q, want the JSON log of the stop", stdout.String())
+	}
+	for line := range strings.Lines(stdout.String()) {
+		if !json.Valid([]byte(line)) {
+			t.Errorf("stdout line %q is not JSON", line)
+		}
 	}
 }

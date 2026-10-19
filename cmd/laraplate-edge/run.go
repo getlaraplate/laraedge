@@ -35,7 +35,8 @@ type agentDeps struct {
 	clock clock.Clock
 	// drivers replaces or adds to the built-in input drivers (tests).
 	drivers map[string]input.Factory
-	// logger receives the logs; nil means JSON on stderr at info.
+	// logger receives the logs; nil means JSON on the logs writer of
+	// runAgent at info.
 	logger *slog.Logger
 	// started, when set, receives the supervisor once it exists (tests).
 	started func(*supervisor.Supervisor)
@@ -64,8 +65,9 @@ func productionDeps() agentDeps {
 // provider's first attempt ended, WATCHDOG=1 while it runs, until it
 // returns, and STOPPING=1 when the shutdown starts. A status endpoint that
 // cannot start (a non-loopback status_listen without status_token, a port
-// in use) stops the agent at start.
-func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload <-chan struct{}, stderr io.Writer) (err error) {
+// in use) stops the agent at start. logs receives the JSON logs when
+// deps.logger is nil; run passes stdout (spec 10.5).
+func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload <-chan struct{}, logs io.Writer) (err error) {
 	boot, err := bootstrap.Load(bootstrapPath)
 	if err != nil {
 		return err
@@ -73,7 +75,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 
 	log := deps.logger
 	if log == nil {
-		log = logging.New(stderr, slog.LevelInfo)
+		log = logging.New(logs, slog.LevelInfo)
 	}
 
 	if err := prepareDataDir(boot.DataDir); err != nil {
