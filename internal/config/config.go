@@ -13,7 +13,6 @@ package config
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	stdpath "path"
 	"slices"
@@ -74,8 +73,10 @@ const (
 type Document struct {
 	// Schema is always SchemaName.
 	Schema string
-	// Version is the document version, 0 when absent.
-	Version int
+	// Version is the document version, 0 when absent. It is int64 so that
+	// every version the schema accepts (up to 2^53-1) fits on 32-bit
+	// platforms too.
+	Version int64
 	// Inputs read machines.
 	Inputs []Input
 	// Outputs send machine messages.
@@ -176,6 +177,8 @@ type Derived struct {
 	// Interval evaluates the expression at a fixed interval; zero means on
 	// every change of an input it uses.
 	Interval time.Duration
+	// Transforms is the transform chain applied to the result, in order.
+	Transforms []Transform
 }
 
 // Output is one output of the document.
@@ -200,7 +203,8 @@ type Output struct {
 
 // Route selects samples by device and signal.
 type Route struct {
-	// Include holds patterns matched with path.Match against device/signal.
+	// Include holds patterns matched with path.Match against device/signal
+	// (device and signal names hold no /, so the split is unambiguous).
 	// * alone matches everything; a pattern without / means pattern/*.
 	Include []string
 }
@@ -375,7 +379,7 @@ func applyDefaults(root map[string]any) {
 
 type wireDocument struct {
 	Schema  string `json:"schema"`
-	Version int    `json:"version"`
+	Version int64  `json:"version"`
 }
 
 type wireInput struct {
@@ -403,6 +407,7 @@ type wireInput struct {
 			On       struct {
 				Interval string `json:"interval"`
 			} `json:"on"`
+			Transforms []map[string]json.RawMessage `json:"transforms"`
 		} `json:"derived"`
 	} `json:"devices"`
 }
@@ -443,17 +448,22 @@ type builder struct {
 
 func (b *builder) add(p path, text string) { b.msgs = append(b.msgs, p.msg(text)) }
 
-// component renders one component and decodes it into dst.
+// component renders one component and decodes it into dst. The error is a
+// fixed text: the json error would quote a value of the document.
 func (b *builder) component(v any, dst any) (json.RawMessage, error) {
 	raw, err := canonical(v)
 	if err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(raw, dst); err != nil && !b.lenient {
-		return nil, fmt.Errorf("config: decode a validated component: %w", err)
+		return nil, errDecodeComponent
 	}
 	return raw, nil
 }
+
+// errDecodeComponent reports a validated component that does not fit its Go
+// type: a mismatch between the schema and the code, never a user error.
+var errDecodeComponent = errors.New("config: internal error: a validated component does not fit its Go type")
 
 func build(root map[string]any, lenient bool) (Document, []string, error) {
 	b := &builder{lenient: lenient}
@@ -524,15 +534,17 @@ func (b *builder) input(p path, v any) (Input, error) {
 				ByteOrder: wp.ByteOrder,
 				Unit:      wp.Unit,
 			}
-			for _, t := range wp.Transforms {
-				for name, params := range t {
-					pt.Transforms = append(pt.Transforms, Transform{Name: name, Params: params})
-				}
-			}
+			pt.Transforms = transforms(wp.Transforms)
 			dev.Points = append(dev.Points, pt)
 		}
 		for k, wdv := range wd.Derived {
-			derived := Derived{Signal: wdv.Signal, Type: wdv.Type, Priority: priority(wdv.Priority), Expr: wdv.Expr}
+			derived := Derived{
+				Signal:     wdv.Signal,
+				Type:       wdv.Type,
+				Priority:   priority(wdv.Priority),
+				Expr:       wdv.Expr,
+				Transforms: transforms(wdv.Transforms),
+			}
 			if wdv.On.Interval != "" {
 				derived.Interval = b.duration(dp.key("derived").index(k).key("on").key("interval"), wdv.On.Interval)
 			}
@@ -586,6 +598,17 @@ func (b *builder) output(p path, v any) (Output, error) {
 		}
 	}
 	return out, nil
+}
+
+// transforms converts a chain of single-key objects.
+func transforms(chain []map[string]json.RawMessage) []Transform {
+	var out []Transform
+	for _, step := range chain {
+		for name, params := range step {
+			out = append(out, Transform{Name: name, Params: params})
+		}
+	}
+	return out
 }
 
 func priority(s string) model.Priority {
@@ -702,8 +725,15 @@ func (b *builder) uniqueSignals(doc Document) {
 	}
 }
 
-// secretKeys are the connection keys holding secret references, at any depth.
-var secretKeys = map[string]bool{"password": true, "token": true, "secret": true}
+// secretKeySuffixes mark the connection keys holding secret references, at
+// any depth: a key equal to or ending with one of them, in any letter case.
+// The schema's connection patternProperties states the same rule.
+var secretKeySuffixes = []string{"password", "token", "secret", "api_key"}
+
+func isSecretKey(key string) bool {
+	lower := strings.ToLower(key)
+	return slices.ContainsFunc(secretKeySuffixes, func(suffix string) bool { return strings.HasSuffix(lower, suffix) })
+}
 
 // walkSecrets calls fn for every string held by a secret key in v, in key
 // order, with its path.
@@ -716,7 +746,7 @@ func walkSecrets(v any, p path, fn func(path, string)) {
 		}
 		slices.Sort(keys)
 		for _, k := range keys {
-			if s, ok := x[k].(string); ok && secretKeys[k] {
+			if s, ok := x[k].(string); ok && isSecretKey(k) {
 				fn(p.key(k), s)
 				continue
 			}

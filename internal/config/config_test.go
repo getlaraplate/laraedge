@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -327,6 +328,16 @@ func TestParseRefusals(t *testing.T) {
 		{"json number out of range", `{"schema": "laraplate-edge-config/1", "version": 1e400, "inputs": [], "outputs": []}`, []string{"version: number out of range"}},
 		{"json array document", `[]`, []string{"document: must be object"}},
 		{"invalid utf-8", "schema: \xff\n", []string{"document: is not valid UTF-8"}},
+		{"min_free_percent zero", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    buffer: {min_free_percent: 0}"), []string{"outputs.0.buffer.min_free_percent: must be greater than 0"}},
+		{"slash in device", edit(t, base, "device: press-07", "device: line/press-07"), []string{"inputs.0.devices.0.device: must not contain /"}},
+		{"slash in signal", edit(t, base, "signal: state", "signal: a/state"), []string{"inputs.0.devices.0.points.0.signal: must not contain /"}},
+		{"slash in derived signal", edit(t, base, "            read: subscribe\n", "            read: subscribe\n        derived: [{signal: a/b, type: int, expr: '1'}]\n"), []string{"inputs.0.devices.0.derived.0.signal: must not contain /"}},
+		{"plain capitalised password", edit(t, base, "scenario: s.json", "scenario: s.json\n      Password: plain"), []string{"inputs.0.connection.*: must be a secret:// reference"}},
+		{"plain api_token", edit(t, base, "scenario: s.json", "scenario: s.json\n      api_token: plain"), []string{"inputs.0.connection.api_token: must be a secret:// reference"}},
+		{"plain client_secret in a list", edit(t, base, "scenario: s.json", "scenario: s.json\n      oauth: [{client_secret: plain}]"), []string{"inputs.0.connection.oauth.0.client_secret: must be a secret:// reference"}},
+		{"plain api_key", edit(t, base, "scenario: s.json", "scenario: s.json\n      api_key: plain"), []string{"inputs.0.connection.api_key: must be a secret:// reference"}},
+		{"plain upper-case API_KEY deep", edit(t, base, "scenario: s.json", "scenario: s.json\n      a: {b: {API_KEY: plain}}"), []string{"inputs.0.connection.a.b.*: must be a secret:// reference"}},
+		{"derived transform unknown", edit(t, base, "            read: subscribe\n", "            read: subscribe\n        derived: [{signal: d, type: int, expr: '1', transforms: [{explode: 1}]}]\n"), []string{"inputs.0.devices.0.derived.0.transforms.0: unknown transform explode"}},
 		{"too large", base + "# " + strings.Repeat("x", config.MaxDocumentSize) + "\n", []string{"document: larger than 4 MiB"}},
 	}
 
@@ -364,6 +375,11 @@ func TestParseNeverEchoesValues(t *testing.T) {
 			"output token":           edit(t, base, "secret://env/TOKEN", secret),
 			"connection password":    edit(t, base, "scenario: s.json", "scenario: s.json\n      auth: {password: "+secret+"}"),
 			"connection deep secret": edit(t, base, "scenario: s.json", "scenario: s.json\n      a: {b: [{c: {secret: "+secret+"}}]}"),
+			"connection Password":    edit(t, base, "scenario: s.json", "scenario: s.json\n      Password: "+secret),
+			"connection api_token":   edit(t, base, "scenario: s.json", "scenario: s.json\n      api_token: "+secret),
+			"connection secret list": edit(t, base, "scenario: s.json", "scenario: s.json\n      oauth: [{client_secret: "+secret+"}]"),
+			"connection API_KEY":     edit(t, base, "scenario: s.json", "scenario: s.json\n      a: {API_KEY: "+secret+"}"),
+			"connection api_key":     edit(t, base, "scenario: s.json", "scenario: s.json\n      api_key: "+secret),
 			"malformed reference":    edit(t, base, "secret://env/TOKEN", "secret://vault/"+secret),
 			"env reference name":     edit(t, base, "secret://env/TOKEN", "secret://env/"+secret+"-x"),
 			"driver":                 edit(t, base, "driver: simulated", "driver: "+secret),
@@ -444,6 +460,8 @@ func TestCheckBuild(t *testing.T) {
 		{"keystore under an odd key", edit(t, base, "scenario: s.json", "scenario: s.json\n      Odd-Key: {token: 'secret://keystore/x'}"), []string{"inputs.0.connection.*.token: not available in this build"}},
 		{"transforms", edit(t, base, "read: subscribe", "read: subscribe\n            transforms: [{scale: 2}]"), []string{"inputs.0.devices.0.points.0.transforms: not available in this build"}},
 		{"empty transforms", edit(t, base, "read: subscribe", "read: subscribe\n            transforms: []"), nil},
+		{"keystore under a suffixed key", edit(t, base, "scenario: s.json", "scenario: s.json\n      Client_Secret: 'secret://keystore/x'\n      api_key: 'secret://keystore/y'"), []string{"inputs.0.connection.*: not available in this build", "inputs.0.connection.api_key: not available in this build"}},
+		{"derived with transforms", edit(t, base, "            read: subscribe\n", "            read: subscribe\n        derived: [{signal: d, type: int, expr: '1', transforms: [{deadband: 1}]}]\n"), []string{"inputs.0.devices.0.derived: not available in this build", "inputs.0.devices.0.derived.0.transforms: not available in this build"}},
 		{"derived", edit(t, base, "            read: subscribe\n", "            read: subscribe\n        derived: [{signal: d, type: int, expr: '1'}]\n"), []string{"inputs.0.devices.0.derived: not available in this build"}},
 		{"plugins", base + "plugins:\n  - {id: a, path: /a, sha256: x}\n  - {id: b, path: /b, sha256: y}\n", []string{"plugins.0: not available in this build", "plugins.1: not available in this build"}},
 	}
@@ -724,5 +742,45 @@ func TestParseReportsSchemaAndSemanticProblemsTogether(t *testing.T) {
 				t.Errorf("messages =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 		})
+	}
+}
+
+func TestParseConnectionSecretKeysAcceptReferences(t *testing.T) {
+	doc := mustParse(t, []byte(edit(t, base, "scenario: s.json",
+		"scenario: s.json\n      Password: secret://env/P\n      api_token: secret://file/etc/t\n      oauth: [{client_secret: secret://env/S}]\n      API_KEY: secret://env/K\n      token_url: https://idp.example.com/token\n      tokens: 3")))
+
+	want := `{"API_KEY":"secret://env/K","Password":"secret://env/P","api_token":"secret://file/etc/t","oauth":[{"client_secret":"secret://env/S"}],"scenario":"s.json","token_url":"https://idp.example.com/token","tokens":3}`
+	if got := string(doc.Inputs[0].Connection); got != want {
+		t.Errorf("connection = %s, want %s", got, want)
+	}
+}
+
+func TestParseDerivedTransforms(t *testing.T) {
+	doc := mustParse(t, []byte(edit(t, base, "            read: subscribe\n",
+		"            read: subscribe\n        derived: [{signal: d, type: int, expr: '1', transforms: [{deadband: 0.5}, {heartbeat: 10s}]}]\n")))
+
+	want := []config.Transform{{Name: "deadband", Params: json.RawMessage(`0.5`)}, {Name: "heartbeat", Params: json.RawMessage(`"10s"`)}}
+	if got := doc.Inputs[0].Devices[0].Derived[0].Transforms; !reflect.DeepEqual(got, want) {
+		t.Errorf("derived transforms = %+v, want %+v", got, want)
+	}
+}
+
+// TestParseVersionBeyond32Bits keeps versions above 2^31 valid on 32-bit
+// platforms (run with GOARCH=386 as well).
+func TestParseVersionBeyond32Bits(t *testing.T) {
+	for _, version := range []int64{3_000_000_000, 9_007_199_254_740_991} {
+		v := strconv.FormatInt(version, 10)
+		for _, data := range []string{
+			edit(t, base, "version: 3", "version: "+v),
+			`{"schema":"laraplate-edge-config/1","version":` + v + `,"inputs":[],"outputs":[]}`,
+		} {
+			doc, msgs, err := config.Parse([]byte(data))
+			if err != nil || len(msgs) != 0 {
+				t.Fatalf("Parse(version %s) = %q, %v", v, msgs, err)
+			}
+			if doc.Version != version {
+				t.Errorf("version = %d, want %d", doc.Version, version)
+			}
+		}
 	}
 }

@@ -54,18 +54,35 @@
       "type": "string",
       "pattern": "^https?://"
     },
+    "deviceName": {
+      "description": "A device name, used in messages and in routes (device/signal), so it holds no /.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^/]*$"
+    },
+    "signalName": {
+      "description": "A signal name, used in messages and in routes (device/signal), so it holds no /.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[^/]*$"
+    },
+    "transforms": {
+      "description": "A transform chain, applied in order.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/transform" }
+    },
     "priority": {
       "description": "The buffer priority class. Bulk records are evicted first when the buffer is full.",
       "enum": ["critical", "bulk"],
       "default": "critical"
     },
     "connection": {
-      "description": "Driver connection settings, not interpreted by the schema. Any key named password, token or secret, at any depth, must hold a secret reference.",
+      "description": "Driver connection settings, not interpreted by the schema. Any key equal to or ending with password, token, secret or api_key, in any letter case and at any depth, must hold a secret reference.",
       "type": "object",
-      "properties": {
-        "password": { "$ref": "#/$defs/secretRef" },
-        "token": { "$ref": "#/$defs/secretRef" },
-        "secret": { "$ref": "#/$defs/secretRef" }
+      "patternProperties": {
+        "([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii]_[Kk][Ee][Yy])$": { "$ref": "#/$defs/secretRef" }
       },
       "additionalProperties": { "$ref": "#/$defs/connectionValue" },
       "default": {}
@@ -99,7 +116,7 @@
       "required": ["device", "points"],
       "additionalProperties": false,
       "properties": {
-        "device": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "device": { "$ref": "#/$defs/deviceName" },
         "points": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/point" } },
         "derived": { "type": "array", "items": { "$ref": "#/$defs/derived" } }
       }
@@ -110,7 +127,7 @@
       "required": ["signal", "address", "read"],
       "additionalProperties": false,
       "properties": {
-        "signal": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "signal": { "$ref": "#/$defs/signalName" },
         "address": { "type": "string", "minLength": 1 },
         "read": { "$ref": "#/$defs/read" },
         "priority": { "$ref": "#/$defs/priority" },
@@ -120,7 +137,7 @@
         },
         "byte_order": { "enum": ["ABCD", "CDAB", "BADC", "DCBA"] },
         "unit": { "type": "string", "maxLength": 16 },
-        "transforms": { "type": "array", "items": { "$ref": "#/$defs/transform" } }
+        "transforms": { "$ref": "#/$defs/transforms" }
       }
     },
     "read": {
@@ -144,12 +161,12 @@
       }
     },
     "derived": {
-      "description": "A signal computed by a CEL expression over the device's other signals.",
+      "description": "A signal computed by a CEL expression over the device's other signals; level-1 transforms may follow the expression.",
       "type": "object",
       "required": ["signal", "type", "expr"],
       "additionalProperties": false,
       "properties": {
-        "signal": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "signal": { "$ref": "#/$defs/signalName" },
         "type": { "type": "string", "minLength": 1 },
         "priority": { "$ref": "#/$defs/priority" },
         "expr": { "type": "string", "minLength": 1 },
@@ -157,7 +174,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": { "interval": { "$ref": "#/$defs/duration" } }
-        }
+        },
+        "transforms": { "$ref": "#/$defs/transforms" }
       }
     },
     "output": {
@@ -208,7 +226,13 @@
           "additionalProperties": false,
           "properties": {
             "max_size": { "$ref": "#/$defs/size", "default": "1GiB" },
-            "min_free_percent": { "type": "number", "minimum": 0, "maximum": 50, "default": 5 },
+            "min_free_percent": {
+              "description": "The share of the disk kept free, above 0 (0 would mean the buffer default).",
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 50,
+              "default": 5
+            },
             "fsync_interval": { "$ref": "#/$defs/duration", "default": "200ms" }
           },
           "default": {}

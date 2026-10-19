@@ -400,13 +400,16 @@ func skipJSONSpace(data []byte, offset int, separators bool) int {
 	return offset
 }
 
+// errCanonical is a fixed text: the encoder's error could quote a value.
+var errCanonical = errors.New("config: internal error: the document has no canonical JSON form")
+
 // canonical renders v as compact JSON with sorted keys and no HTML escaping.
 func canonical(v any) (json.RawMessage, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		return nil, fmt.Errorf("config: canonical JSON: %w", err)
+		return nil, errCanonical
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

@@ -46,6 +46,8 @@ var defMessages = map[string]string{
 	"size":       "must be a size such as 512KiB, 16MiB or 1GiB",
 	"secretRef":  secretMessage,
 	"httpURL":    "must be an http or https URL",
+	"deviceName": "must not contain /",
+	"signalName": "must not contain /",
 }
 
 const secretMessage = "must be a secret:// reference (secret://env/NAME, secret://file/PATH or secret://keystore/NAME), not a plain value"
