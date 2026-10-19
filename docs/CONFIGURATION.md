@@ -97,13 +97,13 @@ The scenario (at most 1 MiB, unknown keys refused; see `examples/simulated/scena
 |---|---|---|---|
 | `id` | yes | | output id, also its buffer directory `data_dir/outputs/{id}` |
 | `type` | yes | | `laraplate-http` in this build. The schema also knows `laraplate-mqtt` and `plugin:<id>`. |
-| `url` | with `laraplate-http` | | Laraplate base URL: `https`, or `http` only for a loopback host; no user or password. The agent posts to `{url}/api/v1/insert/mes/machine-messages`; a query or fragment is ignored, but a URL ending in a bare `?` currently breaks the ingest path (a known defect): leave it out. |
+| `url` | with `laraplate-http` | | Laraplate base URL: `https`, or `http` only for a loopback host; no user or password. The agent posts to `{url}/api/v1/insert/mes/machine-messages`; a query or fragment is ignored. |
 | `token` | with `laraplate-http` | | `secret://` reference to the token of the source's service account |
 | `route.include` | no | `["*"]` | patterns matched against `device/signal` (Go `path.Match`: `*`, `?`, `[...]`). `*` alone matches everything; a pattern without `/` means `<pattern>/*`. A device's `birth` and `death` go to every output routing at least one of its signals, and the `birth` lists only those. |
 | `batch.max_samples` | no | `1000` | records per batch, 1 to 5000 (the backend default of `mes.machine.max_samples`) |
 | `batch.max_body` | no | `1024KiB` | bytes per request body, at most `1024KiB` (`mes.machine.max_body_kb`) |
 | `batch.max_wait` | no | `2s` | how long a batch waits to fill, from its first record |
-| `buffer.max_size` | no | `1GiB` | bytes both queues of the output may use on disk |
+| `buffer.max_size` | no | `1GiB` | bytes both queues of the output may use on disk, at least `32MiB` (two segments of 16 MiB) |
 | `buffer.min_free_percent` | no | `5` | share of the disk kept free, above 0 and at most 50 |
 | `buffer.fsync_interval` | no | `200ms` | group sync period of written records |
 
@@ -191,8 +191,11 @@ sent: it is dropped with a `rejected_invalid` marker.
 
 The records of the batch in flight are never counted as lost: the batch carries its own copy.
 
-**Loss markers.** Every drop leaves a loss marker `{priority, from_ts, to_ts, samples, reason}`, with
-`reason` `buffer_full` or `rejected_invalid`, kept in the output's `losses` file. Markers travel in the
+**Loss markers.** Every dropped sample leaves a loss marker `{priority, from_ts, to_ts, samples, reason}`,
+with `reason` `buffer_full` or `rejected_invalid`, kept in the output's `losses` file. Markers and
+`laraplate_edge_dropped_samples_total` count samples only: a device `birth` or `death` is not a sample, so
+a drop of events alone leaves no marker (the protocol wants `samples` of at least 1), and a lost `death` is
+logged at `WARN` with its device. Markers travel in the
 next batch that has records, in its `losses`, and are gone once that batch is confirmed; the backend
 records each one as a `data_dropped` incident, so a gap is always visible. A `413` split keeps them in
 the first half. A crash between sealing a batch and acknowledging its markers may report them twice:
@@ -207,19 +210,27 @@ is exact, but its `ts` range can span records that are still in the buffer.
 - A component left `failed` by a rollback is not retried until a new document is applied.
 - The records held in memory for a `failed` output are discarded at shutdown, with a warning giving
   their count and `ts` range per priority.
+- The records held in memory while a changed output reopens (at most 10,000) are lost without a loss
+  marker if the agent crashes before the reopened buffer takes them, for instance during a slow reopen
+  of a large buffer.
 - YAML flow style at the top level of a document is read as JSON and refused; use block style.
 - A `death` from one input marks the device dead for every input that reads it.
 - Connection keys spelled `apikey`, `api-key` or `apiKey` are not treated as secrets.
-- A corrupt record found inside an older segment when the buffer opens drops the rest of that segment
-  with an error log and `laraplate_edge_corrupt_records_total`, without a loss marker (the protocol has
-  no reason for it).
+- A corrupt record of the buffer, found when it opens (inside an older segment) or while it runs
+  (anywhere), drops the rest of that segment with an error log and
+  `laraplate_edge_corrupt_records_total`, without a loss marker (the protocol has no reason for it).
+  Sending goes on from the next segment. See the troubleshooting table in [USAGE.md](USAGE.md).
+- A loss marker the backend refuses, or pending markers larger than the backend's body limit, travel
+  again with every next batch (a refused batch hands its markers back), so every later batch is refused
+  and its records dropped as `rejected_invalid`, after a `413` has split it down to one record. It
+  needs a misconfigured backend (a stricter marker validation, a body limit below the agent's
+  `batch.max_body`): fix the backend, or lower `batch.max_body`.
 - A wrong `url` that answers `3xx` or `4xx` is retried with backoff forever rather than stopping.
 - The status endpoint is plain HTTP; its token is resolved once at start; `--log-level debug` logs
   sample values and does not expire; the watchdog ping is timer-driven and does not detect a stuck
-  component. See [USAGE.md](USAGE.md).
+  supervisor or component. See [USAGE.md](USAGE.md).
 - `laraplate_edge_buffer_oldest_unconfirmed_seconds` is the agent clock minus the record's device
   `ts`, so a device clock that drifts skews it.
 - Bootstrap changes other than credentials apply at the next restart. A `secret://env/` value is fixed
   when the process starts: rotating it needs a restart, while a `secret://file/` token rotates with a
   `SIGHUP`.
-- A base URL ending in a bare `?` breaks the output's ingest path.

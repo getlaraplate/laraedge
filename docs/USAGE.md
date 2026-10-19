@@ -184,8 +184,8 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_buffer_records` | gauge | `output`, `priority` | records not yet confirmed |
 | `laraplate_edge_buffer_bytes` | gauge | `output`, `priority` | bytes of the queue on disk |
 | `laraplate_edge_buffer_oldest_unconfirmed_seconds` | gauge | `output`, `priority` | age of the oldest unconfirmed record: agent clock minus the record's device `ts`, 0 when none |
-| `laraplate_edge_dropped_samples_total` | counter | `output`, `reason` | samples dropped with a loss marker since the buffer was opened (`buffer_full`, `rejected_invalid`) |
-| `laraplate_edge_corrupt_records_total` | counter | `output` | corrupt records found when the buffer was opened |
+| `laraplate_edge_dropped_samples_total` | counter | `output`, `reason` | samples dropped with a loss marker since the buffer was opened (`buffer_full`, `rejected_invalid`); a dropped device `birth` or `death` is not a sample and is not counted |
+| `laraplate_edge_corrupt_records_total` | counter | `output` | corrupt records found since the buffer was opened, at the opening or while it runs; each one dropped the rest of its segment |
 | `laraplate_edge_last_confirmation_timestamp_seconds` | gauge | `output` | Unix time of the last confirmed batch, 0 before any |
 | `laraplate_edge_output_state` | gauge | `output`, `state` | 1 for the current state among `sending`, `backoff`, `suspended_auth`, `failed` |
 | `laraplate_edge_clock_offset_seconds` | gauge | `output` | backend clock minus agent clock, from the `Date` header of the last response |
@@ -205,6 +205,11 @@ service manager to collect and rotate. `--log-level` takes `debug`, `info` (defa
 - `--log-level debug` adds the details of each batch and the backend's `422` answer, which may quote
   sample values. It never logs secrets. It does not expire by itself (the expiring `debug --for` is a
   later plan): set it back to `info` after the investigation.
+- On a disk that refuses every write the buffer logs its first failed write and its first dropped
+  record of each queue in full, then at most one summary a minute (`write and drop failures repeated
+  since the last report`, with `suppressed` and a count per `<queue>.<kind>`); after a quiet minute the
+  next failure is logged in full again. The router still logs each record the buffer refuses at
+  `WARN` ("router: cannot buffer a record", with the output, device and signal).
 
 ## Running under systemd
 
@@ -260,6 +265,23 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `INFO` "the backend has no active configuration for this agent" | `404`: nothing published for the source | publish a configuration on the source page in Laraplate |
 | `/readyz` `503` "input ... is failed" | an input could not start again during a rollback | see its `last_error`; it is retried only when a new document is applied |
 | start fails with `data_dir ... has format N, newer than this agent supports` | the data directory was written by a newer agent | run the newer agent; an older one never rewrites a newer layout |
+| `ERROR` "buffer: corrupt record inside a segment, dropped the rest of the segment" (or "... inside an evicted segment ..."), `corrupt_records` grows | a record of the output buffer failed its checksum or could not be read back: a disk fault, bit rot, a file changed by hand. It is found at start or while the agent runs. | nothing for the agent: it drops the rest of that segment (at most 16 MiB of that queue), counts it and keeps sending; the log line names the queue, the segment and the offset, never a value. The gap has no loss marker (the protocol has no reason for it), so the backend does not see it: check the disk (kernel log, SMART, file system). |
+| `WARN` "a device death was dropped; the backend will not see it" | a `death` was lost with a full buffer or a refused batch; a `birth` or `death` is not a sample, so no loss marker counts it | nothing: the next `death` or `birth` of the device sets its state again. Look at the drop that caused it. |
+
+**A corrupt state file.** The small state files of `data_dir` are written atomically, so a crash never
+leaves one half written; a disk fault or a hand edit can. An output whose state file does not load does
+not start: the document that starts it is `rolled_back` (at start nothing runs and `/readyz` answers
+`503`), with an error naming the output and the file. Stop the agent, move the file aside (keep it for
+the report), start again:
+
+| Error in the outcome or the log | File to move aside | What is lost |
+|---|---|---|
+| `outputs.N: output: parse inflight: ...`, `output: inflight ...` | `outputs/{id}/inflight` | `source_seq` restarts at 0 and the batch in flight is sealed again under a new `message_id`: if the backend had accepted it, its samples are stored twice. The backend raises no gap for a lower `source_seq`, and its gap check stays blind until the new numbering passes the old one. |
+| `outputs.N: buffer: parse losses: ...`, `buffer: losses ...` | `outputs/{id}/losses` | the pending loss markers: the backend never hears of those drops |
+| `outputs.N: buffer: parse acked: ...`, `buffer: acked has version ...` | `outputs/{id}/acked` | the confirmed positions: every record still in the queues is sent again under new message ids, so the samples already delivered are stored twice |
+| `outputs.N: buffer: critical queue: ... segment_size ...` (or `bulk`) | `outputs/{id}/critical/segment_size` (or `bulk/`) | nothing in this build: every queue was created with 16 MiB segments, the size written again |
+| `ERROR` "provider: cannot read the last valid configuration" with `config: ... last valid document ...` | `config/last-valid.json` | the offline start: the agent runs nothing until the provider brings a document (the `file` provider at once, `laraplate` at its first answer), which writes the file again |
+| `WARN` "provider: cannot read the provider state ..." with `laraplate-state.json is corrupt` | `config/laraplate-state.json` (optional: the agent already goes on without it and rewrites it at the next report) | the undelivered configuration reports and the last attempted version: a rejected or rolled back version may be attempted, and reported, once more |
 
 ## Running the end-to-end test
 
@@ -275,7 +297,8 @@ with restarts on the same `data_dir` (a batch held unanswered, and a batch accep
 left), and the `laraplate` provider applying version 1, then version 2, reporting both and polling with
 `304` afterwards. It checks that `source_seq` has no gap and is never reused, that every resend is
 byte-identical, that the simulated counters arrive as 0, 1, 2, ... with nothing lost or repeated, and
-that the four status endpoints answer. It is not part of `go test ./...`.
+that the four status endpoints answer. It is not part of `go test ./...`; CI runs it in its own job on
+Linux amd64.
 
 ## Running against a local Laraplate
 

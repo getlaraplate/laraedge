@@ -30,10 +30,14 @@ Commands: `run --bootstrap <path>`, `config validate <file>`, `status [--listen 
 Tests:
 
 ```bash
+gofmt -l .                              # must print nothing
 go vet ./...
 go test -race ./...
+GOARCH=386 go test ./...                # 32-bit, the stand-in for linux/armv7
 go test -tags e2e -race ./internal/e2e   # end to end with the built binary (Unix)
 ```
+
+CI runs all of them (the end-to-end test on Linux amd64).
 
 ## License
 

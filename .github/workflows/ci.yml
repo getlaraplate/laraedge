@@ -9,6 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  format:
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt -l
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -49,3 +66,32 @@ jobs:
           GOARM: "7"
           CGO_ENABLED: "0"
         run: go build ./...
+
+  # 32-bit stand-in for linux/armv7 (spec 10.1.1 tier 2): the unit tests run
+  # with 32-bit int and pointers on the amd64 runner.
+  test-386:
+    name: test (linux-386, 32-bit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        env:
+          GOARCH: "386"
+          CGO_ENABLED: "0"
+        run: go test ./...
+
+  e2e:
+    name: end-to-end (linux-amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet with the e2e tag
+        run: go vet -tags e2e ./...
+      - name: End-to-end test
+        run: go test -tags e2e -race ./internal/e2e

@@ -184,7 +184,7 @@ applies versioned documents from the `file` or `laraplate` provider by differenc
 exposes `/healthz`, `/readyz`, `/status` and `/metrics`, JSON logs on stdout and the systemd watchdog.
 The end-to-end test (`go test -tags e2e -race ./internal/e2e`) runs the built binary through a network
 cut, two `kill -9` with restarts and a configuration change served by the `laraplate` provider, against
-a fake backend validating every envelope with the backend schema. Rulings R1 to R51 were taken during
+a fake backend validating every envelope with the backend schema. Rulings R1 to R53 were taken during
 the execution (the controller's ledger); the divergences from the plan text, each with its reason:
 
 - **Buffer interface (Task 4).** Loss markers are durable in the output directory: `AddLoss`,
@@ -252,7 +252,6 @@ the execution (the controller's ledger); the divergences from the plan text, eac
   (`laraplate/Modules/MES/resources/edge/laraplate-edge-config-1.schema.json`) with this repository's
   `schema/laraplate-edge-config-1.schema.json` (C2), in a `laraplate` plan.
 - The custom CA bundle (spec 10.2) and TLS on the status endpoint.
-- Run the end-to-end test in CI on Linux.
 - Deferred minor findings of the task reviews, for the final review:
   - clock and CLI: the fake clock's tests poll with a real 1 ms sleep and keep a redundant `started`
     channel, `Advance` accepts a negative duration and its deadline sorting is not observable in a
@@ -287,5 +286,39 @@ the execution (the controller's ledger); the divergences from the plan text, eac
     and is case-sensitive on `Bearer`, no `ReadTimeout`, the uptime counts from `Listen`, integer sample
     values are not covered by the log scan, an answer above 4 MiB is reported by `status` as invalid
     JSON.
+
+**Final review (2026-10-19).** The whole-branch review found two important issues and a set of minor
+ones; ruling R53 set the scope of one fix wave, which fixed:
+
+- a record that turns corrupt after the buffer opened no longer stalls the output until a restart:
+  reads, acknowledgements and eviction apply ruling R20 at runtime (the rest of the segment is cut, in
+  memory and on disk, counted in `CorruptRecords`, logged at error without values) and sending goes on
+  from the next segment; a read from a position that is no record boundary stays a caller error;
+- a base URL ending in a bare `?` (or `#`) no longer breaks the ingest path;
+- the write and drop path of a refusing disk logs the first failure of each kind, then at most one
+  summary a minute on the buffer clock;
+- loss markers and `dropped_samples_total` count samples only, in the buffer (drops, eviction) and in
+  the batcher (`Drop`, `Shrink`, a record above `max_body`): a lost `death` is logged with its device,
+  a drop of events alone leaves no marker;
+- `buffer.max_size` has a minimum of `32MiB` (two segments), refused by the rules layer and described
+  in the schema;
+- the batcher waits on a cheap `Buffer.Records()` count instead of the full `Stats` on every append;
+- `agent_version` in a report is cut to the backend's 64 characters (and is never empty);
+- the `file` provider applies nothing when it starts under an already cancelled context (a `SIGTERM`
+  during `ApplyLastValid`);
+- the lock order (input instance, router, buffer; supervisor, buffer) is written in the doc comments;
+- CI gained a `gofmt -l` gate, a `GOARCH=386` unit test job (the 32-bit stand-in for armv7) and the
+  end-to-end job on Linux amd64;
+- the documentation gained the troubleshooting rows for a corrupt buffer record and for corrupt state
+  files, and the known limits below.
+
+What stays, by decision: the known limits now documented in `docs/CONFIGURATION.md` (a loss marker the
+backend refuses, or markers above the backend's body limit, make every later batch be dropped as
+`rejected_invalid`, a misconfiguration only; records held during a slow reopen are lost on a crash; the
+watchdog ping does not detect a stuck supervisor); the router still logs each record a full buffer
+refuses at `WARN` (a tested behaviour of Task 8), so the rate limit covers the buffer's own lines only;
+the backend raises `clock_skew` on the identical resend after an outage longer than 30 s, because
+`sent_at` is fixed when the batch is sealed: the fix belongs to the backend, in a `laraplate` plan; the
+performance and fsync cost measurements go to the soak test.
 
 **Documented in:** `docs/USAGE.md`, `docs/CONFIGURATION.md` (and `README.md`).
