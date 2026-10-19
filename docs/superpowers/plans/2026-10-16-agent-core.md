@@ -191,7 +191,8 @@ the execution (the controller's ledger); the divergences from the plan text, eac
   `PendingLosses`, `AckLosses` and `SyncLosses` replace `TakeLosses`, so a crash between taking the
   markers and saving the batch loses none (R1, R41). Added `MarkSealed`, so eviction does not count the
   records of a sealed batch as lost (R21), `Head` for the split accounting (R38), `Changed`, so the
-  batcher waits without polling (R25), and `Options.DiskUsage` and `Options.Logger` (R12). Disk full on
+  batcher waits without polling (R25), `Options.DiskUsage` (R12) and `Options.Logger` (a Task 4
+  implementer addition). Disk full on
   write evicts and retries once, then drops with a marker (R22); under a free-disk floor breach with only
   the active segments left, incoming records are dropped and their markers coalesce (R37 amended, R39);
   a corrupt record inside an older segment drops the rest of that segment without a marker (R20).
@@ -237,6 +238,11 @@ the execution (the controller's ledger); the divergences from the plan text, eac
   after the backend accepted a batch whose answer never left (resent and answered as a duplicate). The
   test is Unix only, behind the `e2e` tag, and not run by CI; under `-race` it builds the agent with the
   race detector too. The run against a real Laraplate is documented in `docs/USAGE.md`, not automated.
+- **Review Focus, the unset `secret://env/NAME`.** The wording "recovers on `SIGHUP` once the variable
+  exists" was proven only with an injected environment lookup (Tasks 3 and 8). It is not an operator
+  path: production resolves `secret://env/` through the process environment, which cannot change while
+  the agent runs, so an env token appears or rotates only with a restart (ruling R52). A
+  `secret://file/` token recovers or rotates on `SIGHUP`; `docs/USAGE.md` says so.
 - **Not built.** A custom CA bundle (spec 10.2) is not in this plan (R36): networks that inspect TLS
   cannot use this build yet.
 
@@ -248,26 +254,33 @@ the execution (the controller's ledger); the divergences from the plan text, eac
 - The custom CA bundle (spec 10.2) and TLS on the status endpoint.
 - Run the end-to-end test in CI on Linux.
 - Deferred minor findings of the task reviews, for the final review:
-  - clock and CLI: the fake clock's tests poll with a real 1 ms sleep, `Advance` accepts a negative
-    duration, `PendingTimers` is exported for tests, `run --bootstrap x extra` gives a misleading
-    message, the help branch is untested;
+  - clock and CLI: the fake clock's tests poll with a real 1 ms sleep and keep a redundant `started`
+    channel, `Advance` accepts a negative duration and its deadline sorting is not observable in a
+    test, `PendingTimers` is exported for tests, `run --bootstrap x extra` gives a misleading message,
+    the help branch is untested;
   - envelope: invalid UTF-8 strings are replaced silently by the JSON encoder, `EventRecord` copies its
-    signals shallowly, two UUID test names overstate;
+    signals shallowly, two UUID test names overstate, no test pins the exact +1 ms step;
+  - bootstrap and URL rule: `docrules.CheckURL` accepts a query, a fragment and a path (the output and
+    provider strip the query and fragment);
   - buffer: a frame corrupted after open wedges eviction and reads of its segment (incoming records are
     then dropped with markers), `Ack` re-reads frames, the `Append` doc comment is stale, no test that a
     lasting floor breach rotates the bulk active segment only once, the failed-retry path logs one error
     per dropped record;
-  - batches and output: the `max_wait` timer starts when `Next` observes records, `Run` does not close
+  - batches and output: the `max_wait` timer starts when `Next` observes records, the "not before
+    `max_wait`" check of its test is a weak select-default and `waitTimers` spins on `Gosched`, `Run`
+    does not close
     idle connections, the unchecked `http.DefaultTransport` assertion can panic, a base URL ending in a
     bare `?` breaks the ingest path, a permanently failing `Drop` or `Shrink` retries forever without a
-    metric, a failing `Drop` on a one-record `413` is untested and the token-leak test checks only the
-    token's suffix;
+    metric, a failing `Drop` on a one-record `413` is untested, the token-leak test checks only the
+    token's suffix, and the HTTP output's logger carries no `output` attribute of its own (each call
+    adds it);
   - configuration: `config.go` is long and its messages sort lexicographically (`inputs.10` before
     `inputs.2`), the `CheckBuild` doc comment wraps badly;
   - supervisor and provider: an abandoned start goroutine may close an old instance while a rollback
     restarts the same id, an older active document is downloaded at every poll if the backend misbehaves,
     a crash between an `applied` apply and the state save loses that report, the emits of one input
-    serialize on its mutex and the lock order is not written down;
+    serialize on its mutex and the lock order is not written down, the test `fakeApplier.entered`
+    channel is buffered for 64 entries only;
   - `simulated`: an oversized `scenario_file` fails at `Start`, `emitAll` does not check the context,
     two doc comments are stale;
   - status: no negative self-test of the metrics validator, the bearer comparison leaks the token length

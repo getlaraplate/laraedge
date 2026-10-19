@@ -97,7 +97,7 @@ The scenario (at most 1 MiB, unknown keys refused; see `examples/simulated/scena
 |---|---|---|---|
 | `id` | yes | | output id, also its buffer directory `data_dir/outputs/{id}` |
 | `type` | yes | | `laraplate-http` in this build. The schema also knows `laraplate-mqtt` and `plugin:<id>`. |
-| `url` | with `laraplate-http` | | Laraplate base URL: `https`, or `http` only for a loopback host; no user or password. The agent posts to `{url}/api/v1/insert/mes/machine-messages`; a query or fragment is ignored. |
+| `url` | with `laraplate-http` | | Laraplate base URL: `https`, or `http` only for a loopback host; no user or password. The agent posts to `{url}/api/v1/insert/mes/machine-messages`; a query or fragment is ignored, but a URL ending in a bare `?` currently breaks the ingest path (a known defect): leave it out. |
 | `token` | with `laraplate-http` | | `secret://` reference to the token of the source's service account |
 | `route.include` | no | `["*"]` | patterns matched against `device/signal` (Go `path.Match`: `*`, `?`, `[...]`). `*` alone matches everything; a pattern without `/` means `<pattern>/*`. A device's `birth` and `death` go to every output routing at least one of its signals, and the `birth` lists only those. |
 | `batch.max_samples` | no | `1000` | records per batch, 1 to 5000 (the backend default of `mes.machine.max_samples`) |
@@ -219,4 +219,7 @@ is exact, but its `ts` range can span records that are still in the buffer.
   component. See [USAGE.md](USAGE.md).
 - `laraplate_edge_buffer_oldest_unconfirmed_seconds` is the agent clock minus the record's device
   `ts`, so a device clock that drifts skews it.
-- Bootstrap changes other than credentials apply at the next restart.
+- Bootstrap changes other than credentials apply at the next restart. A `secret://env/` value is fixed
+  when the process starts: rotating it needs a restart, while a `secret://file/` token rotates with a
+  `SIGHUP`.
+- A base URL ending in a bare `?` breaks the output's ingest path.

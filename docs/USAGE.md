@@ -102,18 +102,26 @@ Secrets never appear as values, in the bootstrap file or in the configuration do
 | `secret://keystore/NAME` | the OS keystore: **not available in this build**, refused at validation |
 
 The output and provider tokens are resolved when they are used: at the first attempt, after a
-suspension, on `SIGHUP`, and, for the `laraplate` provider, at every poll. A rotated token therefore
-needs only a `SIGHUP` (see "Signals"). The status token is resolved once at start; rotating it needs a
-restart.
+suspension, on `SIGHUP`, and, for the `laraplate` provider, at every poll. What a new resolution can
+see depends on the kind:
+
+- `secret://file/...`: the file is read again each time, so a rotated token needs only a new file
+  content and a `SIGHUP` (see "Signals"), without a restart. Prefer it for tokens that rotate.
+- `secret://env/...`: the agent reads its own environment, which is fixed when the process starts; a
+  variable exported or changed afterwards is never seen. A new or rotated value needs a restart (for
+  systemd: change `Environment=` or the `EnvironmentFile=`, then restart the service).
+
+The status token is resolved once at start; rotating it needs a restart.
 
 ## Signals and lifecycle
 
 - **SIGTERM, SIGINT:** clean stop. The agent stops polling, stops the status endpoint, stops the
   inputs, then the outputs, and syncs and closes every buffer. Under systemd it sends `STOPPING=1`.
 - **SIGHUP:** reloads the bootstrap file. A file that no longer loads is reported and changes nothing.
-  Otherwise every output resolves its token again and leaves `suspended_auth` at once, and the `file`
-  provider rereads its document. Every other changed key (`agent_id`, `data_dir`, `status_listen`,
-  `status_token`, `config.*`) is logged at `warn` and applies at the next restart.
+  Otherwise every output resolves its token again and leaves `suspended_auth` at once (a
+  `secret://file/` token is read again; a `secret://env/` one keeps the value the process started
+  with), and the `file` provider rereads its document. Every other changed key (`agent_id`, `data_dir`, `status_listen`,
+  `status_token`, `config.*`) is logged at `WARN` and applies at the next restart.
 
 At start the agent creates `data_dir` if needed, applies the last valid configuration it kept (so it
 runs offline from its last document), then hands over to the provider.
@@ -189,7 +197,8 @@ buffer). Counters restart from 0 when the agent restarts.
 ## Logs
 
 One JSON object per line on stdout (`time`, `level`, `msg`, then attributes), for journald or the
-service manager to collect and rotate. Levels: `debug`, `info` (default), `warn`, `error`.
+service manager to collect and rotate. `--log-level` takes `debug`, `info` (default), `warn` or
+`error`; the JSON `level` field is written in upper case: `DEBUG`, `INFO`, `WARN`, `ERROR`.
 
 - At `info` and above the agent never logs a secret or a sample value. As a second line of defence any
   attribute whose key ends with `token`, `password`, `secret` or `api_key` is written as `[redacted]`.
@@ -238,17 +247,17 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 
 | Symptom | Meaning | What to do |
 |---|---|---|
-| output `suspended_auth`, `last_error` `HTTP 401: token refused` | the token is missing, invalid, expired or revoked | issue a new token on the service account's user page, update the secret, send `SIGHUP`. The agent keeps buffering and tries again every 5 minutes on its own. |
+| output `suspended_auth`, `last_error` `HTTP 401: token refused` | the token is missing, invalid, expired or revoked | issue a new token on the service account's user page and update the secret: with `secret://file/`, write the new token and send `SIGHUP`; with `secret://env/`, set the new value in the service environment and restart the agent. The agent keeps buffering and tries again every 5 minutes on its own. |
 | output `suspended_auth`, `last_error` `HTTP 403: token refused` | the backend API is off (Core `expose_api`), the account or token lacks the permission (role `mes-machine-agent`), the address is outside the token's `allowed_cidrs`, the account is linked to no source, the source is inactive, or it is not an HTTP `canonical` source | fix it in Laraplate, then `SIGHUP` or wait for the next 5-minute retry. Nothing is lost while suspended, until the buffer is full. |
-| output `suspended_auth`, `last_error` `token unavailable: ...` | the secret reference does not resolve (variable unset or empty, file missing or readable by others) | fix the secret, then `SIGHUP` |
-| `warn` "the backend refused the batch as too large; split" | `413`: the batch exceeds the backend's `mes.machine.max_samples` or `mes.machine.max_body_kb` | nothing: the agent splits the batch and the first half keeps its `source_seq`. Lower `batch.max_samples` or `batch.max_body` if it happens often. A single record that is still too large is dropped with a `rejected_invalid` loss marker. |
-| `warn` "the backend refused the batch as invalid; dropping it ..." | `422`: the envelope failed the backend's validation; the field paths are logged | a defect to report with the log line. The batch is dropped with a `rejected_invalid` loss marker, so the backend records the gap. `--log-level debug` logs the backend's answer. |
+| output `suspended_auth`, `last_error` `token unavailable: ...` | the secret reference does not resolve (variable unset or empty, file missing or readable by others) | a `secret://file/` token: fix the file, then `SIGHUP`. A `secret://env/` token: the variable must be set in the environment the agent starts with; set it and restart the agent (a `SIGHUP` cannot see it). |
+| `WARN` "the backend refused the batch as too large; split" | `413`: the batch exceeds the backend's `mes.machine.max_samples` or `mes.machine.max_body_kb` | nothing: the agent splits the batch and the first half keeps its `source_seq`. Lower `batch.max_samples` or `batch.max_body` if it happens often. A single record that is still too large is dropped with a `rejected_invalid` loss marker. |
+| `WARN` "the backend refused the batch as invalid; dropping it ..." | `422`: the envelope failed the backend's validation; the field paths are logged | a defect to report with the log line. The batch is dropped with a `rejected_invalid` loss marker, so the backend records the gap. `--log-level debug` logs the backend's answer. |
 | output `backoff`, `last_error` `HTTP 429` | rate limited (`mes.machine.rate_limit_per_minute`, 600 a minute per service account) | nothing, or raise the limit or `batch.max_samples`: the agent backs off, honouring `Retry-After` |
 | output `backoff`, `last_error` `HTTP 5xx` or `network error: ...` | the backend or the network is down | nothing: backoff from 1 second to 5 minutes with jitter, the batch is resent identical, the buffer holds the data |
-| `error` "unexpected backend response; check the output url ..." | a `3xx` or another `4xx`, often a wrong `url` or a proxy page | fix `url`; the agent retries with backoff and never drops data for it |
-| `warn` "the agent clock differs from the backend's; check NTP" | offset above 2 seconds | fix NTP on the gateway; `laraplate_edge_clock_offset_seconds` shows the offset |
-| `warn` "the backend refused the agent token or its permissions" (provider) | `401`/`403` on the configuration route | as for the output; the provider tries again at the next poll |
-| `info` "the backend has no active configuration for this agent" | `404`: nothing published for the source | publish a configuration on the source page in Laraplate |
+| `ERROR` "unexpected backend response; check the output url ..." | a `3xx` or another `4xx`, often a wrong `url` or a proxy page | fix `url`; the agent retries with backoff and never drops data for it |
+| `WARN` "the agent clock differs from the backend's; check NTP" | offset above 2 seconds | fix NTP on the gateway; `laraplate_edge_clock_offset_seconds` shows the offset |
+| `WARN` "the backend refused the agent token or its permissions" (provider) | `401`/`403` on the configuration route | as for the output; the provider tries again at the next poll |
+| `INFO` "the backend has no active configuration for this agent" | `404`: nothing published for the source | publish a configuration on the source page in Laraplate |
 | `/readyz` `503` "input ... is failed" | an input could not start again during a rollback | see its `last_error`; it is retried only when a new document is applied |
 | start fails with `data_dir ... has format N, newer than this agent supports` | the data directory was written by a newer agent | run the newer agent; an older one never rewrites a newer layout |
 
