@@ -7,6 +7,27 @@ measurement files, and delivers their samples to Laraplate over the `laraplate-m
 Status: design approved, nothing built yet. The design lives in the Laraplate stack:
 `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
+## Build and run
+
+Requires Go 1.27 or newer. The agent is one static binary (no CGO).
+
+```bash
+go build -o laraplate-edge ./cmd/laraplate-edge
+./laraplate-edge version
+```
+
+Set the reported version at build time with
+`-ldflags "-X github.com/swolley/laraplate-edge/internal/version.version=1.2.3"`.
+Commands: `run --bootstrap <path>`, `config validate <file>`, `status [--listen addr]`, `version`.
+Only `version` works yet; the others are wired by later tasks of the agent core plan.
+
+Tests:
+
+```bash
+go vet ./...
+go test -race ./...
+```
+
 ## License
 
 laraplate-edge is open-source software licensed under the [GNU AGPL v3](https://www.gnu.org/licenses/agpl-3.0.html).

@@ -6,7 +6,7 @@ created_on: 2026-10-16
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block. A step dropped on purpose is `- [-]` with its reason on the same line.
 
-**Status:** Open. No task started.
+**Status:** In progress (subagent-driven execution).
 
 **Goal:** a runnable `laraplate-edge` binary that reads the `simulated` driver, buffers on disk without losing confirmed data, and delivers `laraplate-machine/1` envelopes to Laraplate over HTTP, configured by a versioned document from a file or from the backend.
 
@@ -58,9 +58,9 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 **Interfaces:**
 - Produces: `clock.Clock` (`Now() time.Time`, `NewTimer(d time.Duration) clock.Timer`, `Sleep(ctx, d) error`), `clock.Real()`, `clock.NewFake(t time.Time) *clock.Fake` with `Advance(d)`; CLI subcommands `run --bootstrap <path>`, `config validate <file>`, `status [--listen addr]`, `version`; `version.String()` (set by `-ldflags`).
 
-- [ ] **Step 1: Failing tests.** `laraplate-edge version` prints the version; an unknown subcommand exits with code 2 and usage on stderr; the fake clock fires timers only on `Advance`.
-- [ ] **Step 2: Module and skeleton.** CI runs `go vet`, `go test -race ./...` and `govulncheck` on Linux amd64 and arm64 and Windows amd64, and a build on Linux armv7 (spec 10.1.1).
-- [ ] **Step 3: Run tests, commit, bump the stack pointer.**
+- [x] **Step 1: Failing tests.** `laraplate-edge version` prints the version; an unknown subcommand exits with code 2 and usage on stderr; the fake clock fires timers only on `Advance`.
+- [x] **Step 2: Module and skeleton.** CI runs `go vet`, `go test -race ./...` and `govulncheck` on Linux amd64 and arm64 and Windows amd64, and a build on Linux armv7 (spec 10.1.1).
+- [x] **Step 3: Run tests, commit, bump the stack pointer.**
 
 ### Task 2: Internal model and envelope
 
