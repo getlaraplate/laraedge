@@ -104,9 +104,9 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 - Consumes: `buffer.Buffer` (Task 4), `envelope.Build` and `NewMessageID` (Task 2).
 - Produces: `output.Batcher` with `Next(ctx) (*output.Batch, error)` (critical first, then bulk, up to `MaxSamples`, `MaxBody`, `MaxWait`); `output.Batch{MessageID string; Seq uint64; Body []byte; Positions map[model.Priority]buffer.Position; Losses []model.Loss}`; `output.Inflight` persisting the sealed batch and the next `source_seq` in `data_dir/outputs/{id}/inflight`, `Load() (*output.Batch, error)`, `Save(*output.Batch) error`, `Clear() error`.
 
-- [ ] **Step 1: Failing tests.** Batches respect the three limits and the priority order; a sealed batch survives a restart and is resent byte-identical; `source_seq` strictly grows across restarts (Review Focus: crash before `inflight` write).
-- [ ] **Step 2: Batcher and inflight.**
-- [ ] **Step 3: Run tests, commit.**
+- [x] **Step 1: Failing tests.** Batches respect the three limits and the priority order; a sealed batch survives a restart and is resent byte-identical; `source_seq` strictly grows across restarts (Review Focus: crash before `inflight` write).
+- [x] **Step 2: Batcher and inflight.**
+- [x] **Step 3: Run tests, commit.**
 
 ### Task 6: HTTP output
 
