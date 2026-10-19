@@ -116,9 +116,9 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 - Consumes: Batcher, Inflight (Task 5), `secrets.Resolver` (Task 3).
 - Produces: `output.HTTP` implementing `output.Output` (`Run(ctx) error`, `State() output.State`, `ReloadCredentials()`), states `Sending`, `Backoff`, `SuspendedAuth`; `output.ClockOffset() time.Duration` from the `Date` header.
 
-- [ ] **Step 1: Failing tests** against an `httptest` fake backend: `202` and `200 duplicate` advance and clear `inflight`; `401`/`403` suspend, retry after 5 minutes (fake clock), resume at once on `ReloadCredentials`; `413` splits and the first half reuses the refused `source_seq`; a one-sample `413` drops with a `rejected_invalid` loss (Review Focus); `422` drops and adds a `rejected_invalid` loss; `429` honours `Retry-After`; `5xx` and network errors back off from 1 s to 5 min with jitter; TLS verification cannot be disabled; the token never appears in logs.
-- [ ] **Step 2: Implementation.**
-- [ ] **Step 3: Run tests with `-race`, commit.**
+- [x] **Step 1: Failing tests** against an `httptest` fake backend: `202` and `200 duplicate` advance and clear `inflight`; `401`/`403` suspend, retry after 5 minutes (fake clock), resume at once on `ReloadCredentials`; `413` splits and the first half reuses the refused `source_seq`; a one-sample `413` drops with a `rejected_invalid` loss (Review Focus); `422` drops and adds a `rejected_invalid` loss; `429` honours `Retry-After`; `5xx` and network errors back off from 1 s to 5 min with jitter; TLS verification cannot be disabled; the token never appears in logs.
+- [x] **Step 2: Implementation.**
+- [x] **Step 3: Run tests with `-race`, commit.**
 
 ### Task 7: Configuration document
 
