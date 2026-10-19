@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/swolley/laraplate-edge/internal/clock"
 	"github.com/swolley/laraplate-edge/internal/config"
 	"github.com/swolley/laraplate-edge/internal/input"
+	"github.com/swolley/laraplate-edge/internal/input/simulated"
 	"github.com/swolley/laraplate-edge/internal/provider"
 	"github.com/swolley/laraplate-edge/internal/secrets"
 	"github.com/swolley/laraplate-edge/internal/supervisor"
@@ -26,7 +29,7 @@ type agentDeps struct {
 	lookupEnv func(string) (string, bool)
 	// clock drives every timer.
 	clock clock.Clock
-	// drivers is the input driver registry.
+	// drivers replaces or adds to the built-in input drivers (tests).
 	drivers map[string]input.Factory
 	// logger receives the logs; nil means JSON on stderr.
 	logger *slog.Logger
@@ -69,7 +72,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 	sup, err := supervisor.New(supervisor.Config{
 		DataDir:  boot.DataDir,
 		Store:    store,
-		Drivers:  deps.drivers,
+		Drivers:  inputDrivers(boot, deps.drivers),
 		Resolver: resolver,
 		Clock:    deps.clock,
 		Logger:   log,
@@ -104,6 +107,34 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 	wg.Wait()
 
 	return err
+}
+
+// inputDrivers returns the input driver registry: the built-in drivers, then
+// extra, which replaces a built-in of the same name. Drivers that read files
+// named in the configuration resolve relative paths against the directory of
+// the configuration file, which only the file provider has.
+func inputDrivers(boot bootstrap.File, extra map[string]input.Factory) map[string]input.Factory {
+	drivers := map[string]input.Factory{
+		config.DriverSimulated: simulated.Factory(configBaseDir(boot)),
+	}
+	maps.Copy(drivers, extra)
+
+	return drivers
+}
+
+// configBaseDir returns the directory of the configuration file of the file
+// provider, absolute, and "" for a provider that has no such file.
+func configBaseDir(boot bootstrap.File) string {
+	if boot.Config.Provider != bootstrap.ProviderFile {
+		return ""
+	}
+
+	file := boot.Config.File
+	if abs, err := filepath.Abs(file); err == nil {
+		file = abs
+	}
+
+	return filepath.Dir(file)
 }
 
 // newProvider builds the provider the bootstrap names and returns its Run.

@@ -11,6 +11,7 @@ coverage.*
 
 # Local runtime data (data_dir, bootstrap with secret references)
 /data/
+/examples/simulated/data/
 /bootstrap.local.yaml
 
 # Environment and secrets

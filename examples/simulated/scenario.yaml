@@ -1,0 +1,57 @@
+# Scenario of a simulated hydraulic press. Every device of the input that
+# references this file runs its own instance, seeded from the input's seed and
+# the device name, so a run is repeatable.
+#
+# Time advances in steps of `tick`. At each step the machine may leave its
+# state: each entry of `transitions` is the probability, per step, of going to
+# that state, and the remainder stays. A part completes while the machine is
+# in a producing state once its drawn cycle time has elapsed; the shortest
+# cycle is one tick.
+
+tick: 1s
+initial: idle
+
+states:
+  # Waiting for work: about 20 s on average, now and then a changeover.
+  - name: idle
+    transitions:
+      running: 0.05
+      setup: 0.005
+
+  # Producing: a stretch of about 8 minutes, rarely a fault.
+  - name: running
+    producing: true
+    transitions:
+      idle: 0.002
+      fault: 0.0005
+
+  # Changeover or tool change: about 2 minutes.
+  - name: setup
+    transitions:
+      running: 0.004
+      idle: 0.004
+
+  # Stopped by a fault: about 3 minutes until an operator clears it.
+  - name: fault
+    transitions:
+      idle: 0.005
+
+# One part every 12 s on average.
+cycle_time:
+  mean: 12s
+  stddev: 1.5s
+
+# Two parts in a hundred are scrap.
+scrap_rate: 0.02
+
+# Drawn once per completed part. The unit is informative: the unit a point
+# reports is the one its own configuration gives.
+measurements:
+  - signal: press_force
+    mean: 182
+    stddev: 3.5
+    unit: kN
+  - signal: die_temperature
+    mean: 78
+    stddev: 1.2
+    unit: C

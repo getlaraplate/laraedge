@@ -153,9 +153,9 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 - Consumes: `input.Input` (Task 8).
 - Produces: `simulated.New(cfg config.Input, clk clock.Clock, seed int64) (*simulated.Input, error)`; scenario: state machine with transition probabilities, cycle time, scrap rate, measurements with mean and standard deviation, per device.
 
-- [ ] **Step 1: Failing tests.** With a fixed seed and the fake clock the emitted sequence is identical across runs; states, `good_count`/`scrap_count` cumulative counters and measurements follow the scenario; `Probe` returns one sample per point; qualities are `good`.
-- [ ] **Step 2: Implementation and examples.**
-- [ ] **Step 3: Run tests, commit.**
+- [x] **Step 1: Failing tests.** With a fixed seed and the fake clock the emitted sequence is identical across runs; states, `good_count`/`scrap_count` cumulative counters and measurements follow the scenario; `Probe` returns one sample per point; qualities are `good`.
+- [x] **Step 2: Implementation and examples.**
+- [x] **Step 3: Run tests, commit.**
 
 ### Task 10: Status endpoint, logs, watchdog
 

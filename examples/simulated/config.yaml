@@ -1,0 +1,30 @@
+# Configuration document of the simulated demo: one simulated input with two
+# presses, sent to a Laraplate running on this machine. The scenario file is
+# resolved against the directory of this file. The token is read from the
+# environment of the agent: export LARAPLATE_EDGE_TOKEN before running it.
+
+schema: laraplate-edge-config/1
+version: 1
+
+inputs:
+  - id: press-line
+    driver: simulated
+    connection:
+      scenario_file: scenario.yaml
+      seed: 42
+    devices:
+      - device: press-07
+        points: &press_points
+          - {signal: state, address: state, type: string, read: subscribe, priority: critical}
+          - {signal: good_count, address: good_count, type: uint32, unit: pcs, read: subscribe, priority: critical}
+          - {signal: scrap_count, address: scrap_count, type: uint32, unit: pcs, read: subscribe, priority: critical}
+          - {signal: press_force, address: press_force, type: float64, unit: kN, read: subscribe, priority: bulk}
+          - {signal: die_temperature, address: die_temperature, type: float64, unit: C, read: subscribe, priority: bulk}
+      - device: press-08
+        points: *press_points
+
+outputs:
+  - id: laraplate
+    type: laraplate-http
+    url: http://127.0.0.1:8000
+    token: secret://env/LARAPLATE_EDGE_TOKEN
