@@ -1,0 +1,31 @@
+# The example of spec section 5.3 (docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md
+# at the stack root), verbatim.
+schema: laraplate-edge-config/1
+version: 42
+inputs:
+  - id: press-line
+    driver: opcua
+    connection:
+      endpoint: opc.tcp://10.0.5.20:4840
+      security_policy: Basic256Sha256
+      auth: { user: mes, password: secret://keystore/opcua-press }
+    devices:
+      - device: press-07
+        points:
+          - { signal: state, address: "ns=3;s=Machine.State", read: subscribe, priority: critical }
+          - { signal: good_count, address: "ns=3;s=Counters.Good", read: { poll: 1s } }
+          - { signal: temp_zone1, address: "ns=3;s=Zone1.Temp", read: { poll: 1s },
+              priority: bulk, transforms: [ { scale: 0.1 }, { deadband: 0.5 } ] }
+        derived:
+          - { signal: light_code, type: int, priority: critical,
+              expr: "(red ? 4 : 0) + (yellow ? 2 : 0) + (green ? 1 : 0)" }
+outputs:
+  - id: laraplate-main
+    type: laraplate-http
+    url: https://erp.example.com
+    token: secret://keystore/laraplate-main
+    route: { include: ["*"] }
+    batch: { max_samples: 1000, max_wait: 2s }
+    buffer: { max_size: 1GiB }
+plugins:
+  - { id: fanuc, path: /opt/laraplate-edge/plugins/fanuc-focas, sha256: "..." }

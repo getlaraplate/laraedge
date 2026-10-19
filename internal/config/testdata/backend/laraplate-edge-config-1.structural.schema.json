@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laraplate.dev/schemas/laraplate-edge-config-1.structural.schema.json",
+  "title": "laraplate-edge-config/1 document (structural copy kept by the MES module)",
+  "description": "The structure the backend checks before it publishes a configuration version: the top-level keys, the schema name, an integer version and the component lists, each item an object with a string id. Driver, output and plugin fields are not interpreted. Replaced by the schema laraplate-edge publishes once it exists.",
+  "type": "object",
+  "required": ["schema", "inputs", "outputs"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "laraplate-edge-config/1" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Written by the backend on publish: always the stored version number."
+    },
+    "inputs": { "$ref": "#/$defs/components" },
+    "outputs": { "$ref": "#/$defs/components" },
+    "plugins": { "$ref": "#/$defs/components" }
+  },
+  "$defs": {
+    "components": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/component" }
+    },
+    "component": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

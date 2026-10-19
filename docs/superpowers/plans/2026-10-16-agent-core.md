@@ -127,9 +127,9 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 **Interfaces:**
 - Produces: `config.Parse(data []byte) (config.Document, []string, error)` (JSON or YAML, validated against the embedded schema, errors as human messages); `config.Document` typed (`Version int`, `Inputs`, `Outputs`, `Plugins` with the spec fields used by this plan: input `id`, `driver`, `connection`, `devices[].device`, `points[]` with `signal`, `address`, `read`, `priority`; output `id`, `type` = `laraplate-http`, `url`, `token`, `route.include`, `batch`, `buffer`); `config.Store` in `data_dir` with `LastValid() (config.Document, bool, error)` and `SaveValid(config.Document) error`; `laraplate-edge config validate <file>` wired.
 
-- [ ] **Step 1: Failing tests.** The spec 5.3 example parses (minus transforms and derived, refused with "not available in this build" — C1); a plain value in a secret field (`token`, `password`) refused; `max_samples` above 5000 or `max_body` above 1024 KiB refused (the backend defaults `mes.machine.max_samples` and `mes.machine.max_body_kb`; an installation that raises them raises the agent's caps in a later change); an unknown driver or output type refused; YAML and JSON give the same document; every valid fixture of the backend structural schema validates here (C2); `config validate` exits 0 or 1 with the messages.
-- [ ] **Step 2: Schema, parser, store, command.**
-- [ ] **Step 3: Run tests, commit.**
+- [x] **Step 1: Failing tests.** The spec 5.3 example parses (minus transforms and derived, refused with "not available in this build" — C1); a plain value in a secret field (`token`, `password`) refused; `max_samples` above 5000 or `max_body` above 1024 KiB refused (the backend defaults `mes.machine.max_samples` and `mes.machine.max_body_kb`; an installation that raises them raises the agent's caps in a later change); an unknown driver or output type refused; YAML and JSON give the same document; every valid fixture of the backend structural schema validates here (C2); `config validate` exits 0 or 1 with the messages.
+- [x] **Step 2: Schema, parser, store, command.**
+- [x] **Step 3: Run tests, commit.**
 
 ### Task 8: Pipeline, supervisor, providers
 

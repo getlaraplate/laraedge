@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/swolley/laraplate-edge/internal/clock"
+	"github.com/swolley/laraplate-edge/internal/docrules"
 	"github.com/swolley/laraplate-edge/internal/model"
 	"github.com/swolley/laraplate-edge/internal/secrets"
 	"github.com/swolley/laraplate-edge/internal/version"
@@ -213,37 +213,18 @@ func NewHTTP(cfg HTTPConfig) (*HTTP, error) {
 
 // ingestEndpoint validates the base URL and returns the ingest route below it.
 func ingestEndpoint(raw string) (string, error) {
+	if err := docrules.CheckURL(raw); err != nil {
+		return "", err
+	}
+
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.Hostname() == "" {
+	if err != nil {
 		return "", errors.New("must be an absolute URL such as https://mes.example.com")
-	}
-
-	if u.User != nil {
-		return "", errors.New("must not contain credentials")
-	}
-
-	switch {
-	case u.Scheme == "https":
-	case u.Scheme == "http" && isLoopbackHost(u.Hostname()):
-	case u.Scheme == "http":
-		return "", errors.New("must use https (http is accepted only for a loopback host)")
-	default:
-		return "", errors.New("must use https")
 	}
 
 	u.RawQuery, u.Fragment = "", ""
 
 	return strings.TrimRight(u.String(), "/") + ingestPath, nil
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-
-	ip := net.ParseIP(host)
-
-	return ip != nil && ip.IsLoopback()
 }
 
 // httpClient returns the client to use: a copy of c that never follows

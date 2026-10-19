@@ -1,0 +1,47 @@
+{
+  "schema": "laraplate-edge-config/1",
+  "version": 3,
+  "inputs": [
+    {
+      "id": "sim-line",
+      "driver": "simulated",
+      "connection": {
+        "seed": 7,
+        "scenario": "scenarios/press.json",
+        "auth": { "token": "secret://env/SIM_TOKEN" }
+      },
+      "death_tolerance": "45s",
+      "devices": [
+        {
+          "device": "press-07",
+          "points": [
+            { "signal": "state", "address": "state", "read": "subscribe", "type": "int16" },
+            {
+              "signal": "good_count", "address": "counters.good", "read": { "poll": "500ms" },
+              "type": "uint32", "byte_order": "CDAB", "unit": "pcs"
+            },
+            { "signal": "door_open", "address": "door", "read": "event", "priority": "bulk", "type": "bool" }
+          ]
+        },
+        {
+          "device": "oven-02",
+          "points": [
+            { "signal": "temp", "address": "oven.temp", "read": { "poll": "1m30s" }, "type": "float32", "unit": "°C" }
+          ]
+        }
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "id": "laraplate-main",
+      "type": "laraplate-http",
+      "url": "https://erp.example.com/",
+      "token": "secret://file/etc/laraplate-edge/token",
+      "route": { "include": ["press-*", "oven-02/temp"] },
+      "batch": { "max_samples": 500, "max_body": "512KiB", "max_wait": "1.5s" },
+      "buffer": { "max_size": "256MiB", "min_free_percent": 2.50, "fsync_interval": "1s" }
+    },
+    { "id": "local-dev", "type": "laraplate-http", "url": "http://127.0.0.1:8000", "token": "secret://env/LOCAL_TOKEN" }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "laraplate-edge-config/1",
+  "inputs": [
+    {
+      "id": "press-line",
+      "driver": "opcua",
+      "connection": {
+        "endpoint": "opc.tcp://10.0.5.20:4840"
+      },
+      "devices": [
+        {
+          "device": "press-07",
+          "points": [
+            {
+              "signal": "state",
+              "address": "ns=3;s=Machine.State",
+              "read": "subscribe"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "id": "laraplate-main",
+      "type": "laraplate-http",
+      "url": "https://erp.example.com",
+      "token": "secret://keystore/laraplate-main"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/swolley/laraplate-edge/internal/config"
 	"github.com/swolley/laraplate-edge/internal/version"
 )
 
@@ -46,7 +47,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "run":
 		return runRun(args[1:], stderr)
 	case "config":
-		return runConfig(args[1:], stderr)
+		return runConfig(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stderr)
 	case "help", "-h", "--help":
@@ -83,13 +84,56 @@ func runRun(args []string, stderr io.Writer) int {
 	return notImplemented(stderr, "run")
 }
 
-func runConfig(args []string, stderr io.Writer) int {
+// runConfig runs "config validate <file>": both validation layers, every
+// message on stderr prefixed by the file name, exit 0 when there is none.
+func runConfig(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 2 || args[0] != "validate" {
 		fmt.Fprint(stderr, usageText)
 		return exitUsage
 	}
 
-	return notImplemented(stderr, "config validate")
+	file := args[1]
+	data, err := readDocument(file)
+	if err != nil {
+		fmt.Fprintf(stderr, "laraplate-edge config validate: %v\n", err)
+		return exitFailure
+	}
+
+	doc, msgs, err := config.Parse(data)
+	if err != nil {
+		fmt.Fprintf(stderr, "laraplate-edge config validate: %v\n", err)
+		return exitFailure
+	}
+	if len(msgs) == 0 {
+		msgs = config.CheckBuild(doc)
+	}
+	if len(msgs) > 0 {
+		for _, m := range msgs {
+			fmt.Fprintf(stderr, "%s: %s\n", file, m)
+		}
+		return exitFailure
+	}
+
+	fmt.Fprintf(stdout, "%s: valid\n", file)
+
+	return exitOK
+}
+
+// readDocument reads at most one byte more than config.MaxDocumentSize, so
+// Parse reports an oversized file without reading all of it.
+func readDocument(file string) ([]byte, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, config.MaxDocumentSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", file, err)
+	}
+
+	return data, nil
 }
 
 func runStatus(args []string, stderr io.Writer) int {

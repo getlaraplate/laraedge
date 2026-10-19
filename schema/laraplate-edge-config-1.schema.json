@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laraplate.dev/schemas/laraplate-edge-config-1.schema.json",
+  "title": "laraplate-edge-config/1",
+  "description": "The configuration document of the laraplate-edge agent: inputs reading machines, outputs sending laraplate-machine/1 messages, and plugins. Secrets appear only as secret:// references. Published by laraplate-edge; this schema describes the full format, and a build may still refuse parts it does not provide (reported as \"not available in this build\").",
+  "type": "object",
+  "required": ["schema", "inputs", "outputs"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "laraplate-edge-config/1" },
+    "version": {
+      "description": "Increases with every published document; a document older than the applied one is refused. Absent counts as 0.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "inputs": { "type": "array", "items": { "$ref": "#/$defs/input" } },
+    "outputs": { "type": "array", "items": { "$ref": "#/$defs/output" } },
+    "plugins": { "type": "array", "items": { "$ref": "#/$defs/plugin" } }
+  },
+  "$defs": {
+    "id": {
+      "description": "Component id, unique within its list. An output id names a buffer directory.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "duration": {
+      "description": "A positive duration such as 500ms, 2s, 1m or 1h30m.",
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"
+    },
+    "size": {
+      "description": "A size in bytes with a binary unit, such as 512KiB, 16MiB or 1GiB.",
+      "type": "string",
+      "pattern": "^[0-9]+(B|KiB|MiB|GiB)$"
+    },
+    "secretRef": {
+      "description": "A secret reference: secret://env/NAME, secret://file/PATH or secret://keystore/NAME. A plain value is refused.",
+      "type": "string",
+      "pattern": "^secret://(env/[A-Za-z_][A-Za-z0-9_]*|file/.+|keystore/.+)$"
+    },
+    "driver": {
+      "description": "A built-in driver or a plugin-provided one written plugin:<plugin id>.",
+      "type": "string",
+      "pattern": "^(opcua|modbus|mqtt|serial|file|simulated|plugin:[a-z0-9][a-z0-9._-]{0,63})$"
+    },
+    "outputType": {
+      "description": "A built-in output type or a plugin-provided one written plugin:<plugin id>.",
+      "type": "string",
+      "pattern": "^(laraplate-http|laraplate-mqtt|plugin:[a-z0-9][a-z0-9._-]{0,63})$"
+    },
+    "httpURL": {
+      "description": "The Laraplate base URL: https, or http for a loopback host only.",
+      "type": "string",
+      "pattern": "^https?://"
+    },
+    "priority": {
+      "description": "The buffer priority class. Bulk records are evicted first when the buffer is full.",
+      "enum": ["critical", "bulk"],
+      "default": "critical"
+    },
+    "connection": {
+      "description": "Driver connection settings, not interpreted by the schema. Any key named password, token or secret, at any depth, must hold a secret reference.",
+      "type": "object",
+      "properties": {
+        "password": { "$ref": "#/$defs/secretRef" },
+        "token": { "$ref": "#/$defs/secretRef" },
+        "secret": { "$ref": "#/$defs/secretRef" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/connectionValue" },
+      "default": {}
+    },
+    "connectionValue": {
+      "if": { "type": "object" },
+      "then": { "$ref": "#/$defs/connection" },
+      "else": {
+        "if": { "type": "array" },
+        "then": { "items": { "$ref": "#/$defs/connectionValue" } }
+      }
+    },
+    "input": {
+      "type": "object",
+      "required": ["id", "driver", "devices"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "driver": { "$ref": "#/$defs/driver" },
+        "connection": { "$ref": "#/$defs/connection" },
+        "death_tolerance": {
+          "description": "How long without a successful read before the input reports its devices dead.",
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "devices": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/device" } }
+      }
+    },
+    "device": {
+      "type": "object",
+      "required": ["device", "points"],
+      "additionalProperties": false,
+      "properties": {
+        "device": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "points": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/point" } },
+        "derived": { "type": "array", "items": { "$ref": "#/$defs/derived" } }
+      }
+    },
+    "point": {
+      "description": "One signal read from the machine. The pair (device, signal) is unique across all inputs.",
+      "type": "object",
+      "required": ["signal", "address", "read"],
+      "additionalProperties": false,
+      "properties": {
+        "signal": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "address": { "type": "string", "minLength": 1 },
+        "read": { "$ref": "#/$defs/read" },
+        "priority": { "$ref": "#/$defs/priority" },
+        "type": {
+          "description": "The decoding type of the address. bool gives a boolean signal, string a string signal, every other type (and none) a number.",
+          "enum": ["bool", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "string"]
+        },
+        "byte_order": { "enum": ["ABCD", "CDAB", "BADC", "DCBA"] },
+        "unit": { "type": "string", "maxLength": 16 },
+        "transforms": { "type": "array", "items": { "$ref": "#/$defs/transform" } }
+      }
+    },
+    "read": {
+      "description": "subscribe, event, or a polling interval.",
+      "if": { "type": "string" },
+      "then": { "enum": ["subscribe", "event"] },
+      "else": {
+        "type": "object",
+        "required": ["poll"],
+        "additionalProperties": false,
+        "properties": { "poll": { "$ref": "#/$defs/duration" } }
+      }
+    },
+    "transform": {
+      "description": "One step of the transform chain: an object with a single key naming a transform of the catalogue; its parameters are not interpreted by the schema.",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "propertyNames": {
+        "enum": ["scale", "offset", "round", "bit", "bcd", "map", "valid_range", "deadband", "heartbeat", "min_interval", "debounce", "edge_counter", "derivative", "trim", "regex_extract"]
+      }
+    },
+    "derived": {
+      "description": "A signal computed by a CEL expression over the device's other signals.",
+      "type": "object",
+      "required": ["signal", "type", "expr"],
+      "additionalProperties": false,
+      "properties": {
+        "signal": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "type": { "type": "string", "minLength": 1 },
+        "priority": { "$ref": "#/$defs/priority" },
+        "expr": { "type": "string", "minLength": 1 },
+        "on": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "interval": { "$ref": "#/$defs/duration" } }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["id", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "$ref": "#/$defs/outputType" },
+        "url": { "description": "Where the output sends; its form depends on the output type.", "type": "string", "minLength": 1 },
+        "token": { "$ref": "#/$defs/secretRef" },
+        "route": {
+          "description": "Which samples the output receives: patterns matched against device/signal; * alone matches everything and a pattern without / means device/*.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "include": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 },
+              "default": ["*"]
+            }
+          },
+          "default": { "include": ["*"] }
+        },
+        "batch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_samples": {
+              "description": "At most the backend's mes.machine.max_samples.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 1000
+            },
+            "max_body": {
+              "description": "At most 1024KiB, the backend's mes.machine.max_body_kb.",
+              "$ref": "#/$defs/size",
+              "default": "1024KiB"
+            },
+            "max_wait": { "$ref": "#/$defs/duration", "default": "2s" }
+          },
+          "default": {}
+        },
+        "buffer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_size": { "$ref": "#/$defs/size", "default": "1GiB" },
+            "min_free_percent": { "type": "number", "minimum": 0, "maximum": 50, "default": 5 },
+            "fsync_interval": { "$ref": "#/$defs/duration", "default": "200ms" }
+          },
+          "default": {}
+        }
+      },
+      "if": { "properties": { "type": { "const": "laraplate-http" } }, "required": ["type"] },
+      "then": {
+        "required": ["url", "token"],
+        "properties": { "url": { "$ref": "#/$defs/httpURL" } }
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "required": ["id", "path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

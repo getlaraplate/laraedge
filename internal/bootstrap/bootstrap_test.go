@@ -6,8 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"go.yaml.in/yaml/v3"
 )
 
 const (
@@ -222,70 +220,5 @@ func TestDefaultDataDir(t *testing.T) {
 				t.Errorf("DefaultDataDir = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestDescribeTypeErrorNeverEchoesUnrecognisedEntries(t *testing.T) {
-	tests := []struct {
-		entry string
-		want  string
-	}{
-		{"line 3: cannot unmarshal !!str `plain-t` into int", "line 3: cannot unmarshal !!str into int"},
-		{"line 3: cannot unmarshal !!str `a into b` into int", "line 3: cannot unmarshal !!str into int"},
-		{`line 4: mapping key "agent_id" already defined at line 2`, "line 4: duplicate key agent_id"},
-		{`line 4: mapping key "Plain-Token" already defined at line 2`, "line 4: duplicate key"},
-		{"line 5: field Plain-Token not found in type bootstrap.File", "line 5: unknown key"},
-		{"line 5: field extra not found in type bootstrap.Config", "line 5: unknown key extra in bootstrap.Config"},
-		{"line 6: field Plain-Token already set in type bootstrap.File", "line 6: duplicate key"},
-		{"line 7: Plain-Token something new", "line 7: invalid YAML"},
-		{"Plain-Token without a line", "invalid YAML"},
-	}
-	for _, tt := range tests {
-		if got := describeTypeError(tt.entry); got != tt.want {
-			t.Errorf("describeTypeError(%q) = %q, want %q", tt.entry, got, tt.want)
-		}
-	}
-}
-
-func TestDescribeDecodeErrorNeverEchoesPlainYAMLErrors(t *testing.T) {
-	tests := []struct {
-		name string
-		doc  string
-		want string
-	}{
-		{name: "unknown alias", doc: "a: *" + plainToken + "\n", want: "unknown alias"},
-		{name: "self-referencing anchor", doc: "a: &" + plainToken + " [*" + plainToken + "]\n", want: "recursive anchor"},
-		{name: "invalid map key", doc: "? [" + plainToken + "]\n: x\n", want: "invalid map key"},
-		{name: "explicit tag", doc: "a: !!int " + plainToken + "\n", want: "value does not match its explicit tag"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var v any
-			err := yaml.Unmarshal([]byte(tt.doc), &v)
-			if err == nil {
-				t.Fatal("yaml accepted the document; the test no longer reproduces the library error")
-			}
-			if !strings.Contains(err.Error(), plainToken) {
-				t.Fatalf("library error %q no longer echoes the document; revisit describeDecodeError", err)
-			}
-			got := describeDecodeError(err)
-			if got != tt.want {
-				t.Errorf("describeDecodeError = %q, want %q", got, tt.want)
-			}
-			if strings.Contains(got, plainToken) || strings.Contains(got, plainToken[:7]) {
-				t.Errorf("message echoes document text: %q", got)
-			}
-		})
-	}
-}
-
-func TestDescribeDecodeErrorKeepsConstantSyntaxErrors(t *testing.T) {
-	var v any
-	err := yaml.Unmarshal([]byte("a: [unclosed\n"), &v)
-	if err == nil {
-		t.Fatal("yaml accepted the document")
-	}
-	if got := describeDecodeError(err); got != err.Error() {
-		t.Errorf("describeDecodeError = %q, want %q", got, err.Error())
 	}
 }

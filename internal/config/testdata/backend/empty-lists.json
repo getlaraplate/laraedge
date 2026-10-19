@@ -1,0 +1,12 @@
+{
+  "schema": "laraplate-edge-config/1",
+  "inputs": [],
+  "outputs": [],
+  "plugins": [
+    {
+      "id": "fanuc",
+      "path": "/opt/laraplate-edge/plugins/fanuc-focas",
+      "sha256": "abc"
+    }
+  ]
+}
