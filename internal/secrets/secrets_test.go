@@ -59,7 +59,7 @@ func TestCheck(t *testing.T) {
 		{name: "env underscore start", ref: "secret://env/_X1"},
 		{name: "file", ref: "secret://file/etc/laraplate-edge/token"},
 		{name: "keystore is unavailable", ref: "secret://keystore/token", wantErr: "not available in this build", unavailable: true},
-		{name: "not a reference", ref: "plain", wantErr: "not a secret reference"},
+		{name: "not a reference", ref: "plain-" + sentinel, wantErr: "not a secret:// reference"},
 		{name: "unknown kind", ref: "secret://vault/token", wantErr: "unknown secret kind"},
 		{name: "no kind", ref: "secret://", wantErr: "unknown secret kind"},
 		{name: "env bad name digit first", ref: "secret://env/1ABC", wantErr: "invalid environment variable name"},
@@ -82,6 +82,9 @@ func TestCheck(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error %q does not contain %q", err, tt.wantErr)
+			}
+			if strings.Contains(tt.ref, sentinel) && strings.Contains(err.Error(), sentinel) {
+				t.Errorf("error echoes the input: %q", err)
 			}
 			if errors.Is(err, ErrUnavailable) != tt.unavailable {
 				t.Errorf("errors.Is(err, ErrUnavailable) = %v, want %v", !tt.unavailable, tt.unavailable)
@@ -269,9 +272,14 @@ func TestResolveKeystoreIsUnavailable(t *testing.T) {
 
 func TestResolveInvalidReferences(t *testing.T) {
 	r := NewResolver()
-	for _, ref := range []string{"plain", "secret://vault/x", "secret://env/9X", "secret://file/"} {
-		if got, err := r.Resolve(context.Background(), ref); err == nil {
+	for _, ref := range []string{"plain-" + sentinel, "secret://vault/x", "secret://env/9X", "secret://file/"} {
+		got, err := r.Resolve(context.Background(), ref)
+		if err == nil {
 			t.Errorf("Resolve(%q) = %q, want error", ref, got)
+			continue
+		}
+		if strings.Contains(ref, sentinel) && strings.Contains(err.Error(), sentinel) {
+			t.Errorf("error echoes a non-reference input: %q", err)
 		}
 	}
 }
@@ -286,5 +294,41 @@ func TestResolveHonoursCancelledContext(t *testing.T) {
 	}
 	if called {
 		t.Error("env was consulted despite a cancelled context")
+	}
+}
+
+func TestResolveRealFileSizeLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a Unix path mapping")
+	}
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "at the limit", size: maxSecretSize},
+		{name: "one byte over", size: maxSecretSize + 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte(strings.Repeat("a", tt.size)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ref := "secret://file/" + strings.TrimPrefix(filepath.ToSlash(path), "/")
+			got, err := NewResolver().Resolve(context.Background(), ref)
+			if !tt.wantErr {
+				if err != nil || len(got) != tt.size {
+					t.Fatalf("Resolve = %d bytes, %v; want %d bytes", len(got), err, tt.size)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Resolve returned %d bytes, want an error", len(got))
+			}
+			if !strings.Contains(err.Error(), ref) || !strings.Contains(err.Error(), "larger than") {
+				t.Errorf("error %q must name the reference and the limit", err)
+			}
+		})
 	}
 }

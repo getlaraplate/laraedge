@@ -104,7 +104,7 @@ func Load(path string) (File, error) {
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 	if err := dec.Decode(&file); err != nil && !errors.Is(err, io.EOF) {
-		return File{}, fmt.Errorf("bootstrap: parse %s: %w", path, err)
+		return File{}, fmt.Errorf("bootstrap: parse %s: %s", path, describeDecodeError(err))
 	}
 	if err := dec.Decode(&yaml.Node{}); !errors.Is(err, io.EOF) {
 		return File{}, fmt.Errorf("bootstrap: parse %s: the file must hold exactly one YAML document", path)
@@ -113,6 +113,33 @@ func Load(path string) (File, error) {
 		return File{}, fmt.Errorf("bootstrap: %s: %w", path, err)
 	}
 	return file, nil
+}
+
+// describeDecodeError renders a YAML decode error without the scalar values
+// yaml.v3 embeds in type mismatch messages ("cannot unmarshal !!str `value`
+// into T"), which could carry a secret written in the wrong place. Only the
+// line, the YAML tag and the target type are kept.
+func describeDecodeError(err error) string {
+	var typeErr *yaml.TypeError
+	if !errors.As(err, &typeErr) {
+		return err.Error()
+	}
+	const marker = "cannot unmarshal "
+	msgs := make([]string, 0, len(typeErr.Errors))
+	for _, m := range typeErr.Errors {
+		head, rest, found := strings.Cut(m, marker)
+		if !found {
+			msgs = append(msgs, m)
+			continue
+		}
+		tag, _, _ := strings.Cut(rest, " ")
+		target := rest
+		if i := strings.LastIndex(rest, " into "); i >= 0 {
+			target = rest[i+len(" into "):]
+		}
+		msgs = append(msgs, head+marker+tag+" into "+target)
+	}
+	return strings.Join(msgs, "; ")
 }
 
 func (f File) validate() error {

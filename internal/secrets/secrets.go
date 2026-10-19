@@ -46,7 +46,7 @@ const (
 // errors it returns name the reference, which never carries a secret value.
 func parse(ref string) (kind, string, error) {
 	if !IsReference(ref) {
-		return "", "", fmt.Errorf("%q is not a secret reference", ref)
+		return "", "", errors.New("value is not a secret:// reference")
 	}
 	k, rest, _ := strings.Cut(strings.TrimPrefix(ref, prefix), "/")
 	switch kind(k) {
@@ -176,9 +176,12 @@ func readSecretFile(path string) ([]byte, fs.FileMode, error) {
 	if !info.Mode().IsRegular() {
 		return nil, 0, errors.New("not a regular file")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxSecretSize))
+	data, err := io.ReadAll(io.LimitReader(f, maxSecretSize+1))
 	if err != nil {
 		return nil, 0, err
+	}
+	if len(data) > maxSecretSize {
+		return nil, 0, fmt.Errorf("file is larger than %d bytes", maxSecretSize)
 	}
 	return data, info.Mode(), nil
 }

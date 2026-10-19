@@ -8,7 +8,10 @@ import (
 	"testing"
 )
 
-const plainToken = "plain-token-value-1234"
+const (
+	plainToken = "plain-token-value-1234"
+	shortToken = "tok-s3cr3t"
+)
 
 func hostDataDir() string { return DefaultDataDir(runtime.GOOS, os.Getenv) }
 
@@ -131,6 +134,10 @@ func TestLoadRefusals(t *testing.T) {
 		{name: "unknown top-level key", yaml: "agent_id: a\nbogus: 1\n" + fileProvider, wantErr: []string{"bogus"}},
 		{name: "unknown nested key", yaml: "agent_id: a\nconfig:\n  provider: file\n  file: /c.yaml\n  extra: 1\n", wantErr: []string{"extra"}},
 		{name: "unknown deep key", yaml: lara + "    verify_tls: false\n", wantErr: []string{"verify_tls"}},
+		{name: "token as config value", yaml: "agent_id: a\nconfig: " + plainToken + "\n", wantErr: []string{"line 2", "cannot unmarshal !!str into"}},
+		{name: "token as laraplate value", yaml: "agent_id: a\nconfig:\n  provider: laraplate\n  laraplate: " + plainToken + "\n", wantErr: []string{"line 4", "cannot unmarshal !!str into"}},
+		{name: "short value as poll_seconds", yaml: lara + "    poll_seconds: " + shortToken + "\n", wantErr: []string{"cannot unmarshal !!str into int"}},
+		{name: "token as agent_id list", yaml: "agent_id: [" + plainToken + "]\n" + fileProvider, wantErr: []string{"cannot unmarshal !!seq into string"}},
 		{name: "second document", yaml: "agent_id: a\n" + fileProvider + "---\nagent_id: b\n", wantErr: []string{"one YAML document"}},
 		{name: "not yaml", yaml: "agent_id: [unclosed\n", wantErr: []string{"bootstrap"}},
 	}
@@ -145,8 +152,11 @@ func TestLoadRefusals(t *testing.T) {
 					t.Errorf("error %q does not contain %q", err, want)
 				}
 			}
-			if strings.Contains(err.Error(), plainToken) {
-				t.Errorf("error echoes a secret value: %q", err)
+			// yaml.v3 shows up to 7 leading characters of long scalars, so check prefixes too.
+			for _, leak := range []string{plainToken, plainToken[:7], shortToken} {
+				if strings.Contains(err.Error(), leak) {
+					t.Errorf("error echoes a secret value (%q): %q", leak, err)
+				}
 			}
 		})
 	}
