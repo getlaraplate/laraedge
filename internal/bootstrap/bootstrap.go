@@ -124,21 +124,42 @@ var decodeLine = regexp.MustCompile(`^line (\d+): (.*)$`)
 
 // describeDecodeError renders a YAML decode error without any text taken from
 // the document values or keys, which could carry a secret written in the wrong
-// place. yaml.v3 embeds scalars in type mismatch messages and keys in duplicate
-// and unknown key messages. Only the line, the YAML tag, the target type and
-// keys of the expected shape are kept; any entry not recognised is reduced to
-// its line and a fixed text. Non-type errors (syntax errors) carry no document
-// text and are passed through.
+// place. yaml.v3 embeds document text in several messages:
+//
+//   - TypeError entries: scalars in type mismatches, keys in duplicate and
+//     unknown key entries (see describeTypeError);
+//   - plain errors: anchor names ("unknown anchor", "anchor ... contains
+//     itself"), the offending key ("invalid map key") and the scalar of a
+//     failed explicit tag ("cannot decode ... as a ..."). These are reduced
+//     to fixed texts.
+//
+// The remaining plain errors come from the scanner, parser and reader, whose
+// messages are constant strings, and are passed through.
 func describeDecodeError(err error) string {
 	var typeErr *yaml.TypeError
-	if !errors.As(err, &typeErr) {
-		return err.Error()
+	if errors.As(err, &typeErr) {
+		msgs := make([]string, 0, len(typeErr.Errors))
+		for _, m := range typeErr.Errors {
+			msgs = append(msgs, describeTypeError(m))
+		}
+		return strings.Join(msgs, "; ")
 	}
-	msgs := make([]string, 0, len(typeErr.Errors))
-	for _, m := range typeErr.Errors {
-		msgs = append(msgs, describeTypeError(m))
+	text := strings.TrimPrefix(err.Error(), "yaml: ")
+	line := ""
+	if m := decodeLine.FindStringSubmatch(text); m != nil {
+		line, text = "line "+m[1]+": ", m[2]
 	}
-	return strings.Join(msgs, "; ")
+	switch {
+	case strings.HasPrefix(text, "unknown anchor "):
+		return line + "unknown alias"
+	case strings.HasPrefix(text, "anchor "):
+		return line + "recursive anchor"
+	case strings.HasPrefix(text, "invalid map key"):
+		return line + "invalid map key"
+	case strings.HasPrefix(text, "cannot decode "):
+		return line + "value does not match its explicit tag"
+	}
+	return err.Error()
 }
 
 func describeTypeError(entry string) string {

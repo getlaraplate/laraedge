@@ -356,3 +356,18 @@ func TestResolveRealFileSizeLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestCancelledContextDoesNotEchoNonReferences(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := NewResolver()
+	for _, ref := range []string{"plain-" + sentinel, "secret://" + sentinel, "secret://env/" + sentinel} {
+		_, err := r.Resolve(ctx, ref)
+		if err == nil {
+			t.Fatalf("Resolve(%q) = nil error", ref)
+		}
+		if strings.Contains(err.Error(), sentinel) {
+			t.Errorf("error echoes the input: %q", err)
+		}
+	}
+}

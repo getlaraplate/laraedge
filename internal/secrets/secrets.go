@@ -119,12 +119,12 @@ func NewResolver(opts ...Option) *Resolver {
 //	                         path is "/"+<path> and the file must not be group or world accessible
 //	secret://keystore/NAME   always ErrUnavailable in this build
 func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("secret %s: %w", ref, err)
-	}
 	k, rest, err := parse(ref)
 	if err != nil {
 		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("secret %s: %w", ref, err)
 	}
 	switch k {
 	case kindEnv:

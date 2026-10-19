@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 const (
@@ -153,6 +155,8 @@ func TestLoadRefusals(t *testing.T) {
 			yaml:    "agent_id: a\nstatus_token: secret://env/" + plainToken + "\n" + fileProvider,
 			wantErr: []string{"status_token", "invalid environment variable name"},
 		},
+		{name: "token as unknown alias", yaml: "agent_id: a\nstatus_token: *" + plainToken + "\n" + fileProvider, wantErr: []string{"unknown alias"}},
+		{name: "token under an explicit tag", yaml: "agent_id: a\nstatus_token: !!int " + shortToken + "\n" + fileProvider, wantErr: []string{"does not match its explicit tag"}},
 		{name: "second document", yaml: "agent_id: a\n" + fileProvider + "---\nagent_id: b\n", wantErr: []string{"one YAML document"}},
 		{name: "not yaml", yaml: "agent_id: [unclosed\n", wantErr: []string{"bootstrap"}},
 	}
@@ -240,5 +244,48 @@ func TestDescribeTypeErrorNeverEchoesUnrecognisedEntries(t *testing.T) {
 		if got := describeTypeError(tt.entry); got != tt.want {
 			t.Errorf("describeTypeError(%q) = %q, want %q", tt.entry, got, tt.want)
 		}
+	}
+}
+
+func TestDescribeDecodeErrorNeverEchoesPlainYAMLErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{name: "unknown alias", doc: "a: *" + plainToken + "\n", want: "unknown alias"},
+		{name: "self-referencing anchor", doc: "a: &" + plainToken + " [*" + plainToken + "]\n", want: "recursive anchor"},
+		{name: "invalid map key", doc: "? [" + plainToken + "]\n: x\n", want: "invalid map key"},
+		{name: "explicit tag", doc: "a: !!int " + plainToken + "\n", want: "value does not match its explicit tag"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var v any
+			err := yaml.Unmarshal([]byte(tt.doc), &v)
+			if err == nil {
+				t.Fatal("yaml accepted the document; the test no longer reproduces the library error")
+			}
+			if !strings.Contains(err.Error(), plainToken) {
+				t.Fatalf("library error %q no longer echoes the document; revisit describeDecodeError", err)
+			}
+			got := describeDecodeError(err)
+			if got != tt.want {
+				t.Errorf("describeDecodeError = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, plainToken) || strings.Contains(got, plainToken[:7]) {
+				t.Errorf("message echoes document text: %q", got)
+			}
+		})
+	}
+}
+
+func TestDescribeDecodeErrorKeepsConstantSyntaxErrors(t *testing.T) {
+	var v any
+	err := yaml.Unmarshal([]byte("a: [unclosed\n"), &v)
+	if err == nil {
+		t.Fatal("yaml accepted the document")
+	}
+	if got := describeDecodeError(err); got != err.Error() {
+		t.Errorf("describeDecodeError = %q, want %q", got, err.Error())
 	}
 }
