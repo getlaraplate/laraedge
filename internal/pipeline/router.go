@@ -29,6 +29,11 @@ type Appender interface {
 // device/signal. A device event goes to each output routing at least one of
 // the device's configured signals, and a birth lists only the signals routed
 // to that output. It is safe for concurrent use.
+//
+// Lock order: a caller's input instance lock (supervisor), then Router.mu,
+// then a hold queue's mutex, then the output buffer's lock inside Append or
+// AddLoss. The router never calls back into an input or the supervisor while
+// it holds its locks.
 type Router struct {
 	clk clock.Clock
 	log *slog.Logger

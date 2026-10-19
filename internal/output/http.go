@@ -222,7 +222,7 @@ func ingestEndpoint(raw string) (string, error) {
 		return "", errors.New("must be an absolute URL such as https://mes.example.com")
 	}
 
-	u.RawQuery, u.Fragment = "", ""
+	u.RawQuery, u.Fragment, u.RawFragment, u.ForceQuery = "", "", "", false
 
 	return strings.TrimRight(u.String(), "/") + ingestPath, nil
 }

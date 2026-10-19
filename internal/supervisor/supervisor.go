@@ -134,6 +134,12 @@ type runningInput struct {
 // one step with retire, so after retire nothing is registered or routed for
 // this instance, and its router registration, owned by its token, is removed
 // without touching one of a later instance of the same id (ruling R50).
+//
+// Lock order: inputInstance.mu, then the router's locks (Router.mu, then a
+// hold queue's), then an output buffer's lock inside Append or AddLoss.
+// Supervisor.mu is taken before a buffer's lock (Status reads the buffer
+// figures under it) and never while an instance's or the router's lock is
+// held. No lock is ever taken in the other direction.
 type inputInstance struct {
 	router *pipeline.Router
 	cfg    config.Input
@@ -665,7 +671,7 @@ func (s *Supervisor) stopOutput(id string, how outputStop, holdRoute config.Rout
 	<-ro.done
 
 	if how == stopRemoved {
-		if n := ro.buf.Stats().Records; n > 0 {
+		if n := ro.buf.Records(); n > 0 {
 			s.log.Warn("supervisor: output removed; its unsent records remain in its directory", "output", id, "records", n, "dir", ro.dir)
 		}
 	}

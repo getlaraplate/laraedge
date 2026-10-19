@@ -1165,12 +1165,7 @@ type phantomBuffer struct {
 	reads   atomic.Int64
 }
 
-func (p *phantomBuffer) Stats() buffer.Stats {
-	s := p.Buffer.Stats()
-	s.Records++
-
-	return s
-}
+func (p *phantomBuffer) Records() uint64 { return p.Buffer.Records() + 1 }
 
 func (p *phantomBuffer) Changed() <-chan struct{} { return p.changed }
 

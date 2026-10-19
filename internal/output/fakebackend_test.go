@@ -55,6 +55,7 @@ type reply struct {
 type request struct {
 	method    string
 	path      string
+	query     string
 	header    http.Header
 	body      []byte
 	messageID string
@@ -107,6 +108,7 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 	req := request{
 		method:    r.Method,
 		path:      r.URL.Path,
+		query:     r.URL.RawQuery,
 		header:    r.Header.Clone(),
 		body:      body,
 		messageID: env.MessageID,

@@ -1,7 +1,8 @@
 // Package buffer is the durable disk buffer of one output: two append-only
 // segmented logs, one per priority class, the confirmed position of each and
-// the pending loss markers. Nothing confirmed is lost, and every record the
-// buffer drops leaves a loss marker (spec 6.1, 6.2, 6.4).
+// the pending loss markers. Nothing confirmed is lost, and every sample the
+// buffer drops leaves a loss marker (spec 6.1, 6.2, 6.4); a device event is
+// not a sample, and a lost death is logged with its device.
 //
 // Layout of the output directory:
 //
@@ -119,7 +120,9 @@ type Stats struct {
 	Bytes   int64
 	// Dropped counts the samples of every loss marker added since Open, by reason.
 	Dropped map[string]uint64
-	// CorruptRecords counts bad records found inside non-final segments at Open.
+	// CorruptRecords counts the corrupt records found since Open: inside a
+	// non-final segment at Open, or anywhere while the buffer runs. Each one
+	// dropped the rest of its segment without a loss marker (ruling R20).
 	CorruptRecords uint64
 }
 
@@ -151,7 +154,7 @@ type Buffer struct {
 	lossesDirty bool
 	frozen      int // leading markers handed out by PendingLosses: never changed again
 	dropped     map[string]uint64
-	corrupt     uint64
+	failures    *failureLog
 
 	diskChecked   bool
 	diskCheckedAt time.Time
@@ -212,30 +215,31 @@ func open(dir string, opts Options, h hooks) (*Buffer, error) {
 	}
 
 	b := &Buffer{
-		dir:     dir,
-		opts:    opts,
-		log:     opts.Logger,
-		hooks:   h,
-		losses:  losses,
-		dropped: map[string]uint64{},
-		changed: make(chan struct{}, 1),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		dir:      dir,
+		opts:     opts,
+		log:      opts.Logger,
+		hooks:    h,
+		losses:   losses,
+		dropped:  map[string]uint64{},
+		failures: newFailureLog(opts.Logger),
+		changed:  make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 
-	critical, corrupt, err := openQueue(filepath.Join(dir, model.Critical.String()), model.Critical, acked.Critical, opts.SegmentSize, h.sync, b.log)
+	critical, err := openQueue(filepath.Join(dir, model.Critical.String()), model.Critical, acked.Critical, opts.SegmentSize, h.sync, b.log)
 	if err != nil {
 		return nil, fmt.Errorf("buffer: %w", err)
 	}
 
-	bulk, corruptBulk, err := openQueue(filepath.Join(dir, model.Bulk.String()), model.Bulk, acked.Bulk, opts.SegmentSize, h.sync, b.log)
+	bulk, err := openQueue(filepath.Join(dir, model.Bulk.String()), model.Bulk, acked.Bulk, opts.SegmentSize, h.sync, b.log)
 	if err != nil {
 		_ = critical.close()
 
 		return nil, fmt.Errorf("buffer: %w", err)
 	}
 
-	b.critical, b.bulk, b.corrupt = critical, bulk, corrupt+corruptBulk
+	b.critical, b.bulk = critical, bulk
 
 	go b.syncLoop()
 
@@ -330,28 +334,27 @@ func (b *Buffer) Append(r model.Record) error {
 
 	size := int64(len(frame))
 	if size > q.segmentSize || size > b.opts.MaxSize {
-		b.dropRecord(q.priority, r, "record larger than a segment or the buffer")
+		b.dropRecord(q.priority, r, "too_large", "record larger than a segment or the buffer", nil)
 
 		return fmt.Errorf("buffer: append: frame of %d bytes above the segment size %d or the buffer size %d: %w", size, q.segmentSize, b.opts.MaxSize, ErrTooLarge)
 	}
 
 	err = b.store(q, frame)
 	if err != nil && !errors.Is(err, errFloorBreached) {
-		b.log.Warn("buffer: write failed, evicting and retrying once", "queue", q.priority.String(), "error", err)
+		b.failures.report(b.opts.Clock.Now(), q.priority.String()+".write_retry", slog.LevelWarn, "buffer: write failed, evicting and retrying once", "queue", q.priority.String(), "error", err)
 		if _, evictErr := b.evictOne(); evictErr != nil {
-			b.log.Error("buffer: eviction after a failed write failed", "error", evictErr)
+			b.failures.report(b.opts.Clock.Now(), q.priority.String()+".evict_failed", slog.LevelError, "buffer: eviction after a failed write failed", "queue", q.priority.String(), "error", evictErr)
 		}
 
 		if err = b.store(q, frame); err != nil && !errors.Is(err, errFloorBreached) {
-			b.dropRecord(q.priority, r, "write failed after an eviction and a retry")
-			b.log.Error("buffer: record dropped after a failed retry", "queue", q.priority.String(), "device", r.Device(), "error", err)
+			b.dropRecord(q.priority, r, "write_failed", "write failed after an eviction and a retry", err)
 
 			return fmt.Errorf("buffer: append to the %s queue: %w", q.priority, errors.Join(ErrDropped, err))
 		}
 	}
 
 	if errors.Is(err, errFloorBreached) {
-		b.dropRecord(q.priority, r, "free disk floor breached by other data")
+		b.dropRecord(q.priority, r, "floor_breached", "free disk floor breached by other data", nil)
 
 		return fmt.Errorf("buffer: append to the %s queue: %w", q.priority, errors.Join(ErrDropped, err))
 	}
@@ -373,13 +376,38 @@ func (b *Buffer) markerTS(r model.Record) time.Time {
 	return b.opts.Clock.Now()
 }
 
-// dropRecord records the drop of r. The drop is added to the newest pending
-// buffer_full marker of the same class when that marker is the last one and
-// was never handed out, so a lasting condition (a breached floor, a disk that
-// refuses every write) leaves one growing marker instead of one per record;
-// that change is written at the next sync tick, the declared durability
-// limit of records themselves. Otherwise a new marker is written at once.
-func (b *Buffer) dropRecord(p model.Priority, r model.Record, why string) {
+// dropRecord records the drop of r. The log goes through the failure log
+// (kind is "<queue>.<kind>"): the first drop of a kind in full, then counted
+// in a summary at most once a minute. A device event is not a sample: it
+// leaves no marker, and a lost death is logged with its device. A sample is
+// added to the newest pending buffer_full marker of the same class when that
+// marker is the last one and was never handed out, so a lasting condition
+// (a breached floor, a disk that refuses every write) leaves one growing
+// marker instead of one per record; that change is written at the next sync
+// tick, the declared durability limit of records themselves. Otherwise a new
+// marker is written at once.
+func (b *Buffer) dropRecord(p model.Priority, r model.Record, kind, why string, cause error) {
+	now := b.opts.Clock.Now()
+	level := slog.LevelError
+	if kind == "floor_breached" {
+		level = slog.LevelWarn
+	}
+
+	attrs := []any{"queue", p.String(), "reason", why, "device", r.Device()}
+	if cause != nil {
+		attrs = append(attrs, "error", cause)
+	}
+
+	b.failures.report(now, p.String()+"."+kind, level, "buffer: record dropped", attrs...)
+
+	if r.Event != nil {
+		if r.Event.Kind == model.Death {
+			b.log.Warn("buffer: a device death was dropped; the backend will not see it", "queue", p.String(), "device", r.Event.Device)
+		}
+
+		return
+	}
+
 	ts := b.markerTS(r)
 	if n := len(b.losses); n > b.frozen {
 		last := &b.losses[n-1]
@@ -400,9 +428,8 @@ func (b *Buffer) dropRecord(p model.Priority, r model.Record, why string) {
 		}
 	}
 
-	b.log.Warn("buffer: dropping records", "queue", p.String(), "reason", why)
 	if err := b.addLossLocked(model.Loss{Priority: p, FromTS: ts, ToTS: ts, Samples: 1, Reason: model.LossBufferFull}); err != nil {
-		b.log.Error("buffer: cannot write the loss markers, retrying at the next sync", "reason", why, "error", err)
+		b.failures.report(now, "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "reason", why, "error", err)
 	}
 }
 
@@ -629,7 +656,7 @@ func (b *Buffer) Ack(p model.Priority, upTo Position) error {
 	}
 
 	q.ack = upTo
-	q.unacked -= n
+	q.unacked -= min(n, q.unacked)
 	q.oldestValid = false
 	q.deleteWhere(func(s *segment) bool { return s.end() <= q.ack })
 
@@ -792,7 +819,18 @@ func (b *Buffer) Head(p model.Priority) Position {
 // holds at most one pending signal.
 func (b *Buffer) Changed() <-chan struct{} { return b.changed }
 
-// Stats returns the current figures of the buffer.
+// Records returns the number of records not yet confirmed, both queues
+// together. It reads only counters kept in memory, never a frame, so the
+// batcher may call it after every append.
+func (b *Buffer) Records() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.critical.unacked + b.bulk.unacked
+}
+
+// Stats returns the current figures of the buffer. It may read the frame
+// at the head of each queue (for OldestUnacked).
 func (b *Buffer) Stats() Stats {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -801,7 +839,7 @@ func (b *Buffer) Stats() Stats {
 		Critical:       b.critical.stats(),
 		Bulk:           b.bulk.stats(),
 		Dropped:        make(map[string]uint64, len(b.dropped)),
-		CorruptRecords: b.corrupt,
+		CorruptRecords: b.critical.corrupt + b.bulk.corrupt,
 	}
 
 	s.Records = s.Critical.Records + s.Bulk.Records
@@ -890,9 +928,11 @@ func (b *Buffer) syncPass() {
 
 	if b.lossesDirty {
 		if err := b.persistLossesLocked(); err != nil {
-			b.log.Error("buffer: cannot write the loss markers, retrying at the next sync", "pending", len(b.losses), "error", err)
+			b.failures.report(b.opts.Clock.Now(), "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "pending", len(b.losses), "error", err)
 		}
 	}
+
+	b.failures.flush(b.opts.Clock.Now())
 	b.mu.Unlock()
 
 	if b.hooks.beforeSync != nil {

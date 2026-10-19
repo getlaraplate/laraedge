@@ -336,6 +336,14 @@ func TestReadLimitsAndErrors(t *testing.T) {
 			}
 		})
 	}
+
+	// A start position that is no record boundary is the caller's error,
+	// never a corruption: nothing is cut.
+	if s := b.Stats(); s.CorruptRecords != 0 || s.Bulk.Records != 5 {
+		t.Fatalf("Stats() after the failed reads = %+v, want no corruption and 5 bulk records", s)
+	}
+
+	assertRecords(t, b, model.Bulk, bulkRange(0, 4))
 }
 
 func TestAppendRefuses(t *testing.T) {

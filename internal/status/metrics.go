@@ -90,7 +90,7 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		}
 	}
 
-	w.family("corrupt_records_total", "counter", "Corrupt records found in the output buffer when it was opened.")
+	w.family("corrupt_records_total", "counter", "Corrupt records found in the output buffer since it was opened; each dropped the rest of its segment.")
 	for _, out := range running {
 		w.sample("corrupt_records_total", float64(out.Buffer.CorruptRecords), "output", out.ID)
 	}

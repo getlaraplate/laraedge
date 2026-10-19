@@ -90,11 +90,13 @@ func verifyPayload(header, payload []byte) error {
 func decodePayload(payload []byte) (model.Record, error) {
 	var r model.Record
 	if err := json.Unmarshal(payload[1:], &r); err != nil {
-		return model.Record{}, fmt.Errorf("%w: %v", errCorruptFrame, err)
+		// The JSON error may quote payload bytes: never in a message.
+		return model.Record{}, fmt.Errorf("%w: payload is not a record", errCorruptFrame)
 	}
 
 	if err := r.Validate(); err != nil {
-		return model.Record{}, fmt.Errorf("%w: %v", errCorruptFrame, err)
+		// The validation error may name a value: never in a message.
+		return model.Record{}, fmt.Errorf("%w: payload is not a valid record", errCorruptFrame)
 	}
 
 	return r, nil
@@ -175,25 +177,39 @@ func recordTS(r model.Record) time.Time {
 	}
 }
 
-// payloadTS extracts only the timestamp of a verified payload, cheaper than
-// decoding the whole record. It returns the zero time when it cannot.
-func payloadTS(payload []byte) time.Time {
+// payloadSummary is what an eviction needs of a verified payload.
+type payloadSummary struct {
+	ts     time.Time
+	sample bool
+	death  string // the device of a death event, "" otherwise
+}
+
+// summarizePayload decodes only what an eviction needs of a verified
+// payload, cheaper than decoding the whole record. A payload that is not a
+// record is corrupt.
+func summarizePayload(payload []byte) (payloadSummary, error) {
 	var v struct {
 		Sample *struct{ TS time.Time }
-		Event  *struct{ TS time.Time }
+		Event  *struct {
+			Kind   model.EventKind
+			Device string
+			TS     time.Time
+		}
 	}
 
 	if err := json.Unmarshal(payload[1:], &v); err != nil {
-		return time.Time{}
+		return payloadSummary{}, fmt.Errorf("%w: payload is not a record", errCorruptFrame)
 	}
 
 	switch {
 	case v.Sample != nil:
-		return v.Sample.TS
+		return payloadSummary{ts: v.Sample.TS, sample: true}, nil
+	case v.Event != nil && v.Event.Kind == model.Death:
+		return payloadSummary{ts: v.Event.TS, death: v.Event.Device}, nil
 	case v.Event != nil:
-		return v.Event.TS
+		return payloadSummary{ts: v.Event.TS}, nil
 	default:
-		return time.Time{}
+		return payloadSummary{}, fmt.Errorf("%w: payload is not a record", errCorruptFrame)
 	}
 }
 

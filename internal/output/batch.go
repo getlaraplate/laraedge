@@ -166,7 +166,7 @@ type Buffer interface {
 	MarkSealed(p model.Priority, upTo buffer.Position) error
 	Head(p model.Priority) buffer.Position
 	Changed() <-chan struct{}
-	Stats() buffer.Stats
+	Records() uint64
 	AddLoss(l model.Loss) error
 	SyncLosses() error
 	PendingLosses() []model.Loss
@@ -305,7 +305,7 @@ func (bt *Batcher) wait(ctx context.Context, idle bool) error {
 			return fmt.Errorf("output: next batch: %w", err)
 		}
 
-		n := bt.buf.Stats().Records
+		n := bt.buf.Records()
 		if n >= uint64(bt.limits.MaxSamples) {
 			return nil
 		}
@@ -457,11 +457,13 @@ func (bt *Batcher) fit(id string, seq uint64, sentAt time.Time, records []model.
 }
 
 // reject drops the record e of queue p, which cannot fit MaxBody, with a
-// rejected_invalid marker, then acknowledges it.
+// rejected_invalid marker when it is a sample, then acknowledges it.
 func (bt *Batcher) reject(p model.Priority, e buffer.Entry) error {
 	bt.log.Warn("output: dropping a record larger than max_body", "priority", p.String(), "device", e.Record.Device(), "max_body", bt.limits.MaxBody)
-	if err := bt.addLosses(lossOf(p, []buffer.Entry{e}, model.LossRejectedInvalid, bt.clk.Now())); err != nil {
-		return err
+	if l, ok := bt.lossOf(p, []buffer.Entry{e}, model.LossRejectedInvalid, bt.clk.Now()); ok {
+		if err := bt.addLosses(l); err != nil {
+			return err
+		}
 	}
 
 	if err := bt.buf.Ack(p, e.Next); err != nil {
@@ -547,8 +549,8 @@ func (bt *Batcher) Shrink(b *Batch, n int) (*Batch, error) {
 			return nil, err
 		}
 
-		if len(gone) > 0 {
-			markers = append(markers, lossOf(p, gone, model.LossBufferFull, bt.clk.Now()))
+		if l, ok := bt.lossOf(p, gone, model.LossBufferFull, bt.clk.Now()); ok {
+			markers = append(markers, l)
 		}
 	}
 
@@ -585,8 +587,8 @@ func (bt *Batcher) Drop(b *Batch, reason string) error {
 	now := bt.clk.Now()
 	markers := slices.Clone(b.Losses)
 	for _, p := range priorities {
-		if es := b.Entries[p]; len(es) > 0 {
-			markers = append(markers, lossOf(p, es, reason, now))
+		if l, ok := bt.lossOf(p, b.Entries[p], reason, now); ok {
+			markers = append(markers, l)
 		}
 	}
 
@@ -752,11 +754,22 @@ func (bt *Batcher) addLosses(markers ...model.Loss) error {
 	return nil
 }
 
-// lossOf returns the marker of entries of queue p: their ts range and count.
-// Records without a ts take now.
-func lossOf(p model.Priority, entries []buffer.Entry, reason string, now time.Time) model.Loss {
-	l := model.Loss{Priority: p, Samples: len(entries), Reason: reason}
+// lossOf returns the marker of the samples among entries of queue p: their
+// ts range and count; samples without a ts take now. A device event is not a
+// sample: it is not counted, and a lost death is logged with its device. ok
+// is false when entries hold no sample: the protocol wants samples >= 1.
+func (bt *Batcher) lossOf(p model.Priority, entries []buffer.Entry, reason string, now time.Time) (model.Loss, bool) {
+	l := model.Loss{Priority: p, Reason: reason}
 	for _, e := range entries {
+		if ev := e.Record.Event; ev != nil {
+			if ev.Kind == model.Death {
+				bt.log.Warn("output: a device death was dropped; the backend will not see it", "priority", p.String(), "device", ev.Device, "reason", reason)
+			}
+
+			continue
+		}
+
+		l.Samples++
 		ts := recordTS(e.Record)
 		if ts.IsZero() {
 			continue
@@ -771,11 +784,15 @@ func lossOf(p model.Priority, entries []buffer.Entry, reason string, now time.Ti
 		}
 	}
 
+	if l.Samples == 0 {
+		return model.Loss{}, false
+	}
+
 	if l.FromTS.IsZero() {
 		l.FromTS, l.ToTS = now, now
 	}
 
-	return l
+	return l, true
 }
 
 func recordTS(r model.Record) time.Time {

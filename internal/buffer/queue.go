@@ -30,6 +30,7 @@ type queue struct {
 	ack      Position // every record before it is confirmed (persisted in acked)
 	sealed   Position // records before it belong to a sealed batch (not persisted)
 	unacked  uint64   // records at or after the confirmed position
+	corrupt  uint64   // corrupt records found inside segments, at Open or later
 
 	oldest      time.Time // device ts of the record at the head, when oldestValid
 	oldestValid bool
@@ -40,32 +41,31 @@ type queue struct {
 // one drops the rest of that segment and is counted as corrupt. A new active
 // segment is then created beyond any position handed out before the restart,
 // so positions are never reused even when unsynced records were lost.
-func openQueue(dir string, p model.Priority, ack Position, defaultSegmentSize int64, syncFile func(*os.File) error, log *slog.Logger) (*queue, uint64, error) {
+func openQueue(dir string, p model.Priority, ack Position, defaultSegmentSize int64, syncFile func(*os.File) error, log *slog.Logger) (*queue, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, 0, fmt.Errorf("create %s queue directory: %w", p, err)
+		return nil, fmt.Errorf("create %s queue directory: %w", p, err)
 	}
 
 	segmentSize, err := pinSegmentSize(dir, defaultSegmentSize)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%s queue: %w", p, err)
+		return nil, fmt.Errorf("%s queue: %w", p, err)
 	}
 
 	bases, err := listSegments(dir)
 	if err != nil {
-		return nil, 0, fmt.Errorf("list %s segments: %w", p, err)
+		return nil, fmt.Errorf("list %s segments: %w", p, err)
 	}
 
 	q := &queue{priority: p, dir: dir, segmentSize: segmentSize, syncFile: syncFile, log: log, ack: ack}
 
-	var corrupt uint64
 	for i, base := range bases {
 		seg, bad, err := q.recover(base, i == len(bases)-1)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 
 		if bad {
-			corrupt++
+			q.corrupt++
 		}
 
 		q.segments = append(q.segments, seg)
@@ -81,13 +81,13 @@ func openQueue(dir string, p model.Priority, ack Position, defaultSegmentSize in
 
 	active, err := createSegment(dir, next)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%s queue: %w", p, err)
+		return nil, fmt.Errorf("%s queue: %w", p, err)
 	}
 
 	q.segments = append(q.segments, active)
 	q.deleteWhere(func(s *segment) bool { return s.end() <= q.ack || s.size == 0 })
 
-	return q, corrupt, nil
+	return q, nil
 }
 
 // recover scans one segment file and truncates it after its last valid frame.
@@ -287,10 +287,28 @@ func (q *queue) reader(seg *segment) (io.ReaderAt, func(), error) {
 	return f, func() { _ = f.Close() }, nil
 }
 
+// corruptFrame is a frame of a queue that cannot be read back: a bad length,
+// checksum, format version or payload, a read error, or a segment file that
+// is gone. The frame and the rest of its segment are lost (ruling R20).
+type corruptFrame struct {
+	seg *segment
+	pos Position
+	err error
+}
+
+func (c *corruptFrame) Error() string {
+	return fmt.Sprintf("position %d: %v", uint64(c.pos), c.err)
+}
+
+func (c *corruptFrame) Unwrap() error { return c.err }
+
 // walk calls fn for each frame from pos until fn returns false or the queue
 // ends, crossing segments and the gaps between them. It returns the position
-// after the last frame passed to fn.
+// after the last frame passed to fn. A frame that cannot be read back is
+// reported as a *corruptFrame; a start position inside a segment that is no
+// record boundary is a plain error, never a corruption.
 func (q *queue) walk(pos Position, fn func(pos Position, frame []byte) bool) (Position, error) {
+	start := pos
 	for _, seg := range q.segments {
 		if seg.end() <= pos {
 			continue
@@ -299,15 +317,23 @@ func (q *queue) walk(pos Position, fn func(pos Position, frame []byte) bool) (Po
 		pos = max(pos, seg.base)
 		r, done, err := q.reader(seg)
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return pos, &corruptFrame{seg: seg, pos: seg.base, err: err}
+			}
+
 			return pos, err
 		}
 
 		for pos < seg.end() {
 			frame, err := readFrameAt(r, int64(pos-seg.base), seg.size, q.segmentSize)
 			if err != nil {
-				done()
+				defer done()
 
-				return pos, fmt.Errorf("position %d: %w", uint64(pos), err)
+				if pos == start && pos != seg.base {
+					return pos, q.classify(r, seg, pos, err)
+				}
+
+				return pos, &corruptFrame{seg: seg, pos: pos, err: err}
 			}
 
 			if !fn(pos, frame) {
@@ -325,16 +351,70 @@ func (q *queue) walk(pos Position, fn func(pos Position, frame []byte) bool) (Po
 	return pos, nil
 }
 
+// classify tells a bad frame at a caller's start position from a start
+// position that is no record boundary, walking seg from its base: a frame
+// that fails before pos is the corruption, reaching pos exactly makes the
+// frame at pos corrupt, and passing over pos is the caller's error.
+func (q *queue) classify(r io.ReaderAt, seg *segment, pos Position, cause error) error {
+	at := seg.base
+	for at < pos {
+		frame, err := readFrameAt(r, int64(at-seg.base), seg.size, q.segmentSize)
+		if err != nil {
+			return &corruptFrame{seg: seg, pos: at, err: err}
+		}
+
+		at += Position(len(frame))
+	}
+
+	if at == pos {
+		return &corruptFrame{seg: seg, pos: pos, err: cause}
+	}
+
+	return fmt.Errorf("position %d is not a record boundary: %w", uint64(pos), cause)
+}
+
+// segmentAt returns the segment holding pos, or nil.
+func (q *queue) segmentAt(pos Position) *segment {
+	for _, seg := range q.segments {
+		if seg.base <= pos && pos < seg.end() {
+			return seg
+		}
+	}
+
+	return nil
+}
+
 // read returns up to limit entries starting at from, or at the head when
-// from precedes it.
+// from precedes it. A corrupt frame on the way is cut with the rest of its
+// segment (dropCorrupt) and the read starts again, so a frame that rots
+// while the buffer runs never stalls the output.
 func (q *queue) read(from Position, limit int) ([]Entry, error) {
+	for {
+		out, err := q.readOnce(from, limit)
+		if c, ok := errors.AsType[*corruptFrame](err); ok {
+			if cerr := q.dropCorrupt(c); cerr != nil {
+				return nil, errors.Join(err, cerr)
+			}
+
+			continue
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		return out, nil
+	}
+}
+
+func (q *queue) readOnce(from Position, limit int) ([]Entry, error) {
 	var out []Entry
 	var decodeErr error
 
 	_, err := q.walk(max(from, q.head()), func(pos Position, frame []byte) bool {
 		r, err := decodePayload(frame[headerSize:])
 		if err != nil {
-			decodeErr = fmt.Errorf("position %d: %w", uint64(pos), err)
+			decodeErr = &corruptFrame{seg: q.segmentAt(pos), pos: pos, err: err}
 
 			return false
 		}
@@ -344,16 +424,35 @@ func (q *queue) read(from Position, limit int) ([]Entry, error) {
 		return len(out) < limit
 	})
 
-	if err := errors.Join(err, decodeErr); err != nil {
+	if err != nil {
 		return nil, err
+	}
+
+	if decodeErr != nil {
+		return nil, decodeErr
 	}
 
 	return out, nil
 }
 
 // count returns the number of records in [from, to); to must be a record
-// boundary.
+// boundary. A corrupt frame on the way is cut as in read.
 func (q *queue) count(from, to Position) (uint64, error) {
+	for {
+		n, err := q.countOnce(from, to)
+		if c, ok := errors.AsType[*corruptFrame](err); ok {
+			if cerr := q.dropCorrupt(c); cerr != nil {
+				return 0, errors.Join(err, cerr)
+			}
+
+			continue
+		}
+
+		return n, err
+	}
+}
+
+func (q *queue) countOnce(from, to Position) (uint64, error) {
 	var n uint64
 	reached := from
 	_, err := q.walk(from, func(pos Position, frame []byte) bool {
@@ -375,6 +474,133 @@ func (q *queue) count(from, to Position) (uint64, error) {
 	}
 
 	return n, nil
+}
+
+// dropCorrupt applies ruling R20 while the buffer runs: the corrupt frame
+// and everything after it in its segment become unreadable, the segment
+// file is cut there, the corruption is counted and logged without values,
+// and the unconfirmed count is computed again. No loss marker is written:
+// the protocol has no reason for it. Positions are never reused: a cut in
+// the active segment first rotates it, so new records go after its old end.
+func (q *queue) dropCorrupt(c *corruptFrame) error {
+	cut, err := q.cut(c.seg, c.pos, c.err)
+	if err != nil {
+		return err
+	}
+
+	if !cut {
+		return fmt.Errorf("the corrupt record at %d of the %s queue is outside its segments", uint64(c.pos), q.priority)
+	}
+
+	q.recount()
+
+	return nil
+}
+
+// cut drops the frames of seg from pos on, in memory and on disk, and
+// reports whether anything was cut. It fails only when the active segment
+// cannot be rotated first.
+func (q *queue) cut(seg *segment, pos Position, cause error) (bool, error) {
+	if seg == nil || !slices.Contains(q.segments, seg) || pos >= seg.end() {
+		return false, nil
+	}
+
+	if seg == q.active() {
+		if err := q.rotate(); err != nil {
+			return false, fmt.Errorf("rotate the %s segment %d before cutting a corrupt record: %w", q.priority, uint64(seg.base), err)
+		}
+
+		if !slices.Contains(q.segments, seg) {
+			// Wholly confirmed: rotate deleted it.
+			return true, nil
+		}
+	}
+
+	pos = max(pos, seg.base)
+	dropped := int64(seg.end() - pos)
+	seg.size = int64(pos - seg.base)
+	q.corrupt++
+	q.oldestValid = false
+
+	q.log.Error("buffer: corrupt record inside a segment, dropped the rest of the segment",
+		"queue", q.priority.String(), "segment", uint64(seg.base), "offset", uint64(pos), "dropped_bytes", dropped, "error", cause)
+
+	if !errors.Is(cause, fs.ErrNotExist) {
+		if err := truncateSegment(q.path(seg.base), seg.size); err != nil {
+			q.log.Error("buffer: cannot cut the corrupt segment on disk; it is cut again at the next start", "queue", q.priority.String(), "segment", uint64(seg.base), "error", err)
+		}
+	}
+
+	q.deleteWhere(func(s *segment) bool { return s == seg && (s.size == 0 || s.end() <= q.ack) })
+
+	return true, nil
+}
+
+// truncateSegment cuts a closed segment file to size and syncs it.
+func truncateSegment(path string, size int64) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+
+	defer f.Close()
+
+	if err := f.Truncate(size); err != nil {
+		return err
+	}
+
+	return f.Sync()
+}
+
+// recount scans every segment again after a corruption, cutting any other
+// corrupt frame it meets, and sets the unconfirmed count from what is left.
+// It reads the whole queue: it runs only when a corruption was found.
+func (q *queue) recount() {
+	var n uint64
+	for _, seg := range slices.Clone(q.segments) {
+		if seg.size == 0 {
+			continue
+		}
+
+		res, openErr, err := q.scan(seg)
+		if openErr != nil && !errors.Is(openErr, fs.ErrNotExist) {
+			// A failure to open, such as too many open files, is no
+			// corruption: the segment stays, its records uncounted.
+			q.log.Error("buffer: cannot open a segment to count its records", "queue", q.priority.String(), "segment", uint64(seg.base), "error", openErr)
+
+			continue
+		}
+
+		if openErr != nil || err != nil || res.size < seg.size {
+			cause := errors.Join(openErr, err)
+			if cause == nil {
+				cause = errCorruptFrame
+			}
+
+			if _, cerr := q.cut(seg, seg.base+Position(res.size), cause); cerr != nil {
+				q.log.Error("buffer: cannot cut a corrupt record", "queue", q.priority.String(), "error", cerr)
+			}
+		}
+
+		n += res.records - res.beforeAck
+	}
+
+	q.unacked = n
+}
+
+// scan verifies the frames of seg as the recovery at Open does. openErr
+// reports a segment that cannot be opened, err a read failure.
+func (q *queue) scan(seg *segment) (res scanResult, openErr, err error) {
+	r, done, openErr := q.reader(seg)
+	if openErr != nil {
+		return scanResult{}, openErr, nil
+	}
+
+	defer done()
+
+	res, err = scanSegment(io.NewSectionReader(r, 0, seg.size), seg.size, seg.base, q.ack, q.segmentSize)
+
+	return res, nil, err
 }
 
 // oldestUnacked returns the device ts of the record at the head, or the zero
@@ -399,11 +625,13 @@ func (q *queue) oldestUnacked() time.Time {
 // eviction is what evicting one segment loses.
 type eviction struct {
 	unacked  uint64 // records not yet confirmed
-	lost     int    // records neither confirmed nor sealed
+	lost     int    // samples neither confirmed nor sealed: device events are not samples
 	from, to time.Time
+	deaths   []string // devices whose death is lost, neither confirmed nor sealed
 }
 
-// summarize scans seg for the records an eviction would lose.
+// summarize scans seg for the records an eviction would lose. On a corrupt
+// frame it returns what it counted before it with a *corruptFrame error.
 func (q *queue) summarize(seg *segment) (eviction, error) {
 	var ev eviction
 	if seg.end() <= q.ack {
@@ -413,22 +641,28 @@ func (q *queue) summarize(seg *segment) (eviction, error) {
 	lostFrom := max(q.ack, q.sealed)
 	r, done, err := q.reader(seg)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ev, &corruptFrame{seg: seg, pos: seg.base, err: err}
+		}
+
 		return ev, err
 	}
 
 	defer done()
 
-	res, err := scanEviction(io.NewSectionReader(r, 0, seg.size), seg.base, q.ack, lostFrom, q.segmentSize)
+	ev, pos, err := scanEviction(io.NewSectionReader(r, 0, seg.size), seg.base, q.ack, lostFrom, q.segmentSize)
 	if err != nil {
-		return ev, fmt.Errorf("scan segment %d: %w", uint64(seg.base), err)
+		return ev, &corruptFrame{seg: seg, pos: pos, err: err}
 	}
 
-	return res, nil
+	return ev, nil
 }
 
 // scanEviction walks a segment sequentially, counting unconfirmed records
-// and the ts range of the records lost by deleting it.
-func scanEviction(r io.Reader, base, ack, lostFrom Position, maxFrame int64) (eviction, error) {
+// and the samples, their ts range and the deaths lost by deleting it. On a
+// bad frame or a read error it returns what it counted before, the frame's
+// position and the error.
+func scanEviction(r io.Reader, base, ack, lostFrom Position, maxFrame int64) (eviction, Position, error) {
 	var ev eviction
 	br := bufio.NewReaderSize(r, 64<<10)
 	var header [headerSize]byte
@@ -438,15 +672,15 @@ func scanEviction(r io.Reader, base, ack, lostFrom Position, maxFrame int64) (ev
 	for {
 		if _, err := io.ReadFull(br, header[:]); err != nil {
 			if errors.Is(err, io.EOF) {
-				return ev, nil
+				return ev, pos, nil
 			}
 
-			return ev, err
+			return ev, pos, err
 		}
 
 		length, err := parseHeader(header[:], maxFrame)
 		if err != nil {
-			return ev, err
+			return ev, pos, err
 		}
 
 		if cap(payload) < length {
@@ -455,7 +689,16 @@ func scanEviction(r io.Reader, base, ack, lostFrom Position, maxFrame int64) (ev
 
 		payload = payload[:length]
 		if _, err := io.ReadFull(br, payload); err != nil {
-			return ev, err
+			return ev, pos, err
+		}
+
+		if err := verifyPayload(header[:], payload); err != nil {
+			return ev, pos, err
+		}
+
+		sum, err := summarizePayload(payload)
+		if err != nil {
+			return ev, pos, err
 		}
 
 		if pos >= ack {
@@ -463,15 +706,20 @@ func scanEviction(r io.Reader, base, ack, lostFrom Position, maxFrame int64) (ev
 		}
 
 		if pos >= lostFrom {
-			ev.lost++
-			if ts := payloadTS(payload); !ts.IsZero() {
-				if ev.from.IsZero() || ts.Before(ev.from) {
-					ev.from = ts
-				}
+			switch {
+			case sum.sample:
+				ev.lost++
+				if !sum.ts.IsZero() {
+					if ev.from.IsZero() || sum.ts.Before(ev.from) {
+						ev.from = sum.ts
+					}
 
-				if ts.After(ev.to) {
-					ev.to = ts
+					if sum.ts.After(ev.to) {
+						ev.to = sum.ts
+					}
 				}
+			case sum.death != "" && !slices.Contains(ev.deaths, sum.death):
+				ev.deaths = append(ev.deaths, sum.death)
 			}
 		}
 
@@ -481,7 +729,9 @@ func scanEviction(r io.Reader, base, ack, lostFrom Position, maxFrame int64) (ev
 
 // evictOldest deletes the oldest segment, rotating the active one first when
 // it is the only one. record receives the loss marker, if any, before the
-// segment is deleted.
+// segment is deleted. A corrupt frame inside the segment does not stop the
+// eviction: the samples before it are in the marker, the rest is counted as
+// corrupt (ruling R20), and the unconfirmed count is computed again.
 func (q *queue) evictOldest(now time.Time, record func(model.Loss)) error {
 	if len(q.segments) == 1 {
 		if err := q.rotate(); err != nil {
@@ -491,7 +741,8 @@ func (q *queue) evictOldest(now time.Time, record func(model.Loss)) error {
 
 	seg := q.segments[0]
 	ev, err := q.summarize(seg)
-	if err != nil {
+	c, corrupt := errors.AsType[*corruptFrame](err)
+	if err != nil && !corrupt {
 		return err
 	}
 
@@ -503,10 +754,24 @@ func (q *queue) evictOldest(now time.Time, record func(model.Loss)) error {
 		record(model.Loss{Priority: q.priority, FromTS: ev.from, ToTS: ev.to, Samples: ev.lost, Reason: model.LossBufferFull})
 	}
 
-	q.log.Warn("buffer: evicted a segment", "queue", q.priority.String(), "segment", uint64(seg.base), "bytes", seg.size, "lost_records", ev.lost)
-	q.unacked -= ev.unacked
+	for _, device := range ev.deaths {
+		q.log.Warn("buffer: evicted a device death; the backend will not see it", "queue", q.priority.String(), "device", device)
+	}
+
+	q.log.Warn("buffer: evicted a segment", "queue", q.priority.String(), "segment", uint64(seg.base), "bytes", seg.size, "lost_samples", ev.lost)
+	if corrupt {
+		q.corrupt++
+		q.log.Error("buffer: corrupt record inside an evicted segment; the records after it are not in the loss marker",
+			"queue", q.priority.String(), "segment", uint64(seg.base), "offset", uint64(c.pos), "error", c.err)
+	} else {
+		q.unacked -= min(ev.unacked, q.unacked)
+	}
+
 	q.oldestValid = false
 	q.deleteWhere(func(s *segment) bool { return s == seg })
+	if corrupt {
+		q.recount()
+	}
 
 	return nil
 }
