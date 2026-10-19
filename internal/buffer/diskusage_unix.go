@@ -17,5 +17,5 @@ func diskUsage(dir string) (free, total uint64, err error) {
 
 	bsize := uint64(st.Bsize)
 
-	return uint64(st.Bavail) * bsize, uint64(st.Blocks) * bsize, nil
+	return blockBytes(st.Bavail, bsize), blockBytes(st.Blocks, bsize), nil
 }

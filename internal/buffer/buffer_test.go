@@ -341,14 +341,15 @@ func TestReadLimitsAndErrors(t *testing.T) {
 func TestAppendRefuses(t *testing.T) {
 	f := frameSize(t)
 	tests := []struct {
-		name    string
-		mutate  func(*Options)
-		record  model.Record
-		wantErr error
+		name       string
+		mutate     func(*Options)
+		record     model.Record
+		wantErr    error
+		wantLosses []model.Loss
 	}{
-		{"record larger than a segment", func(o *Options) { o.SegmentSize = f - 1 }, bulk(0), ErrTooLarge},
-		{"record larger than the buffer", func(o *Options) { o.MaxSize = f - 1 }, bulk(0), ErrTooLarge},
-		{"invalid record", func(*Options) {}, model.Record{}, nil},
+		{"record larger than a segment", func(o *Options) { o.SegmentSize = f - 1 }, bulk(0), ErrTooLarge, []model.Loss{loss(model.Bulk, bulk(0), bulk(0), 1)}},
+		{"record larger than the buffer", func(o *Options) { o.MaxSize = f - 1 }, crit(0), ErrTooLarge, []model.Loss{loss(model.Critical, crit(0), crit(0), 1)}},
+		{"invalid record", func(*Options) {}, model.Record{}, nil, nil},
 	}
 
 	for _, tc := range tests {
@@ -369,6 +370,8 @@ func TestAppendRefuses(t *testing.T) {
 			if s := b.Stats(); s.Records != 0 || s.Bytes != 0 {
 				t.Fatalf("Stats() after a refused record = %+v", s)
 			}
+
+			assertLosses(t, b, tc.wantLosses)
 		})
 	}
 }
@@ -779,6 +782,7 @@ func TestFreeDiskFloor(t *testing.T) {
 		free          []uint64
 		trigger       model.Record
 		wantCalls     int
+		wantDropped   bool
 		wantLosses    []model.Loss
 		wantBulk      []model.Record
 	}{
@@ -794,10 +798,10 @@ func TestFreeDiskFloor(t *testing.T) {
 			wantBulk: bulkRange(0, 2),
 		},
 		{
-			name: "a second later the floor evicts the only bulk segment", segmentFrames: 10, bulk: 2, advance: time.Second,
-			free: []uint64{4, 50}, trigger: bulk(2), wantCalls: 2,
-			wantLosses: []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2)},
-			wantBulk:   bulkRange(2, 2),
+			name: "a second later with only active segments left the record is dropped", segmentFrames: 10, bulk: 2, advance: time.Second,
+			free: []uint64{4, 50}, trigger: bulk(2), wantCalls: 1, wantDropped: true,
+			wantLosses: []model.Loss{loss(model.Bulk, bulk(2), bulk(2), 1)},
+			wantBulk:   bulkRange(0, 1),
 		},
 		{
 			name: "unreadable disk statistics drop nothing", segmentFrames: 10, bulk: 2, advance: time.Second,
@@ -818,7 +822,9 @@ func TestFreeDiskFloor(t *testing.T) {
 
 			disk.reset(tc.usageErr, tc.free...)
 			clk.Advance(tc.advance)
-			mustAppend(t, b, tc.trigger)
+			if err := b.Append(tc.trigger); tc.wantDropped != errors.Is(err, ErrDropped) || (!tc.wantDropped && err != nil) {
+				t.Fatalf("Append() = %v, wantDropped %v", err, tc.wantDropped)
+			}
 
 			if got := disk.callCount(); got != tc.wantCalls {
 				t.Fatalf("disk usage read %d times, want %d", got, tc.wantCalls)
@@ -1209,7 +1215,7 @@ func TestOpenLayout(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "outputs", "laraplate")
 	openBuffer(t, dir, testOptions(t, clock.NewFake(epoch)), hooks{})
 
-	for _, name := range []string{"critical", "bulk", "acked", "losses"} {
+	for _, name := range []string{"critical", "bulk", "acked", "losses", "critical/segment_size", "bulk/segment_size"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("missing %s: %v", name, err)
 		}
@@ -1230,5 +1236,374 @@ func TestRealDiskUsage(t *testing.T) {
 
 	if total == 0 || free > total {
 		t.Fatalf("diskUsage() = free %d, total %d", free, total)
+	}
+}
+
+// TestRotationSyncsTheSegmentAPendingSyncPassTook holds the first sync pass
+// between taking its files and syncing them while an Append rotates.
+func TestRotationSyncsTheSegmentAPendingSyncPassTook(t *testing.T) {
+	clk := clock.NewFake(epoch)
+	armed := make(chan struct{}, 8)
+	synced := make(chan int, 8)
+	captured := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	var syncedFiles []string
+
+	h := hooks{
+		sync: func(f *os.File) error {
+			err := f.Sync()
+			if err == nil {
+				mu.Lock()
+				syncedFiles = append(syncedFiles, f.Name())
+				mu.Unlock()
+			}
+
+			return err
+		},
+		armed:      func() { armed <- struct{}{} },
+		beforeSync: func() { once.Do(func() { captured <- struct{}{}; <-release }) },
+		synced:     func(n int) { synced <- n },
+	}
+
+	dir := t.TempDir()
+	opts := testOptions(t, clk)
+	b := openBuffer(t, dir, opts, h)
+	<-armed
+
+	mustAppend(t, b, bulk(0))
+	old := segmentFiles(t, filepath.Join(dir, "bulk"))[0]
+	clk.Advance(opts.FsyncInterval)
+	<-captured // the pass holds the active bulk file and has cleared its dirty flag
+
+	mustAppend(t, b, bulk(1), bulk(2)) // bulk(2) rotates the segment the pass holds
+	if n := len(segmentFiles(t, filepath.Join(dir, "bulk"))); n != 2 {
+		t.Fatalf("bulk queue has %d segment files, want 2 after the rotation", n)
+	}
+
+	close(release)
+	<-synced
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Contains(syncedFiles, old) {
+		t.Fatalf("rotated segment %s never synced; synced files: %v", old, syncedFiles)
+	}
+}
+
+// failingLosses fails the next failures writes of the losses file; a
+// negative count fails every write.
+type failingLosses struct {
+	mu       sync.Mutex
+	failures int
+}
+
+func (w *failingLosses) set(failures int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.failures = failures
+}
+
+func (w *failingLosses) write(dir string, losses []model.Loss) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.failures != 0 {
+		if w.failures > 0 {
+			w.failures--
+		}
+
+		return errNoSpace
+	}
+
+	return writeLosses(dir, losses)
+}
+
+func durableLosses(t *testing.T, dir string) []model.Loss {
+	t.Helper()
+	losses, err := readLosses(dir)
+	if err != nil {
+		t.Fatalf("readLosses() = %v", err)
+	}
+
+	return losses
+}
+
+func assertSameLosses(t *testing.T, got, want []model.Loss) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("losses = %+v, want %+v", got, want)
+	}
+
+	for i := range got {
+		g, w := got[i], want[i]
+		if g.Priority != w.Priority || !g.FromTS.Equal(w.FromTS) || !g.ToTS.Equal(w.ToTS) || g.Samples != w.Samples || g.Reason != w.Reason {
+			t.Fatalf("losses[%d] = %+v, want %+v", i, g, w)
+		}
+	}
+}
+
+func TestAddLossReportsAMarkerNotYetDurable(t *testing.T) {
+	dir := t.TempDir()
+	writer := &failingLosses{}
+	b := openBuffer(t, dir, testOptions(t, clock.NewFake(epoch)), hooks{writeLosses: writer.write})
+	marker := loss(model.Bulk, bulk(0), bulk(0), 1)
+
+	writer.set(1)
+	if err := b.AddLoss(marker); !errors.Is(err, ErrNotDurable) {
+		t.Fatalf("AddLoss() = %v, want ErrNotDurable", err)
+	}
+
+	assertLosses(t, b, []model.Loss{marker})
+	assertSameLosses(t, durableLosses(t, dir), nil)
+
+	b.syncPass()
+	assertSameLosses(t, durableLosses(t, dir), []model.Loss{marker})
+
+	writer.set(1)
+	if err := b.AckLosses(1); !errors.Is(err, ErrNotDurable) {
+		t.Fatalf("AckLosses() = %v, want ErrNotDurable", err)
+	}
+
+	assertLosses(t, b, nil)
+	b.syncPass()
+	assertSameLosses(t, durableLosses(t, dir), nil)
+}
+
+func TestEvictionWaitsForDurableMarkers(t *testing.T) {
+	f := frameSize(t)
+	limit := func(frames int64) int64 { return frames*f + f/2 }
+
+	tests := []struct {
+		name        string
+		frames      int64
+		failures    int
+		wantDropped bool
+		wantLosses  []model.Loss
+		wantBulk    []model.Record
+		wantDurable []model.Loss
+	}{
+		{
+			name: "the marker is written right after the deletion freed space", frames: 5, failures: 1,
+			wantLosses:  []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2)},
+			wantBulk:    bulkRange(2, 6),
+			wantDurable: []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2)},
+		},
+		{
+			name: "the write after the deletion succeeds and eviction goes on", frames: 4, failures: 1,
+			wantLosses:  []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2), loss(model.Bulk, bulk(2), bulk(3), 2)},
+			wantBulk:    bulkRange(4, 6),
+			wantDurable: []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2), loss(model.Bulk, bulk(2), bulk(3), 2)},
+		},
+		{
+			name: "a marker that stays unwritten stops eviction and drops the record", frames: 4, failures: -1, wantDropped: true,
+			wantLosses: []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2), loss(model.Bulk, bulk(6), bulk(6), 1)},
+			wantBulk:   bulkRange(2, 5),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writer := &failingLosses{}
+			opts := testOptions(t, clock.NewFake(epoch))
+			opts.MaxSize = limit(8)
+			b := openBuffer(t, dir, opts, hooks{writeLosses: writer.write})
+			mustAppend(t, b, bulkRange(0, 5)...)
+			mustClose(t, b)
+
+			opts.MaxSize = limit(tc.frames)
+			b = openBuffer(t, dir, opts, hooks{writeLosses: writer.write})
+			writer.set(tc.failures)
+			if err := b.Append(bulk(6)); tc.wantDropped != errors.Is(err, ErrDropped) || (!tc.wantDropped && err != nil) {
+				t.Fatalf("Append() = %v, wantDropped %v", err, tc.wantDropped)
+			}
+
+			assertLosses(t, b, tc.wantLosses)
+			assertRecords(t, b, model.Bulk, tc.wantBulk)
+			assertSameLosses(t, durableLosses(t, dir), tc.wantDurable)
+
+			writer.set(0)
+			mustClose(t, b)
+			b = openBuffer(t, dir, opts, hooks{})
+			assertLosses(t, b, tc.wantLosses)
+			assertRecords(t, b, model.Bulk, tc.wantBulk)
+		})
+	}
+}
+
+func TestFloorBreachCoalescesDrops(t *testing.T) {
+	type step struct {
+		record  model.Record
+		handOut bool // call PendingLosses before this record
+	}
+
+	bulkSteps := func(from, to int) []step {
+		var out []step
+		for i := from; i <= to; i++ {
+			out = append(out, step{record: bulk(i)})
+		}
+
+		return out
+	}
+
+	tests := []struct {
+		name  string
+		steps []step
+		want  []model.Loss
+	}{
+		{
+			name:  "a lasting breach leaves one growing marker",
+			steps: bulkSteps(2, 61),
+			want:  []model.Loss{loss(model.Bulk, bulk(2), bulk(61), 60)},
+		},
+		{
+			name:  "another class in between starts new markers",
+			steps: []step{{record: bulk(2)}, {record: bulk(3)}, {record: crit(0)}, {record: bulk(4)}},
+			want:  []model.Loss{loss(model.Bulk, bulk(2), bulk(3), 2), loss(model.Critical, crit(0), crit(0), 1), loss(model.Bulk, bulk(4), bulk(4), 1)},
+		},
+		{
+			name:  "a marker handed out is never changed",
+			steps: []step{{record: bulk(2)}, {record: bulk(3), handOut: true}, {record: bulk(4)}},
+			want:  []model.Loss{loss(model.Bulk, bulk(2), bulk(2), 1), loss(model.Bulk, bulk(3), bulk(4), 2)},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := frameSize(t)
+			dir := t.TempDir()
+			clk := clock.NewFake(epoch)
+			disk := newFakeDisk(100)
+			opts := testOptions(t, clk)
+			opts.SegmentSize = 10*f + f/2
+			opts.DiskUsage = disk.usage
+			b := openBuffer(t, dir, opts, hooks{})
+			mustAppend(t, b, bulk(0), bulk(1))
+
+			before := append(segmentFiles(t, filepath.Join(dir, "critical")), segmentFiles(t, filepath.Join(dir, "bulk"))...)
+			disk.reset(nil, 1)
+			var samples uint64
+			for _, st := range tc.steps {
+				clk.Advance(time.Second)
+				if st.handOut {
+					b.PendingLosses()
+				}
+
+				if err := b.Append(st.record); !errors.Is(err, ErrDropped) {
+					t.Fatalf("Append() under a breached floor = %v, want ErrDropped", err)
+				}
+
+				samples++
+			}
+
+			after := append(segmentFiles(t, filepath.Join(dir, "critical")), segmentFiles(t, filepath.Join(dir, "bulk"))...)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("segment files changed under the floor: %v, before %v", after, before)
+			}
+
+			assertLosses(t, b, tc.want)
+			assertRecords(t, b, model.Bulk, bulkRange(0, 1))
+			if got := b.Stats().Dropped[model.LossBufferFull]; got != samples {
+				t.Fatalf("Stats().Dropped = %d, want %d", got, samples)
+			}
+
+			b.syncPass()
+			assertSameLosses(t, durableLosses(t, dir), tc.want)
+
+			info, err := os.Stat(filepath.Join(dir, "losses"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if info.Size() > 1024 {
+				t.Fatalf("losses file grew to %d bytes", info.Size())
+			}
+		})
+	}
+}
+
+func TestSegmentSizeIsPinnedPerQueue(t *testing.T) {
+	f := frameSize(t)
+	dir := t.TempDir()
+	opts := testOptions(t, clock.NewFake(epoch))
+	opts.SegmentSize = 10 * f
+	b := openBuffer(t, dir, opts, hooks{})
+	mustAppend(t, b, bulkRange(0, 2)...)
+	entries := readAll(t, b, model.Bulk)
+	oldTail := entries[0].Pos + Position(10*f)
+	mustClose(t, b)
+
+	opts.SegmentSize = f - 1
+	b = openBuffer(t, dir, opts, hooks{})
+	assertRecords(t, b, model.Bulk, bulkRange(0, 2))
+	if s := b.Stats(); s.CorruptRecords != 0 {
+		t.Fatalf("CorruptRecords = %d after reopening with a smaller segment size", s.CorruptRecords)
+	}
+
+	mustAppend(t, b, bulk(3), crit(0))
+	entries = readAll(t, b, model.Bulk)
+	if last := entries[len(entries)-1]; last.Pos < oldTail {
+		t.Fatalf("new record at %d below the old segment end %d", last.Pos, oldTail)
+	}
+}
+
+func TestHead(t *testing.T) {
+	f := frameSize(t)
+	limit := func(frames int64) int64 { return frames*f + f/2 }
+
+	tests := []struct {
+		name    string
+		p       model.Priority
+		prepare func(t *testing.T, b *Buffer, bulkEntries []Entry) Position
+	}{
+		{"an untouched queue starts at its first record", model.Bulk, func(_ *testing.T, _ *Buffer, e []Entry) Position { return e[0].Pos }},
+		{"after an ack", model.Bulk, func(t *testing.T, b *Buffer, e []Entry) Position {
+			if err := b.Ack(model.Bulk, e[2].Next); err != nil {
+				t.Fatal(err)
+			}
+
+			return e[2].Next
+		}},
+		{"after an eviction", model.Bulk, func(t *testing.T, b *Buffer, e []Entry) Position {
+			mustAppend(t, b, bulkRange(4, 6)...)
+
+			return e[2].Pos
+		}},
+		{"an invalid priority", model.Priority(0), func(*testing.T, *Buffer, []Entry) Position { return 0 }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t, clock.NewFake(epoch))
+			opts.MaxSize = limit(6)
+			b := openBuffer(t, t.TempDir(), opts, hooks{})
+			mustAppend(t, b, bulkRange(0, 3)...)
+			want := tc.prepare(t, b, readAll(t, b, model.Bulk))
+			if got := b.Head(tc.p); got != want {
+				t.Fatalf("Head() = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestBlockBytesClampsNegativeCounts(t *testing.T) {
+	tests := []struct {
+		name string
+		got  uint64
+		want uint64
+	}{
+		{"signed negative", blockBytes(int64(-5), 4096), 0},
+		{"signed zero", blockBytes(int64(0), 4096), 0},
+		{"signed positive", blockBytes(int64(3), 4096), 3 * 4096},
+		{"unsigned", blockBytes(uint64(7), 512), 7 * 512},
+	}
+
+	for _, tc := range tests {
+		if tc.got != tc.want {
+			t.Fatalf("%s: blockBytes = %d, want %d", tc.name, tc.got, tc.want)
+		}
 	}
 }

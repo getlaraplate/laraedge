@@ -2,6 +2,7 @@ package buffer
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,10 +19,11 @@ import (
 // queue is the segmented log of one priority class. The last segment is the
 // active one; it always exists, possibly empty, and is the only one written.
 type queue struct {
-	priority model.Priority
-	dir      string
-	maxFrame int64
-	log      *slog.Logger
+	priority    model.Priority
+	dir         string
+	segmentSize int64 // pinned per queue directory, also the frame size limit
+	syncFile    func(*os.File) error
+	log         *slog.Logger
 
 	segments []*segment
 	ack      Position // every record before it is confirmed (persisted in acked)
@@ -37,9 +39,14 @@ type queue struct {
 // one drops the rest of that segment and is counted as corrupt. A new active
 // segment is then created beyond any position handed out before the restart,
 // so positions are never reused even when unsynced records were lost.
-func openQueue(dir string, p model.Priority, ack Position, maxFrame int64, log *slog.Logger) (*queue, uint64, error) {
+func openQueue(dir string, p model.Priority, ack Position, defaultSegmentSize int64, syncFile func(*os.File) error, log *slog.Logger) (*queue, uint64, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, 0, fmt.Errorf("create %s queue directory: %w", p, err)
+	}
+
+	segmentSize, err := pinSegmentSize(dir, defaultSegmentSize)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s queue: %w", p, err)
 	}
 
 	bases, err := listSegments(dir)
@@ -47,7 +54,7 @@ func openQueue(dir string, p model.Priority, ack Position, maxFrame int64, log *
 		return nil, 0, fmt.Errorf("list %s segments: %w", p, err)
 	}
 
-	q := &queue{priority: p, dir: dir, maxFrame: maxFrame, log: log, ack: ack}
+	q := &queue{priority: p, dir: dir, segmentSize: segmentSize, syncFile: syncFile, log: log, ack: ack}
 
 	var corrupt uint64
 	for i, base := range bases {
@@ -68,7 +75,7 @@ func openQueue(dir string, p model.Priority, ack Position, maxFrame int64, log *
 	next := ack
 	if n := len(q.segments); n > 0 {
 		last := q.segments[n-1]
-		next = max(next, last.end(), last.base+Position(maxFrame))
+		next = max(next, last.end(), last.base+Position(segmentSize))
 	}
 
 	active, err := createSegment(dir, next)
@@ -97,7 +104,7 @@ func (q *queue) recover(base Position, last bool) (*segment, bool, error) {
 		return nil, false, fmt.Errorf("stat segment: %w", err)
 	}
 
-	res, err := scanSegment(f, info.Size(), base, q.ack, q.maxFrame)
+	res, err := scanSegment(f, info.Size(), base, q.ack, q.segmentSize)
 	if err != nil {
 		return nil, false, fmt.Errorf("scan segment %s: %w", path, err)
 	}
@@ -124,6 +131,46 @@ func (q *queue) recover(base Position, last bool) (*segment, bool, error) {
 	q.unacked += res.records - res.beforeAck
 
 	return &segment{base: base, size: res.size}, bad, nil
+}
+
+// segmentSizeState is the content of a queue's segment_size file.
+type segmentSizeState struct {
+	Version     int   `json:"version"`
+	SegmentSize int64 `json:"segment_size"`
+}
+
+// pinSegmentSize returns the segment size recorded in a queue directory,
+// recording fallback when there is none yet. A queue keeps the size it was
+// created with: a smaller one would cut valid frames as corrupt and shorten
+// the position skip that keeps positions unique after a crash.
+func pinSegmentSize(dir string, fallback int64) (int64, error) {
+	if err := os.Remove(filepath.Join(dir, segmentSizeFileName+tmpSuffix)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return 0, fmt.Errorf("remove a leftover temporary file: %w", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, segmentSizeFileName))
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := writeJSONAtomic(dir, segmentSizeFileName, segmentSizeState{Version: stateVersion, SegmentSize: fallback}); err != nil {
+			return 0, err
+		}
+
+		return fallback, nil
+	}
+
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", segmentSizeFileName, err)
+	}
+
+	var state segmentSizeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return 0, fmt.Errorf("parse %s: %w", segmentSizeFileName, err)
+	}
+
+	if state.Version != stateVersion || state.SegmentSize <= headerSize {
+		return 0, fmt.Errorf("%s: version %d, size %d not usable", segmentSizeFileName, state.Version, state.SegmentSize)
+	}
+
+	return state.SegmentSize, nil
 }
 
 func listSegments(dir string) ([]Position, error) {
@@ -169,10 +216,10 @@ func (q *queue) bytes() int64 {
 	return n
 }
 
-func (q *queue) needsRotation(frame, segmentSize int64) bool {
+func (q *queue) needsRotation(frame int64) bool {
 	a := q.active()
 
-	return a.size > 0 && a.size+frame > segmentSize
+	return a.size > 0 && a.size+frame > q.segmentSize
 }
 
 // rotate closes the active segment, synced, and starts a new one at its end.
@@ -188,8 +235,8 @@ func (q *queue) rotate() error {
 		return err
 	}
 
-	if err := old.close(); err != nil {
-		q.log.Error("buffer: closing a rotated segment failed", "queue", q.priority.String(), "segment", uint64(old.base), "error", err)
+	if err := old.close(q.syncFile); err != nil {
+		q.log.Error("buffer: syncing and closing a rotated segment failed", "queue", q.priority.String(), "segment", uint64(old.base), "error", err)
 	}
 
 	q.segments = append(q.segments, seg)
@@ -255,7 +302,7 @@ func (q *queue) walk(pos Position, fn func(pos Position, frame []byte) bool) (Po
 		}
 
 		for pos < seg.end() {
-			frame, err := readFrameAt(r, int64(pos-seg.base), seg.size, q.maxFrame)
+			frame, err := readFrameAt(r, int64(pos-seg.base), seg.size, q.segmentSize)
 			if err != nil {
 				done()
 
@@ -370,7 +417,7 @@ func (q *queue) summarize(seg *segment) (eviction, error) {
 
 	defer done()
 
-	res, err := scanEviction(io.NewSectionReader(r, 0, seg.size), seg.base, q.ack, lostFrom, q.maxFrame)
+	res, err := scanEviction(io.NewSectionReader(r, 0, seg.size), seg.base, q.ack, lostFrom, q.segmentSize)
 	if err != nil {
 		return ev, fmt.Errorf("scan segment %d: %w", uint64(seg.base), err)
 	}
@@ -474,7 +521,7 @@ func (q *queue) deleteWhere(match func(*segment) bool) {
 			return false
 		}
 
-		if err := s.close(); err != nil {
+		if err := s.close(nil); err != nil {
 			q.log.Error("buffer: closing a segment before deletion failed", "queue", q.priority.String(), "segment", uint64(s.base), "error", err)
 		}
 
@@ -496,7 +543,7 @@ func (q *queue) deleteWhere(match func(*segment) bool) {
 
 // close syncs and closes the active segment.
 func (q *queue) close() error {
-	if err := q.active().close(); err != nil {
+	if err := q.active().close(q.syncFile); err != nil {
 		return fmt.Errorf("close %s queue: %w", q.priority, err)
 	}
 

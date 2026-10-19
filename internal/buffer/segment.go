@@ -209,15 +209,18 @@ type segment struct {
 // end returns the position just after the segment's last valid byte.
 func (s *segment) end() Position { return s.base + Position(s.size) }
 
-// close syncs unsynced writes and closes the file of the active segment.
-func (s *segment) close() error {
+// close closes the file of the active segment, syncing it first when sync is
+// not nil. A rotated or shut-down segment is always synced, whatever its dirty
+// flag: a concurrent group sync may have taken the flag and then lost the race
+// to this close, its own sync failing on the closed file.
+func (s *segment) close(sync func(*os.File) error) error {
 	if s.file == nil {
 		return nil
 	}
 
 	var syncErr error
-	if s.dirty {
-		syncErr = s.file.Sync()
+	if sync != nil {
+		syncErr = sync(s.file)
 	}
 
 	closeErr := s.file.Close()
