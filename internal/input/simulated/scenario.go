@@ -52,8 +52,8 @@ const (
 //     state gives for each other state per step (the remainder stays);
 //   - while in a producing state a part completes when the cycle time drawn
 //     for it has elapsed; the shortest cycle is one tick, so a step completes
-//     at most one part. Leaving a producing state abandons the part in
-//     progress; entering one starts a new part;
+//     at most one part. Any change of state abandons the part in
+//     progress, and entering a producing state starts a new part;
 //   - a completed part is scrap with probability ScrapRate; and every
 //     measurement is drawn once per completed part.
 type Scenario struct {

@@ -12,13 +12,13 @@ tick: 1s
 initial: idle
 
 states:
-  # Waiting for work: about 20 s on average, now and then a changeover.
+  # Waiting for work: about 18 s on average, now and then a changeover.
   - name: idle
     transitions:
       running: 0.05
       setup: 0.005
 
-  # Producing: a stretch of about 8 minutes, rarely a fault.
+  # Producing: a stretch of about 400 s (6.7 minutes), rarely a fault.
   - name: running
     producing: true
     transitions:

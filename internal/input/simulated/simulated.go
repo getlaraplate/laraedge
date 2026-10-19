@@ -315,9 +315,9 @@ func (in *Input) sinks(sc *Scenario) (map[string]map[string][]sink, error) {
 	return out, nil
 }
 
-// Start starts the simulation: the initial state is emitted at once, then
-// the scenario advances by one tick each time the clock passes one. It fails
-// only on a scenario it cannot read or use. The goroutine stops when ctx is
+// Start starts the simulation: the initial state and the counters at 0 are
+// emitted at once, then the scenario advances by one tick each time the clock
+// passes one. It fails only on a scenario it cannot read or use. The goroutine stops when ctx is
 // done or on Close.
 func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 	if err := ctx.Err(); err != nil {
@@ -521,9 +521,14 @@ func (m *machine) drawCycle() time.Duration {
 	return max(time.Duration(seconds*float64(time.Second)), m.sc.Tick)
 }
 
-// initial appends the state the machine starts in.
+// initial appends the state the machine starts in and the counters at 0. The
+// backend takes the first sample of a cumulative counter as a baseline and
+// counts from the second, so without the 0 the first part would be lost.
 func (m *machine) initial(out []model.Sample, ts time.Time) []model.Sample {
-	return m.add(out, SignalState, model.StringValue(m.sc.States[m.state].Name), ts)
+	out = m.add(out, SignalState, model.StringValue(m.sc.States[m.state].Name), ts)
+	out = m.add(out, SignalGoodCount, model.IntValue(m.good), ts)
+
+	return m.add(out, SignalScrapCount, model.IntValue(m.scrap), ts)
 }
 
 // step advances the machine by one tick, ending at ts, and appends what
@@ -575,15 +580,13 @@ func (m *machine) completePart(out []model.Sample, ts time.Time) []model.Sample 
 }
 
 func (m *machine) moveTo(out []model.Sample, to int, ts time.Time) []model.Sample {
-	wasProducing := m.sc.States[m.state].Producing
 	m.state = to
 
-	switch producing := m.sc.States[to].Producing; {
-	case producing && !wasProducing:
-		m.elapsed = 0
+	// Any change of state abandons the part in progress; a producing state
+	// starts a new one.
+	m.elapsed = 0
+	if m.sc.States[to].Producing {
 		m.cycle = m.drawCycle()
-	case !producing:
-		m.elapsed = 0
 	}
 
 	return m.add(out, SignalState, model.StringValue(m.sc.States[to].Name), ts)

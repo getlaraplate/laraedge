@@ -166,11 +166,29 @@ func TestScenarioDrivesStatesCountersAndMeasurements(t *testing.T) {
 	got := drive(t, in, clk, 7, time.Second).samples("")
 
 	want := []string{
-		"state=idle@0",
+		"state=idle@0", "good=0@0", "scrap=0@0",
 		"state=running@1",
 		"good=1@4", "temp=10@4",
 		"good=2@7", "temp=10@7",
 	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("emitted\n%v\nwant\n%v", got, want)
+	}
+}
+
+func TestEveryStateChangeAbandonsThePartInProgress(t *testing.T) {
+	// a and b both produce; a becomes b at the first tick. The part of b
+	// starts then, so with a cycle of 3 ticks it completes at tick 4. Had the
+	// progress made in a been kept, it would complete at tick 3.
+	twoProducing := `{"tick":"1s","initial":"a","states":[
+		{"name":"a","producing":true,"transitions":{"b":1}},
+		{"name":"b","producing":true}],
+		"cycle_time":{"mean":"3s","stddev":"0s"},"scrap_rate":0,
+		"measurements":[{"signal":"temperature","mean":10,"stddev":0}]}`
+	in, clk := mustNew(t, inputOf(inline(twoProducing), press("press-07")), 1)
+	got := drive(t, in, clk, 5, time.Second).samples("")
+
+	want := []string{"state=a@0", "good=0@0", "scrap=0@0", "state=b@1", "good=1@4", "temp=10@4"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("emitted\n%v\nwant\n%v", got, want)
 	}
@@ -182,7 +200,7 @@ func TestScrapRateDecidesWhichCounterMoves(t *testing.T) {
 	got := drive(t, in, clk, 7, time.Second).samples("")
 
 	want := []string{
-		"state=idle@0",
+		"state=idle@0", "good=0@0", "scrap=0@0",
 		"state=running@1",
 		"scrap=1@4", "temp=10@4",
 		"scrap=2@7", "temp=10@7",
@@ -233,7 +251,7 @@ func TestValueKindsMatchTheSignals(t *testing.T) {
 		kinds[rec.Sample.Signal] = rec.Sample.Value.Kind
 	}
 
-	want := map[string]model.ValueKind{"state": model.KindString, "good": model.KindInt, "temp": model.KindFloat}
+	want := map[string]model.ValueKind{"state": model.KindString, "good": model.KindInt, "scrap": model.KindInt, "temp": model.KindFloat}
 	if !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("kinds = %v, want %v", kinds, want)
 	}
@@ -290,7 +308,10 @@ func TestStochasticRunFollowsTheScenario(t *testing.T) {
 	transitions := map[string][]string{"idle": {"running", "setup"}, "running": {"idle", "fault"}, "setup": {"idle"}, "fault": {"idle"}}
 	states := map[string]bool{}
 	var current string
-	var good, scrap, temps, parts int64
+	// The counters start with a sample of 0, the baseline the backend takes
+	// its first delta from.
+	good, scrap := int64(-1), int64(-1)
+	var temps, parts int64
 	for _, rec := range recs {
 		s := rec.Sample
 		switch s.Signal {
@@ -304,12 +325,12 @@ func TestStochasticRunFollowsTheScenario(t *testing.T) {
 		case "good":
 			good++
 			if s.Value.Int != good {
-				t.Fatalf("good_count = %d after %d good parts", s.Value.Int, good)
+				t.Fatalf("good_count = %d, want %d (the previous value plus one)", s.Value.Int, good)
 			}
 		case "scrap":
 			scrap++
 			if s.Value.Int != scrap {
-				t.Fatalf("scrap_count = %d after %d scrap parts", s.Value.Int, scrap)
+				t.Fatalf("scrap_count = %d, want %d (the previous value plus one)", s.Value.Int, scrap)
 			}
 		case "temp":
 			temps++
@@ -318,12 +339,12 @@ func TestStochasticRunFollowsTheScenario(t *testing.T) {
 			}
 		}
 	}
-	parts = good + scrap
+	parts = good + scrap // both counters are one sample ahead of their parts, the baseline
 
 	if len(states) != 4 {
 		t.Errorf("visited states %v, want all four", states)
 	}
-	if good == 0 || scrap == 0 {
+	if good < 1 || scrap < 1 {
 		t.Errorf("good = %d, scrap = %d: want both to move", good, scrap)
 	}
 	if temps != parts {
@@ -367,7 +388,7 @@ func TestACoarseAdvanceCatchesUpTickByTick(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"state=idle@0", "state=running@1", "good=1@4", "temp=10@4", "good=2@7", "temp=10@7"}
+	want := []string{"state=idle@0", "good=0@0", "scrap=0@0", "state=running@1", "good=1@4", "temp=10@4", "good=2@7", "temp=10@7"}
 	if got := c.samples(""); !slices.Equal(got, want) {
 		t.Fatalf("emitted\n%v\nwant\n%v", got, want)
 	}
