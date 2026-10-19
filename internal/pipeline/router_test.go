@@ -196,7 +196,7 @@ func TestRouterBirths(t *testing.T) {
 		{
 			name: "a removed output receives nothing",
 			act: func(r *pipeline.Router) {
-				r.RemoveOutput("all")
+				r.RemoveOutput("all", "removed")
 				r.BirthInput("line")
 				r.Emit(sample("press-07", "state"))
 			},
@@ -279,7 +279,7 @@ func TestRouterHoldsARestartingOutput(t *testing.T) {
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, old)
 	before := len(old.got())
 
-	r.Hold("main")
+	r.Hold("main", config.Route{Include: []string{"*"}})
 	r.Emit(sample("press-07", "state"))
 	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: "oven-02", TS: start}))
 	// A held birth is not flushed: SetOutput has just sent the current ones.
@@ -309,7 +309,7 @@ func TestRouterHoldOverflowBecomesLossMarkers(t *testing.T) {
 	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.NewJSONHandler(&logs, nil)))
 	r.SetInput(config.Input{ID: "press", Devices: []config.Device{{Device: "press-07", Points: []config.Point{{Signal: "state", Type: "string"}}}}})
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
-	r.Hold("main")
+	r.Hold("main", config.Route{Include: []string{"*"}})
 
 	at := func(i int) time.Time { return start.Add(time.Duration(i) * time.Millisecond) }
 	for range pipeline.HoldLimit {
@@ -347,32 +347,61 @@ func TestRouterRemovingAHeldOutputDiscardsItsRecords(t *testing.T) {
 	var logs bytes.Buffer
 	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.NewJSONHandler(&logs, nil)))
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
-	r.Hold("main")
+	r.Hold("main", config.Route{Include: []string{"*"}})
 	r.Emit(sample("press-07", "state"))
 
-	r.RemoveOutput("main")
+	r.Emit(model.SampleRecord(model.Sample{Device: "press-07", Signal: "temp", TS: start.Add(time.Second), Value: model.IntValue(1), Quality: model.Good, Priority: model.Bulk}))
+	r.Emit(model.SampleRecord(model.Sample{Device: "press-07", Signal: "temp", TS: start.Add(3 * time.Second), Value: model.IntValue(1), Quality: model.Good, Priority: model.Bulk}))
+
+	r.RemoveOutput("main", "agent shutting down")
 	again := &sink{}
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, again)
 
 	if got := again.got(); len(got) != 0 {
 		t.Fatalf("a new output got %q held for a removed one", got)
 	}
-	if !strings.Contains(logs.String(), `"records":1`) {
-		t.Fatalf("no warning about the discarded record in %s", logs.String())
+	for _, want := range []string{
+		`"reason":"agent shutting down","priority":"critical","records":1,"from_ts":"2026-10-19T08:00:00Z","to_ts":"2026-10-19T08:00:00Z"`,
+		`"reason":"agent shutting down","priority":"bulk","records":2,"from_ts":"2026-10-19T08:00:01Z","to_ts":"2026-10-19T08:00:03Z"`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("no warning with %s in %s", want, logs.String())
+		}
 	}
 }
 
 func TestRouterHoldingAHeldOutputKeepsItsRecords(t *testing.T) {
 	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
-	r.Hold("main")
+	r.Hold("main", config.Route{Include: []string{"*"}})
 	r.Emit(sample("press-07", "state"))
 
-	r.Hold("main")
+	r.Hold("main", config.Route{Include: []string{"*"}})
 	reopened := &sink{}
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, reopened)
 
 	if got := reopened.got(); !reflect.DeepEqual(got, []string{"press-07/state"}) {
 		t.Fatalf("reopened output got %q, want the record held before the second Hold", got)
+	}
+}
+
+func TestRouterHoldTakesTheGivenRoute(t *testing.T) {
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
+
+	// The hold routes with the configuration being restored.
+	r.Hold("main", config.Route{Include: []string{"press-07"}})
+	r.Emit(sample("oven-02", "temp"))
+	r.Emit(sample("press-07", "state"))
+	// Holding again changes the route and keeps the queue.
+	r.Hold("main", config.Route{Include: []string{"oven-02"}})
+	r.Emit(sample("press-07", "temp"))
+	r.Emit(sample("oven-02", "temp"))
+
+	reopened := &sink{}
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, reopened)
+
+	if got, want := reopened.got(), []string{"press-07/state", "oven-02/temp"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reopened output got %q, want %q", got, want)
 	}
 }

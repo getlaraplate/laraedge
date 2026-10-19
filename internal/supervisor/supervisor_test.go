@@ -782,7 +782,7 @@ func TestFailedOutputHoldsItsRecords(t *testing.T) {
 				return f.document(3, []inSpec{{id: "a", devices: []string{"a1"}}}, nil)
 			},
 			check: func(t *testing.T, f *fixture) {
-				if !strings.Contains(f.logs.String(), "held records are discarded") || !strings.Contains(f.logs.String(), `"records":1`) {
+				if !strings.Contains(f.logs.String(), "held records of an output discarded") || !strings.Contains(f.logs.String(), `"records":1`) {
 					t.Fatalf("no warning about the discarded held record in %s", f.logs.String())
 				}
 			},
@@ -791,41 +791,102 @@ func TestFailedOutputHoldsItsRecords(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := newFixture(t)
-			f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
-			f.be.waitItem(t, "main", birthA1)
-			f.waitStatus("main confirmed", func(s Status) bool {
-				return len(s.Outputs) == 1 && !s.Outputs[0].LastConfirmation.IsZero()
-			})
-
-			// A corrupt inflight file makes both the new and the previous
-			// configuration of main fail to start.
-			inflight := filepath.Join(f.dataDir, "outputs", "main", "inflight")
-			saved, err := os.ReadFile(inflight)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(inflight, []byte("{corrupt"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			out := f.apply(f.document(2, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main", variant: 1}}))
-			if out.Result != ResultRolledBack || len(out.Errors) != 2 || !strings.HasPrefix(out.Errors[1], "rollback: output main: ") {
-				t.Fatalf("Apply() = %+v, want rolled_back with the failed restart of main", out)
-			}
-			st := f.sup.Status()
-			if len(st.Outputs) != 1 || st.Outputs[0].State != StateFailed {
-				t.Fatalf("Status().Outputs = %+v, want main failed", st.Outputs)
-			}
-
+			f, restore := failMain(t)
 			f.drv.instance(t, "a").send("a1", "state")
 
-			if err := os.WriteFile(inflight, saved, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			restore()
 			f.mustApply(tt.later(f))
 			tt.check(t, f)
 		})
+	}
+}
+
+// failMain applies a document with input a and output main, then a change
+// of main that fails, and whose rollback fails too, through a corrupt
+// inflight file: main is left failed and held. restore repairs the file.
+func failMain(t *testing.T) (f *fixture, restore func()) {
+	t.Helper()
+
+	f = newFixture(t)
+	f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	f.be.waitItem(t, "main", birthA1)
+	f.waitStatus("main confirmed", func(s Status) bool {
+		return len(s.Outputs) == 1 && !s.Outputs[0].LastConfirmation.IsZero()
+	})
+
+	inflight := filepath.Join(f.dataDir, "outputs", "main", "inflight")
+	saved, err := os.ReadFile(inflight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inflight, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := f.apply(f.document(2, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main", variant: 1}}))
+	if out.Result != ResultRolledBack || len(out.Errors) != 2 || !strings.HasPrefix(out.Errors[1], "rollback: output main: ") {
+		t.Fatalf("Apply() = %+v, want rolled_back with the failed restart of main", out)
+	}
+	st := f.sup.Status()
+	if len(st.Outputs) != 1 || st.Outputs[0].State != StateFailed {
+		t.Fatalf("Status().Outputs = %+v, want main failed", st.Outputs)
+	}
+
+	return f, func() {
+		if err := os.WriteFile(inflight, saved, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestFailedOutputStartedByARolledBackDocumentStaysHeld: a document that
+// starts the failed output but fails on another component leaves the output
+// failed with its previous error and its records held, routed by the
+// configuration being restored.
+func TestFailedOutputStartedByARolledBackDocumentStaysHeld(t *testing.T) {
+	f, restore := failMain(t)
+	failedErr := f.sup.Status().Outputs[0].LastError
+	f.drv.instance(t, "a").send("a1", "state")
+	restore()
+
+	f.drv.failStart["b"] = errRefused
+	out := f.apply(f.document(3,
+		[]inSpec{{id: "a", devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}},
+		[]outSpec{{id: "main", variant: 2}}))
+	if out.Result != ResultRolledBack {
+		t.Fatalf("Apply() = %+v, want rolled_back", out)
+	}
+	st := f.sup.Status()
+	if len(st.Outputs) != 1 || st.Outputs[0].State != StateFailed || st.Outputs[0].LastError != failedErr {
+		t.Fatalf("Status().Outputs = %+v, want main failed with %q", st.Outputs, failedErr)
+	}
+
+	f.drv.instance(t, "a").send("a1", "count")
+	f.mustApply(f.document(4, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main", variant: 2}}))
+
+	f.be.waitItem(t, "main", "a1/count")
+	if got := f.be.got("main"); !slices.Contains(got, "a1/state") {
+		t.Fatalf("main received %q, want the sample held before the rolled back document", got)
+	}
+}
+
+func TestCloseStopsInputsBeforeDiscardingFailedOutputs(t *testing.T) {
+	f, _ := failMain(t)
+	f.drv.instance(t, "a").send("a1", "state")
+	var steps []string
+	f.sup.trace = func(step string) { steps = append(steps, step) }
+
+	if err := f.sup.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+
+	if want := []string{"stop input a", "discard output main"}; !reflect.DeepEqual(steps, want) {
+		t.Fatalf("Close steps = %q, want %q", steps, want)
+	}
+	for _, want := range []string{"held records of an output discarded", `"reason":"agent shutting down"`, `"priority":"critical","records":1`, `"from_ts"`, `"to_ts"`} {
+		if !strings.Contains(f.logs.String(), want) {
+			t.Errorf("no %s in the shutdown warning: %s", want, f.logs.String())
+		}
 	}
 }
 

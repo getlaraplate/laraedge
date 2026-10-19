@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"path/filepath"
 	"slices"
@@ -139,6 +140,9 @@ type runningOutput struct {
 type failure struct {
 	kind string
 	err  string
+	// output is the configuration of a failed output, whose route its
+	// held records follow.
+	output config.Output
 }
 
 // New returns a supervisor running nothing.
@@ -212,6 +216,10 @@ type journal struct {
 	stoppedOutputs []config.Output
 	startedInputs  []string
 	startedOutputs []string
+	// failedIn and failedOut are the failed components before the Apply: a
+	// rollback puts back those this Apply started.
+	failedIn  map[string]failure
+	failedOut map[string]failure
 }
 
 // Apply makes doc the running document. It refuses, with ResultRejected and
@@ -278,7 +286,7 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	// one it has was started, which flushed them.
 	for _, id := range failedOut {
 		if !slices.ContainsFunc(doc.Outputs, func(o config.Output) bool { return o.ID == id }) {
-			s.router.RemoveOutput(id)
+			s.router.RemoveOutput(id, "output removed from the configuration")
 		}
 	}
 
@@ -397,7 +405,9 @@ func (s *Supervisor) build(doc config.Document, p plan) (map[int]input.Input, []
 // inputs, so a new input finds its outputs. It stops at the first failure.
 // The inputs it starts are removed from built.
 func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, built map[int]input.Input) (journal, []string) {
-	var j journal
+	s.mu.Lock()
+	j := journal{failedIn: maps.Clone(s.failedIn), failedOut: maps.Clone(s.failedOut)}
+	s.mu.Unlock()
 	for _, id := range p.stopInputs {
 		j.stoppedInputs = append(j.stoppedInputs, s.stopInput(id))
 	}
@@ -406,7 +416,7 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 		if p.removedOutputs[id] {
 			how = stopRemoved
 		}
-		cfg, _ := s.stopOutput(id, how)
+		cfg, _ := s.stopOutput(id, how, config.Route{})
 		j.stoppedOutputs = append(j.stoppedOutputs, cfg)
 	}
 
@@ -438,20 +448,32 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 func (s *Supervisor) rollback(j journal) []string {
 	for _, id := range slices.Backward(j.startedInputs) {
 		s.stopInput(id)
+		if f, ok := j.failedIn[id]; ok {
+			s.restoreFailure(s.failedIn, id, f)
+		}
 	}
 	for _, id := range slices.Backward(j.startedOutputs) {
-		how := stopRemoved
-		if slices.ContainsFunc(j.stoppedOutputs, func(o config.Output) bool { return o.ID == id }) {
-			how = stopForRestart
+		i := slices.IndexFunc(j.stoppedOutputs, func(o config.Output) bool { return o.ID == id })
+		f, wasFailed := j.failedOut[id]
+		switch {
+		case i >= 0:
+			// It starts again below with its previous configuration.
+			_, _ = s.stopOutput(id, stopForRestart, j.stoppedOutputs[i].Route)
+		case wasFailed:
+			// The restored document has it failed: it is held again under
+			// its previous configuration, with its previous error.
+			_, _ = s.stopOutput(id, stopForRestart, f.output.Route)
+			s.restoreFailure(s.failedOut, id, f)
+		default:
+			_, _ = s.stopOutput(id, stopRemoved, config.Route{})
 		}
-		_, _ = s.stopOutput(id, how)
 	}
 
 	var errs []string
 	for _, cfg := range j.stoppedOutputs {
 		if err := s.startOutput(cfg); err != nil {
 			errs = append(errs, fmt.Sprintf("rollback: output %s: %v", cfg.ID, err))
-			s.setFailed(s.failedOut, cfg.ID, cfg.Type, err)
+			s.restoreFailure(s.failedOut, cfg.ID, failure{kind: cfg.Type, err: err.Error(), output: cfg})
 			// The router keeps holding its records until a later document
 			// starts or removes it (ruling R48).
 		}
@@ -481,10 +503,14 @@ func (s *Supervisor) restartInput(cfg config.Input) error {
 }
 
 func (s *Supervisor) setFailed(m map[string]failure, id, kind string, err error) {
+	s.restoreFailure(m, id, failure{kind: kind, err: err.Error()})
+}
+
+func (s *Supervisor) restoreFailure(m map[string]failure, id string, f failure) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	m[id] = failure{kind: kind, err: err.Error()}
+	m[id] = f
 }
 
 // startOutput opens the output's buffer, builds its batcher, which loads the
@@ -557,18 +583,22 @@ func (s *Supervisor) startOutput(cfg config.Output) error {
 
 // stopOutput stops routing to the output, or holds its records when it
 // restarts (ruling R46), stops its sending and closes its buffer, which syncs
-// it. A removed output with unsent records leaves a warning: its directory
-// is kept.
-func (s *Supervisor) stopOutput(id string, how outputStop) (config.Output, error) {
+// it. The hold routes with holdRoute, the route of the configuration being
+// restored, or the output's own when holdRoute has no pattern. A removed
+// output with unsent records leaves a warning: its directory is kept.
+func (s *Supervisor) stopOutput(id string, how outputStop, holdRoute config.Route) (config.Output, error) {
 	s.mu.Lock()
 	ro := s.outputs[id]
 	delete(s.outputs, id)
 	s.mu.Unlock()
 
 	if how == stopForRestart {
-		s.router.Hold(id)
+		if len(holdRoute.Include) == 0 {
+			holdRoute = ro.cfg.Route
+		}
+		s.router.Hold(id, holdRoute)
 	} else {
-		s.router.RemoveOutput(id)
+		s.router.RemoveOutput(id, "output stopped")
 	}
 	ro.cancel()
 	<-ro.done
@@ -622,16 +652,23 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 		}
 	}
 
+	// retire ends the input's emits before it is closed, so a goroutine of a
+	// failed start cannot register it or send a record meanwhile.
+	retire := func() {
+		regMu.Lock()
+		defer regMu.Unlock()
+
+		live.Store(false)
+		s.router.RemoveInput(cfg.ID)
+	}
 	err := s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, emit) }, func() {
+		retire()
 		if err := in.Close(); err != nil {
 			s.log.Warn("supervisor: cannot close an input that did not start", "input", cfg.ID, "error", err)
 		}
 	})
 	if err != nil {
-		regMu.Lock()
-		live.Store(false)
-		s.router.RemoveInput(cfg.ID)
-		regMu.Unlock()
+		retire()
 		cancel()
 
 		return err
@@ -718,8 +755,10 @@ func closeInputs(built map[int]input.Input) {
 }
 
 // Close stops every input, then every output, syncing and closing the
-// buffers, and waits for every goroutine of the supervisor. Later calls
-// return nil.
+// buffers, and waits for every goroutine of the supervisor. The records held
+// for an output left failed by a rollback are discarded at shutdown, once the
+// inputs are stopped, with a warning per priority giving the count and the ts
+// range. Later calls return nil.
 func (s *Supervisor) Close() error {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
@@ -735,17 +774,18 @@ func (s *Supervisor) Close() error {
 	failedOut := sortedKeys(s.failedOut)
 	s.mu.Unlock()
 
-	for _, id := range failedOut {
-		s.router.RemoveOutput(id)
-	}
-
 	for _, id := range inputs {
+		s.step("stop input " + id)
 		s.stopInput(id)
+	}
+	for _, id := range failedOut {
+		s.step("discard output " + id)
+		s.router.RemoveOutput(id, "agent shutting down")
 	}
 
 	var errs []error
 	for _, id := range outputs {
-		if _, err := s.stopOutput(id, stopShutdown); err != nil {
+		if _, err := s.stopOutput(id, stopShutdown, config.Route{}); err != nil {
 			errs = append(errs, fmt.Errorf("supervisor: output %s: %w", id, err))
 		}
 	}

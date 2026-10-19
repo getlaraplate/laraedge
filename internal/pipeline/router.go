@@ -176,43 +176,76 @@ func (r *Router) logLostDeaths(id string, q *holdQueue) {
 	}
 }
 
-// Hold keeps, in memory, what would be appended to output id until the next
+// Hold keeps, in memory, what route selects for output id until the next
 // SetOutput of id, which flushes it, or RemoveOutput of id, which discards
 // it: the output restarts, or failed to and waits for a later document
-// (rulings R46, R48). Holding a held output changes nothing. When it returns
-// no append to the previous buffer is running or will start.
-func (r *Router) Hold(id string) {
+// (rulings R46, R48). route is that of the configuration being restored.
+// Holding a held output only changes its route. When it returns no append
+// to the previous buffer is running or will start.
+func (r *Router) Hold(id string, route config.Route) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	t, ok := r.outputs[id]
-	if !ok || t.hold != nil {
+	if !ok {
 		return
 	}
-	r.outputs[id] = target{route: t.route, hold: newHoldQueue()}
+	hold := t.hold
+	if hold == nil {
+		hold = newHoldQueue()
+	}
+	r.outputs[id] = target{route: route, hold: hold}
 }
 
-// RemoveOutput stops routing to output id; records held for it are
-// discarded with a warning. When it returns no append to its buffer is
-// running or will start.
-func (r *Router) RemoveOutput(id string) {
+// RemoveOutput stops routing to output id. Records held for it are
+// discarded with one warning per priority giving reason, the count and the
+// ts range. When it returns no append to its buffer is running or will
+// start.
+func (r *Router) RemoveOutput(id, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if t, ok := r.outputs[id]; ok && t.hold != nil {
-		t.hold.mu.Lock()
-		n := len(t.hold.recs)
-		for _, l := range t.hold.lost {
-			n += l.Samples
-		}
-		if n > 0 {
-			r.log.Warn("router: output removed while held; its held records are discarded", "output", id, "records", n)
-		}
-		r.logLostDeaths(id, t.hold)
-		t.hold.mu.Unlock()
+		r.discard(id, reason, t.hold)
 	}
 	delete(r.outputs, id)
 	r.order = slices.DeleteFunc(r.order, func(o string) bool { return o == id })
+}
+
+// discard logs what a held queue loses: per priority, the held records and
+// the overflow, with their ts range, and the lost deaths.
+func (r *Router) discard(id, reason string, q *holdQueue) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	lost := map[model.Priority]*model.Loss{}
+	for p, l := range q.lost {
+		c := *l
+		lost[p] = &c
+	}
+	for _, rec := range q.recs {
+		p, ts := rec.Priority(), recordTS(rec)
+		l := lost[p]
+		if l == nil {
+			l = &model.Loss{Priority: p, FromTS: ts, ToTS: ts}
+			lost[p] = l
+		}
+		l.Samples++
+		if ts.Before(l.FromTS) {
+			l.FromTS = ts
+		}
+		if ts.After(l.ToTS) {
+			l.ToTS = ts
+		}
+	}
+
+	for _, p := range []model.Priority{model.Critical, model.Bulk} {
+		if l := lost[p]; l != nil {
+			r.log.Warn("router: held records of an output discarded", "output", id, "reason", reason,
+				"priority", p.String(), "records", l.Samples, "from_ts", l.FromTS.UTC(), "to_ts", l.ToTS.UTC())
+		}
+	}
+	r.logLostDeaths(id, q)
 }
 
 // SetInput registers the devices and signals of a running input: they make
