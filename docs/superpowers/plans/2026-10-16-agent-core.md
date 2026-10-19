@@ -91,10 +91,10 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 **Interfaces:**
 - Produces: `buffer.Open(dir string, opts buffer.Options) (*buffer.Buffer, error)` with `Options{MaxSize int64; MinFreeRatio float64; FsyncInterval time.Duration; SegmentSize int64; Clock clock.Clock}`; `(*Buffer).Append(r model.Record) error`; `(*Buffer).Read(p model.Priority, from buffer.Position, max int) ([]buffer.Entry, error)`; `(*Buffer).Ack(p model.Priority, upTo buffer.Position) error`; `(*Buffer).TakeLosses() []model.Loss`; `(*Buffer).Stats() buffer.Stats`; `(*Buffer).Close() error`.
 
-- [ ] **Step 1: Failing tests.** Records round-trip; a truncated last record (bad CRC) is cut on reopen and every confirmed record survives; a fully acked segment is deleted; at `MaxSize` the oldest bulk segments go first, critical only when it alone fills the buffer, each eviction yields one `buffer_full` loss with the evicted `ts` range and count; the free-disk floor triggers the same path (fake filesystem stats); fuzzing the record decoder never panics.
-- [ ] **Step 2: Segments and records.**
-- [ ] **Step 3: Queues, ack, eviction, losses.**
-- [ ] **Step 4: Run tests with `-race`, commit.**
+- [x] **Step 1: Failing tests.** Records round-trip; a truncated last record (bad CRC) is cut on reopen and every confirmed record survives; a fully acked segment is deleted; at `MaxSize` the oldest bulk segments go first, critical only when it alone fills the buffer, each eviction yields one `buffer_full` loss with the evicted `ts` range and count; the free-disk floor triggers the same path (fake filesystem stats); fuzzing the record decoder never panics.
+- [x] **Step 2: Segments and records.**
+- [x] **Step 3: Queues, ack, eviction, losses.**
+- [x] **Step 4: Run tests with `-race`, commit.**
 
 ### Task 5: Sealed batches
 
