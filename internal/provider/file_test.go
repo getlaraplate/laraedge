@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -219,5 +220,38 @@ func TestFileAttemptedIsCalledOnceAfterTheFirstLoad(t *testing.T) {
 	waitTimers(t, clk, 1)
 	if got := hook.count(); got != 1 {
 		t.Fatalf("Attempted called %d times after a later load, want 1", got)
+	}
+}
+
+// TestFileRunAfterShutdownAppliesNothing: a SIGTERM during ApplyLastValid
+// cancels ctx before Run starts; Run returns without a full Apply under a
+// cancelled context.
+func TestFileRunAfterShutdownAppliesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(doc(1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := newFakeApplier()
+	var hook attempts
+	p, err := provider.NewFile(provider.FileConfig{
+		Path:      path,
+		Applier:   a,
+		Clock:     clock.NewFake(start),
+		Logger:    slog.New(slog.DiscardHandler),
+		Attempted: hook.hook,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+
+	if n := a.count(); n != 0 {
+		t.Fatalf("Run() under a cancelled context applied %d documents, want 0", n)
 	}
 }

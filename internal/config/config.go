@@ -59,11 +59,13 @@ const (
 	MaxBody                   int64   = 1024 << 10
 	DefaultMaxWait                    = 2 * time.Second
 	DefaultBufferMaxSize      int64   = 1 << 30
+	MinBufferMaxSize          int64   = 32 << 20
 	DefaultMinFreePercent     float64 = 5
 	DefaultFsyncInterval              = 200 * time.Millisecond
 	defaultPriority                   = "critical"
 	defaultMaxBodyText                = "1024KiB"
 	defaultBufferSizeText             = "1GiB"
+	minBufferSizeText                 = "32MiB"
 	defaultDeathToleranceText         = "30s"
 	defaultMaxWaitText                = "2s"
 	defaultFsyncText                  = "200ms"
@@ -581,6 +583,9 @@ func (b *builder) output(p path, v any) (Output, error) {
 	}
 	if out.Batch.MaxBody > MaxBody {
 		b.add(p.key("batch").key("max_body"), "must not exceed "+defaultMaxBodyText+" (the backend default of mes.machine.max_body_kb)")
+	}
+	if out.Buffer.MaxSize > 0 && out.Buffer.MaxSize < MinBufferMaxSize {
+		b.add(p.key("buffer").key("max_size"), "must be at least "+minBufferSizeText+" (two segments of 16MiB)")
 	}
 	if out.Type == OutputLaraplateHTTP {
 		if err := docrules.CheckURL(out.URL); err != nil {

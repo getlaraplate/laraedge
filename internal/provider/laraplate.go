@@ -34,6 +34,8 @@ const (
 	MaxReportErrors = 100
 	// MaxReportErrorLength is the most characters of one message.
 	MaxReportErrorLength = 1000
+	// MaxAgentVersionLength is the most characters of agent_version.
+	MaxAgentVersionLength = 64
 )
 
 const (
@@ -293,7 +295,7 @@ func (l *Laraplate) handle(ctx context.Context, token string, body []byte) {
 		Version:      answer.Version,
 		Outcome:      out.Result,
 		Errors:       capErrors(out.Errors),
-		AgentVersion: version.String(),
+		AgentVersion: reportAgentVersion(version.String()),
 	})
 	if n := len(l.pending) - maxPendingReports; n > 0 {
 		l.log.Warn("provider: too many undelivered configuration reports; dropping the oldest", "dropped", n)
@@ -482,6 +484,22 @@ func (l *Laraplate) saveState() {
 	if err != nil {
 		l.log.Warn("provider: cannot persist the provider state", "error", err)
 	}
+}
+
+// reportAgentVersion returns v as a report carries it: valid UTF-8, cut to
+// MaxAgentVersionLength characters (the backend refuses a longer one with
+// a 422), and "dev" when empty (the backend requires one).
+func reportAgentVersion(v string) string {
+	v = strings.ToValidUTF8(v, "\uFFFD")
+	if runes := []rune(v); len(runes) > MaxAgentVersionLength {
+		v = string(runes[:MaxAgentVersionLength])
+	}
+
+	if v == "" {
+		return "dev"
+	}
+
+	return v
 }
 
 // capErrors keeps the first MaxReportErrors messages, each cut to

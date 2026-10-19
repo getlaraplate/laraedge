@@ -225,7 +225,11 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "max_size": { "$ref": "#/$defs/size", "default": "1GiB" },
+            "max_size": {
+              "description": "At least 32MiB, two segments of 16 MiB (checked by the agent's rules, not expressible on a size string).",
+              "$ref": "#/$defs/size",
+              "default": "1GiB"
+            },
             "min_free_percent": {
               "description": "The share of the disk kept free, above 0 (0 would mean the buffer default).",
               "type": "number",

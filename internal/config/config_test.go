@@ -262,6 +262,8 @@ func TestParseRefusals(t *testing.T) {
 		{"max_body zero", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    batch: {max_body: 0B}"), []string{"outputs.0.batch.max_body: must be greater than zero"}},
 		{"size overflow", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    buffer: {max_size: 99999999999999999999GiB}"), []string{"outputs.0.buffer.max_size: is too large"}},
 		{"size unit", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    buffer: {max_size: 1GB}"), []string{"outputs.0.buffer.max_size: must be a size such as"}},
+		{"max_size below two segments", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    buffer: {max_size: 31MiB}"), []string{"outputs.0.buffer.max_size: must be at least 32MiB (two segments of 16MiB)"}},
+		{"max_size in KiB below two segments", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    buffer: {max_size: 32767KiB}"), []string{"outputs.0.buffer.max_size: must be at least 32MiB"}},
 		{"min_free_percent above 50", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    buffer: {min_free_percent: 60}"), []string{"outputs.0.buffer.min_free_percent: must be at most 50"}},
 		{"duration without unit", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    batch: {max_wait: 30}"), []string{"outputs.0.batch.max_wait: must be string"}},
 		{"duration format", edit(t, base, "    devices:\n", "    death_tolerance: soon\n    devices:\n"), []string{"inputs.0.death_tolerance: must be a duration such as"}},
@@ -781,6 +783,17 @@ func TestParseVersionBeyond32Bits(t *testing.T) {
 			if doc.Version != version {
 				t.Errorf("version = %d, want %d", doc.Version, version)
 			}
+		}
+	}
+}
+
+// TestBufferMaxSizeAtTheMinimum: two segments of 16 MiB is the smallest
+// buffer, in any unit.
+func TestBufferMaxSizeAtTheMinimum(t *testing.T) {
+	for _, size := range []string{"32MiB", "32768KiB", "33554432B", "1GiB"} {
+		doc := mustParse(t, []byte(edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    buffer: {max_size: "+size+"}")))
+		if got := doc.Outputs[0].Buffer.MaxSize; got < config.MinBufferMaxSize {
+			t.Errorf("max_size %s parsed as %d, below the minimum", size, got)
 		}
 	}
 }

@@ -89,7 +89,13 @@ func NewFile(cfg FileConfig) (*File, error) {
 }
 
 // Run loads the file, then watches it until ctx is done; it returns nil.
+// When ctx is already done (a shutdown during ApplyLastValid) it loads
+// nothing.
 func (f *File) Run(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+
 	f.load(ctx)
 	if f.attempted != nil {
 		f.attempted()
