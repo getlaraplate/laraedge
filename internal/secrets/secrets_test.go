@@ -284,6 +284,30 @@ func TestResolveInvalidReferences(t *testing.T) {
 	}
 }
 
+func TestMalformedReferencesAreNotEchoed(t *testing.T) {
+	refs := []string{
+		"secret://" + sentinel,
+		"secret://" + sentinel + "/x",
+		"secret://env/" + sentinel,
+		"secret://env/1" + sentinel,
+	}
+	r := NewResolver(fakeEnv(map[string]string{"X": "v"}))
+	for _, ref := range refs {
+		for name, err := range map[string]error{
+			"Check":   Check(ref),
+			"Resolve": func() error { _, err := r.Resolve(context.Background(), ref); return err }(),
+		} {
+			if err == nil {
+				t.Errorf("%s(%q) = nil, want error", name, ref)
+				continue
+			}
+			if strings.Contains(err.Error(), sentinel) {
+				t.Errorf("%s error echoes the malformed reference: %q", name, err)
+			}
+		}
+	}
+}
+
 func TestResolveHonoursCancelledContext(t *testing.T) {
 	called := false
 	r := NewResolver(WithLookupEnv(func(string) (string, bool) { called = true; return "v", true }))

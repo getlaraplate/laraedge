@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -115,31 +116,69 @@ func Load(path string) (File, error) {
 	return file, nil
 }
 
-// describeDecodeError renders a YAML decode error without the scalar values
-// yaml.v3 embeds in type mismatch messages ("cannot unmarshal !!str `value`
-// into T"), which could carry a secret written in the wrong place. Only the
-// line, the YAML tag and the target type are kept.
+// safeKey matches the shape of the keys this file defines. A key that does not
+// match is never echoed: a secret written as a key would otherwise leak.
+var safeKey = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+var decodeLine = regexp.MustCompile(`^line (\d+): (.*)$`)
+
+// describeDecodeError renders a YAML decode error without any text taken from
+// the document values or keys, which could carry a secret written in the wrong
+// place. yaml.v3 embeds scalars in type mismatch messages and keys in duplicate
+// and unknown key messages. Only the line, the YAML tag, the target type and
+// keys of the expected shape are kept; any entry not recognised is reduced to
+// its line and a fixed text. Non-type errors (syntax errors) carry no document
+// text and are passed through.
 func describeDecodeError(err error) string {
 	var typeErr *yaml.TypeError
 	if !errors.As(err, &typeErr) {
 		return err.Error()
 	}
-	const marker = "cannot unmarshal "
 	msgs := make([]string, 0, len(typeErr.Errors))
 	for _, m := range typeErr.Errors {
-		head, rest, found := strings.Cut(m, marker)
-		if !found {
-			msgs = append(msgs, m)
-			continue
-		}
+		msgs = append(msgs, describeTypeError(m))
+	}
+	return strings.Join(msgs, "; ")
+}
+
+func describeTypeError(entry string) string {
+	match := decodeLine.FindStringSubmatch(entry)
+	if match == nil {
+		return "invalid YAML"
+	}
+	line, text := "line "+match[1]+": ", match[2]
+	switch {
+	case strings.HasPrefix(text, "cannot unmarshal "):
+		rest := strings.TrimPrefix(text, "cannot unmarshal ")
 		tag, _, _ := strings.Cut(rest, " ")
 		target := rest
 		if i := strings.LastIndex(rest, " into "); i >= 0 {
 			target = rest[i+len(" into "):]
 		}
-		msgs = append(msgs, head+marker+tag+" into "+target)
+		return line + "cannot unmarshal " + tag + " into " + target
+	case strings.HasPrefix(text, "mapping key "):
+		rest := strings.TrimPrefix(text, "mapping key ")
+		if i := strings.LastIndex(rest, " already defined at line "); i >= 0 {
+			if key, err := strconv.Unquote(rest[:i]); err == nil && safeKey.MatchString(key) {
+				return line + "duplicate key " + key
+			}
+		}
+		return line + "duplicate key"
+	case strings.HasPrefix(text, "field "):
+		rest := strings.TrimPrefix(text, "field ")
+		if i := strings.LastIndex(rest, " not found in type "); i >= 0 && safeKey.MatchString(rest[:i]) {
+			return line + "unknown key " + rest[:i] + " in " + rest[i+len(" not found in type "):]
+		}
+		if i := strings.LastIndex(rest, " already set in type "); i >= 0 && safeKey.MatchString(rest[:i]) {
+			return line + "duplicate key " + rest[:i]
+		}
+		if strings.Contains(rest, " already set in type ") {
+			return line + "duplicate key"
+		}
+		return line + "unknown key"
+	default:
+		return line + "invalid YAML"
 	}
-	return strings.Join(msgs, "; ")
 }
 
 func (f File) validate() error {

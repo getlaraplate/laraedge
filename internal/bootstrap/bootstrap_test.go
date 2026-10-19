@@ -138,6 +138,21 @@ func TestLoadRefusals(t *testing.T) {
 		{name: "token as laraplate value", yaml: "agent_id: a\nconfig:\n  provider: laraplate\n  laraplate: " + plainToken + "\n", wantErr: []string{"line 4", "cannot unmarshal !!str into"}},
 		{name: "short value as poll_seconds", yaml: lara + "    poll_seconds: " + shortToken + "\n", wantErr: []string{"cannot unmarshal !!str into int"}},
 		{name: "token as agent_id list", yaml: "agent_id: [" + plainToken + "]\n" + fileProvider, wantErr: []string{"cannot unmarshal !!seq into string"}},
+		{name: "token as unknown key", yaml: "agent_id: a\n" + plainToken + ": x\n" + fileProvider, wantErr: []string{"line 2", "unknown key"}},
+		{name: "token as nested unknown key", yaml: "agent_id: a\nconfig:\n  " + plainToken + ": x\n  provider: file\n  file: /c.yaml\n", wantErr: []string{"line 3", "unknown key"}},
+		{name: "token as duplicate key", yaml: "agent_id: a\n" + plainToken + ": x\n" + plainToken + ": y\n" + fileProvider, wantErr: []string{"line 3", "duplicate key"}},
+		{name: "duplicate known key", yaml: "agent_id: a\nagent_id: b\n" + fileProvider, wantErr: []string{"line 2", "duplicate key agent_id"}},
+		{name: "unknown known-shape key is named", yaml: "agent_id: a\nbogus: 1\n" + fileProvider, wantErr: []string{"line 2", "unknown key bogus in bootstrap.File"}},
+		{
+			name:    "token after secret://",
+			yaml:    "agent_id: a\nstatus_token: secret://" + plainToken + "\n" + fileProvider,
+			wantErr: []string{"status_token", "unknown secret kind"},
+		},
+		{
+			name:    "token as env name",
+			yaml:    "agent_id: a\nstatus_token: secret://env/" + plainToken + "\n" + fileProvider,
+			wantErr: []string{"status_token", "invalid environment variable name"},
+		},
 		{name: "second document", yaml: "agent_id: a\n" + fileProvider + "---\nagent_id: b\n", wantErr: []string{"one YAML document"}},
 		{name: "not yaml", yaml: "agent_id: [unclosed\n", wantErr: []string{"bootstrap"}},
 	}
@@ -203,5 +218,27 @@ func TestDefaultDataDir(t *testing.T) {
 				t.Errorf("DefaultDataDir = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDescribeTypeErrorNeverEchoesUnrecognisedEntries(t *testing.T) {
+	tests := []struct {
+		entry string
+		want  string
+	}{
+		{"line 3: cannot unmarshal !!str `plain-t` into int", "line 3: cannot unmarshal !!str into int"},
+		{"line 3: cannot unmarshal !!str `a into b` into int", "line 3: cannot unmarshal !!str into int"},
+		{`line 4: mapping key "agent_id" already defined at line 2`, "line 4: duplicate key agent_id"},
+		{`line 4: mapping key "Plain-Token" already defined at line 2`, "line 4: duplicate key"},
+		{"line 5: field Plain-Token not found in type bootstrap.File", "line 5: unknown key"},
+		{"line 5: field extra not found in type bootstrap.Config", "line 5: unknown key extra in bootstrap.Config"},
+		{"line 6: field Plain-Token already set in type bootstrap.File", "line 6: duplicate key"},
+		{"line 7: Plain-Token something new", "line 7: invalid YAML"},
+		{"Plain-Token without a line", "invalid YAML"},
+	}
+	for _, tt := range tests {
+		if got := describeTypeError(tt.entry); got != tt.want {
+			t.Errorf("describeTypeError(%q) = %q, want %q", tt.entry, got, tt.want)
+		}
 	}
 }

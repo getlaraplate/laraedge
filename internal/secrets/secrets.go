@@ -43,7 +43,9 @@ const (
 )
 
 // parse splits a reference into its kind and the part after the kind. The
-// errors it returns name the reference, which never carries a secret value.
+// errors it returns for malformed references never echo the reference: a
+// secret written where a reference belongs must not reach a log. Well formed
+// references (env with a valid name, file, keystore) may be named by callers.
 func parse(ref string) (kind, string, error) {
 	if !IsReference(ref) {
 		return "", "", errors.New("value is not a secret:// reference")
@@ -52,16 +54,16 @@ func parse(ref string) (kind, string, error) {
 	switch kind(k) {
 	case kindEnv:
 		if !envName.MatchString(rest) {
-			return "", "", fmt.Errorf("secret %s: invalid environment variable name", ref)
+			return "", "", errors.New("secret://env/...: invalid environment variable name")
 		}
 	case kindFile:
 		if rest == "" {
-			return "", "", fmt.Errorf("secret %s: empty file path", ref)
+			return "", "", errors.New("secret://file/...: empty file path")
 		}
 	case kindKeystore:
 		return kindKeystore, rest, fmt.Errorf("secret %s: %w", ref, ErrUnavailable)
 	default:
-		return "", "", fmt.Errorf("secret %s: unknown secret kind %q (want env, file or keystore)", ref, k)
+		return "", "", errors.New("unknown secret kind (want secret://env/, secret://file/ or secret://keystore/)")
 	}
 	return kind(k), rest, nil
 }
