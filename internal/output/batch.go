@@ -168,6 +168,7 @@ type Buffer interface {
 	Changed() <-chan struct{}
 	Stats() buffer.Stats
 	AddLoss(l model.Loss) error
+	SyncLosses() error
 	PendingLosses() []model.Loss
 	AckLosses(n int) error
 }
@@ -222,46 +223,10 @@ func NewBatcher(buf Buffer, inflight *Inflight, ids MessageIDs, clk clock.Clock,
 			return nil, err
 		}
 
-		if err := bt.ackCarriedLosses(b); err != nil {
-			return nil, err
-		}
-
 		bt.current = b
 	}
 
 	return bt, nil
-}
-
-// ackCarriedLosses closes the window between saving a batch and
-// acknowledging its loss markers: after a crash there the markers are still
-// pending while the loaded batch carries them, and would travel twice. They
-// are acknowledged when the pending markers start with exactly the batch's.
-// A newer marker identical in every field to a carried one, in the same
-// order, would be taken for it; the buffer gives markers no identity.
-func (bt *Batcher) ackCarriedLosses(b *Batch) error {
-	n := len(b.Losses)
-	if n == 0 {
-		return nil
-	}
-
-	pending := bt.buf.PendingLosses()
-	if len(pending) < n || !slices.EqualFunc(pending[:n], b.Losses, sameLoss) {
-		return nil
-	}
-
-	if err := bt.buf.AckLosses(n); err != nil {
-		if !errors.Is(err, buffer.ErrNotDurable) {
-			return fmt.Errorf("output: acknowledge the loss markers of the inflight batch: %w", err)
-		}
-
-		bt.log.Warn("output: loss markers acknowledged, not yet durable", "seq", b.Seq, "error", err)
-	}
-
-	return nil
-}
-
-func sameLoss(a, b model.Loss) bool {
-	return a.Priority == b.Priority && a.FromTS.Equal(b.FromTS) && a.ToTS.Equal(b.ToTS) && a.Samples == b.Samples && a.Reason == b.Reason
 }
 
 // Next returns the batch to send: the sealed batch not yet settled, unchanged,
@@ -276,7 +241,9 @@ func sameLoss(a, b model.Loss) bool {
 // Sealing order: the batch takes the next source_seq and a new message id,
 // is saved in inflight, and only then is marked sealed in the buffer and are
 // its loss markers acknowledged. A crash before the save leaves nothing
-// durable: the records are sealed again with the same, never sent, seq.
+// durable: the records are sealed again with the same, never sent, seq. A
+// crash between the save and the acknowledgement leaves the markers both in
+// the batch and pending: they are reported twice, never lost (ruling R40).
 func (bt *Batcher) Next(ctx context.Context) (*Batch, error) {
 	if bt.current != nil {
 		return bt.current, nil
@@ -424,6 +391,10 @@ func (bt *Batcher) seal() (*Batch, bool, error) {
 		bt.log.Error("output: cannot mark the batch sealed in the buffer; an eviction may report its records as lost", "seq", b.Seq, "error", err)
 	}
 
+	// AckLosses after the save, never before: a crash in between reports
+	// the markers twice (they are pending and in the batch), which is the
+	// accepted side; markers have no identity to tell a newer equal one from
+	// these (ruling R40). ErrNotDurable means applied: never repeated.
 	if k > 0 {
 		if err := bt.buf.AckLosses(k); err != nil {
 			if errors.Is(err, buffer.ErrNotDurable) {
@@ -489,7 +460,7 @@ func (bt *Batcher) fit(id string, seq uint64, sentAt time.Time, records []model.
 // rejected_invalid marker, then acknowledges it.
 func (bt *Batcher) reject(p model.Priority, e buffer.Entry) error {
 	bt.log.Warn("output: dropping a record larger than max_body", "priority", p.String(), "device", e.Record.Device(), "max_body", bt.limits.MaxBody)
-	if err := bt.addLoss(lossOf(p, []buffer.Entry{e}, model.LossRejectedInvalid, bt.clk.Now())); err != nil {
+	if err := bt.addLosses(lossOf(p, []buffer.Entry{e}, model.LossRejectedInvalid, bt.clk.Now())); err != nil {
 		return err
 	}
 
@@ -524,8 +495,8 @@ func (bt *Batcher) Confirm(b *Batch) error {
 // bulk), with b's seq and all of b's loss markers (C4), under a new message
 // id and a rebuilt body, saves that batch in inflight and returns it. The
 // other records go back to the buffer, read again by a later Next under the
-// next seq; those the buffer no longer holds (evicted while sealed, or cut
-// at recovery) get a buffer_full marker from the batch's own copy, so
+// next seq; those the buffer no longer holds (evicted while sealed, cut or
+// dropped at recovery) get a durable buffer_full marker from the batch's own copy, so
 // nothing vanishes silently. n must be in [1, Len()-1]. On error b stays the
 // batch in flight; a retry may count a vanished record twice, never zero
 // times.
@@ -567,6 +538,7 @@ func (bt *Batcher) Shrink(b *Batch, n int) (*Batch, error) {
 		return nil, err
 	}
 
+	var markers []model.Loss
 	for _, p := range priorities {
 		gone, err := bt.vanished(p, rest[p])
 		if err != nil {
@@ -575,15 +547,15 @@ func (bt *Batcher) Shrink(b *Batch, n int) (*Batch, error) {
 			return nil, err
 		}
 
-		if len(gone) == 0 {
-			continue
+		if len(gone) > 0 {
+			markers = append(markers, lossOf(p, gone, model.LossBufferFull, bt.clk.Now()))
 		}
+	}
 
-		if err := bt.addLoss(lossOf(p, gone, model.LossBufferFull, bt.clk.Now())); err != nil {
-			restore()
+	if err := bt.addLosses(markers...); err != nil {
+		restore()
 
-			return nil, err
-		}
+		return nil, err
 	}
 
 	if err := bt.inflight.Save(nb); err != nil {
@@ -601,9 +573,10 @@ func (bt *Batcher) Shrink(b *Batch, n int) (*Batch, error) {
 // delivered. Its records leave a loss marker per priority with reason, the
 // loss markers it carried become pending again (they never reached the
 // backend), its records are acknowledged, and inflight is cleared with b's
-// seq as the next source_seq (ruling R24). When a marker cannot be added,
-// inflight is left unchanged and the error returned; markers added before
-// the failure are added again by a retry (counted twice, never lost).
+// seq as the next source_seq (ruling R24). The markers are made durable
+// before the records are acknowledged; when that fails, inflight is left
+// unchanged and the error returned, and a retry adds the markers again
+// (counted twice, never lost; ruling R41).
 func (bt *Batcher) Drop(b *Batch, reason string) error {
 	if err := bt.checkCurrent(b); err != nil {
 		return err
@@ -623,10 +596,8 @@ func (bt *Batcher) Drop(b *Batch, reason string) error {
 		}
 	}
 
-	for _, m := range markers {
-		if err := bt.addLoss(m); err != nil {
-			return err
-		}
+	if err := bt.addLosses(markers...); err != nil {
+		return err
 	}
 
 	if err := bt.ack(b); err != nil {
@@ -714,48 +685,71 @@ func (bt *Batcher) markSealed(b *Batch) error {
 	return nil
 }
 
-// vanished returns the entries of queue p the buffer no longer holds: the
-// leading ones evicted while they were sealed, and the trailing ones cut at
-// recovery because they were not synced before a crash.
+// vanished returns the entries of queue p the buffer no longer holds:
+// evicted while sealed, cut at recovery because they were not synced before
+// a crash, or dropped with a corrupt record of an older segment, wherever
+// they sit in entries. Entries are consecutive records of the queue,
+// positions are never reused and records written after a restart lie beyond
+// every earlier position, so the records the buffer holds from the first
+// entry on are a subset of entries followed by newer ones: one read from the
+// first entry, compared by position, finds every gap.
 func (bt *Batcher) vanished(p model.Priority, entries []buffer.Entry) ([]buffer.Entry, error) {
-	head := bt.buf.Head(p)
-	i := 0
-	for i < len(entries) && entries[i].Pos < head {
-		i++
+	if len(entries) == 0 {
+		return nil, nil
 	}
 
-	j := len(entries)
-	for j > i {
-		ok, err := bt.holds(p, entries[j-1])
-		if err != nil {
-			return nil, fmt.Errorf("output: %w", err)
-		}
-
-		if ok {
-			break
-		}
-
-		j--
+	held, err := bt.buf.Read(p, entries[0].Pos, len(entries))
+	if err != nil {
+		return nil, fmt.Errorf("output: read the %s queue at %d: %w", p, uint64(entries[0].Pos), err)
 	}
 
-	return append(slices.Clone(entries[:i]), entries[j:]...), nil
+	var gone []buffer.Entry
+	j := 0
+	for _, e := range entries {
+		for j < len(held) && held[j].Pos < e.Pos {
+			j++
+		}
+
+		if j < len(held) && held[j].Pos == e.Pos {
+			j++
+
+			continue
+		}
+
+		gone = append(gone, e)
+	}
+
+	return gone, nil
 }
 
-// addLoss adds a marker. ErrNotDurable means it is applied and reaches the
-// disk later: it is never repeated, which would count the loss twice.
-func (bt *Batcher) addLoss(l model.Loss) error {
-	err := bt.buf.AddLoss(l)
-	if err == nil {
+// addLosses adds markers and returns nil only once they are durable, so
+// that the caller may then acknowledge the records they stand for. AddLoss
+// returning ErrNotDurable means the marker is applied in memory: it is never
+// repeated, SyncLosses writes it. When that write fails too the error is
+// returned and the caller acknowledges nothing; a retry adds the markers
+// again, counted twice, never lost (ruling R41).
+func (bt *Batcher) addLosses(markers ...model.Loss) error {
+	pending := false
+	for _, l := range markers {
+		err := bt.buf.AddLoss(l)
+		switch {
+		case err == nil:
+		case errors.Is(err, buffer.ErrNotDurable):
+			pending = true
+		default:
+			return fmt.Errorf("output: add a %s loss marker: %w", l.Reason, err)
+		}
+	}
+
+	if !pending {
 		return nil
 	}
 
-	if errors.Is(err, buffer.ErrNotDurable) {
-		bt.log.Warn("output: loss marker added, not yet durable", "priority", l.Priority.String(), "reason", l.Reason, "error", err)
-
-		return nil
+	if err := bt.buf.SyncLosses(); err != nil {
+		return fmt.Errorf("output: loss markers not durable: %w", err)
 	}
 
-	return fmt.Errorf("output: add a %s loss marker: %w", l.Reason, err)
+	return nil
 }
 
 // lossOf returns the marker of entries of queue p: their ts range and count.

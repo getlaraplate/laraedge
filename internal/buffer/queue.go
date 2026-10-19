@@ -13,6 +13,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/swolley/laraplate-edge/internal/atomicfile"
 	"github.com/swolley/laraplate-edge/internal/model"
 )
 
@@ -535,7 +536,7 @@ func (q *queue) deleteWhere(match func(*segment) bool) {
 	})
 
 	if deleted {
-		if err := syncDir(q.dir); err != nil {
+		if err := atomicfile.SyncDir(q.dir); err != nil {
 			q.log.Error("buffer: syncing the queue directory failed", "queue", q.priority.String(), "error", err)
 		}
 	}

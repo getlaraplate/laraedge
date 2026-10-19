@@ -8,10 +8,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
-	"syscall"
 	"time"
 
+	"github.com/swolley/laraplate-edge/internal/atomicfile"
 	"github.com/swolley/laraplate-edge/internal/buffer"
 	"github.com/swolley/laraplate-edge/internal/model"
 )
@@ -19,7 +18,6 @@ import (
 const (
 	inflightFileName = "inflight"
 	inflightVersion  = 1
-	tmpSuffix        = ".tmp"
 )
 
 // errNotLoaded is returned by the writing methods of an Inflight not loaded.
@@ -53,7 +51,7 @@ func NewInflight(dir string) *Inflight {
 // and the next source_seq, 0 for a new output. It removes a temporary file
 // left by a crash during a write.
 func (f *Inflight) Load() (*Batch, uint64, error) {
-	tmp := filepath.Join(f.dir, inflightFileName+tmpSuffix)
+	tmp := filepath.Join(f.dir, inflightFileName+atomicfile.TmpSuffix)
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, 0, fmt.Errorf("output: remove a leftover temporary inflight file: %w", err)
 	}
@@ -101,16 +99,22 @@ func (f *Inflight) Load() (*Batch, uint64, error) {
 // NextSeq returns the source_seq the next new batch takes.
 func (f *Inflight) NextSeq() uint64 { return f.nextSeq }
 
-// Save stores b as the sealed batch and b.Seq+1 as the next source_seq. b.Seq
-// must be the next source_seq (a new batch) or the seq of the stored batch
-// (a 413 split keeps it).
+// Save stores b as the sealed batch and b.Seq+1 as the next source_seq.
+// While a batch is stored, b.Seq must be its seq (a 413 split keeps it): a
+// new batch never replaces one not yet settled. Otherwise b.Seq must be the
+// next source_seq.
 func (f *Inflight) Save(b *Batch) error {
 	if !f.loaded {
 		return errNotLoaded
 	}
 
-	if b.Seq != f.nextSeq && (!f.hasBatch || b.Seq != f.batchSeq) {
-		return fmt.Errorf("output: save inflight batch with seq %d, want %d", b.Seq, f.nextSeq)
+	want := f.nextSeq
+	if f.hasBatch {
+		want = f.batchSeq
+	}
+
+	if b.Seq != want {
+		return fmt.Errorf("output: save inflight batch with seq %d, want %d", b.Seq, want)
 	}
 
 	if b.Seq == math.MaxUint64 {
@@ -177,7 +181,7 @@ func (f *Inflight) write(state inflightState) error {
 		return fmt.Errorf("output: create %s: %w", f.dir, err)
 	}
 
-	if err := writeFileAtomic(f.dir, inflightFileName, data); err != nil {
+	if err := atomicfile.Write(f.dir, inflightFileName, data); err != nil {
 		return fmt.Errorf("output: %w", err)
 	}
 
@@ -296,63 +300,4 @@ func (wb *inflightBatch) decode() (*Batch, error) {
 	}
 
 	return b, nil
-}
-
-// writeFileAtomic replaces dir/name with data: temporary file, fsync,
-// rename, fsync of the directory where supported.
-func writeFileAtomic(dir, name string, data []byte) error {
-	tmp := filepath.Join(dir, name+tmpSuffix)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("write %s: %w", name, err)
-	}
-
-	_, writeErr := f.Write(data)
-	if writeErr == nil {
-		writeErr = f.Sync()
-	}
-
-	closeErr := f.Close()
-	if err := errors.Join(writeErr, closeErr); err != nil {
-		_ = os.Remove(tmp)
-
-		return fmt.Errorf("write %s: %w", name, err)
-	}
-
-	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		_ = os.Remove(tmp)
-
-		return fmt.Errorf("replace %s: %w", name, err)
-	}
-
-	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("replace %s: %w", name, err)
-	}
-
-	return nil
-}
-
-// syncDir makes the directory entries of dir durable. Windows has no
-// directory sync, and some filesystems refuse it; both count as done.
-func syncDir(dir string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("sync directory: %w", err)
-	}
-
-	syncErr := d.Sync()
-	closeErr := d.Close()
-	if errors.Is(syncErr, syscall.EINVAL) || errors.Is(syncErr, errors.ErrUnsupported) {
-		syncErr = nil
-	}
-
-	if err := errors.Join(syncErr, closeErr); err != nil {
-		return fmt.Errorf("sync directory %s: %w", dir, err)
-	}
-
-	return nil
 }

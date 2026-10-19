@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swolley/laraplate-edge/internal/atomicfile"
 	"github.com/swolley/laraplate-edge/internal/model"
 )
 
@@ -262,7 +263,7 @@ func createSegment(dir string, base Position) (*segment, error) {
 		return nil, fmt.Errorf("create segment: %w", err)
 	}
 
-	if err := syncDir(dir); err != nil {
+	if err := atomicfile.SyncDir(dir); err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
 

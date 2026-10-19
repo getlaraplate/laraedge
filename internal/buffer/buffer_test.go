@@ -1373,6 +1373,52 @@ func TestAddLossReportsAMarkerNotYetDurable(t *testing.T) {
 	assertSameLosses(t, durableLosses(t, dir), nil)
 }
 
+func TestSyncLossesWritesPendingMarkersNow(t *testing.T) {
+	tests := []struct {
+		name        string
+		addFailures int // failed writes when the marker is added
+		syncFailure bool
+		wantErr     error
+		wantDurable bool
+	}{
+		{name: "nothing waiting", wantDurable: true},
+		{name: "a marker left by a failed write is written", addFailures: 1, wantDurable: true},
+		{name: "the write fails again", addFailures: 1, syncFailure: true, wantErr: ErrNotDurable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writer := &failingLosses{}
+			b := openBuffer(t, dir, testOptions(t, clock.NewFake(epoch)), hooks{writeLosses: writer.write})
+			marker := loss(model.Bulk, bulk(0), bulk(0), 1)
+
+			writer.set(tc.addFailures)
+			_ = b.AddLoss(marker)
+			if tc.syncFailure {
+				writer.set(1)
+			}
+
+			if err := b.SyncLosses(); !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Fatalf("SyncLosses() = %v, want %v", err, tc.wantErr)
+			}
+
+			want := []model.Loss(nil)
+			if tc.wantDurable {
+				want = []model.Loss{marker}
+			}
+
+			assertSameLosses(t, durableLosses(t, dir), want)
+			assertLosses(t, b, []model.Loss{marker})
+		})
+	}
+
+	b := openBuffer(t, t.TempDir(), testOptions(t, clock.NewFake(epoch)), hooks{})
+	mustClose(t, b)
+	if err := b.SyncLosses(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("SyncLosses() after Close = %v, want ErrClosed", err)
+	}
+}
+
 func TestEvictionWaitsForDurableMarkers(t *testing.T) {
 	f := frameSize(t)
 	limit := func(frames int64) int64 { return frames*f + f/2 }

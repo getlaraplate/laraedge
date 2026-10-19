@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -107,11 +108,14 @@ func (f fault) apply(call func() error) error {
 	}
 }
 
-// faultyBuffer is the real buffer with scripted answers of the loss methods.
+// faultyBuffer is the real buffer with scripted answers of the loss
+// methods, counting the AckLosses calls.
 type faultyBuffer struct {
 	*buffer.Buffer
-	addLoss   fault
-	ackLosses fault
+	addLoss        fault
+	ackLosses      fault
+	syncLosses     fault
+	ackLossesCalls int
 }
 
 func (f *faultyBuffer) AddLoss(l model.Loss) error {
@@ -119,7 +123,13 @@ func (f *faultyBuffer) AddLoss(l model.Loss) error {
 }
 
 func (f *faultyBuffer) AckLosses(n int) error {
+	f.ackLossesCalls++
+
 	return f.ackLosses.apply(func() error { return f.Buffer.AckLosses(n) })
+}
+
+func (f *faultyBuffer) SyncLosses() error {
+	return f.syncLosses.apply(f.Buffer.SyncLosses)
 }
 
 // harness is one output directory with its buffer, inflight and batcher;
@@ -734,23 +744,33 @@ func TestDropReusesSeqAndLeavesMarkers(t *testing.T) {
 
 func TestLossMethodsNotDurable(t *testing.T) {
 	carried := bufferFull(model.Bulk, 1, 2, 2)
+	rejected := markerOf(model.Bulk, bulk(0), bulk(0), 1, model.LossRejectedInvalid)
 	tests := []struct {
-		name      string
-		addLoss   fault
-		ackLosses fault
-		drop      bool
-		dropErr   bool
-		pending   []model.Loss // after the seal and the optional Drop
+		name       string
+		addLoss    fault
+		ackLosses  fault
+		syncLosses fault
+		drop       bool
+		dropErr    bool
+		pending    []model.Loss // after the seal and the optional Drop
 	}{
 		{
 			name:      "AckLosses applied but not durable: never repeated",
 			ackLosses: faultNotDurable,
 		},
 		{
-			name:    "AddLoss applied but not durable: Drop goes on, nothing doubled",
+			name:    "AddLoss not durable, SyncLosses writes it: Drop goes on, nothing doubled",
 			addLoss: faultNotDurable,
 			drop:    true,
-			pending: []model.Loss{carried, markerOf(model.Bulk, bulk(0), bulk(0), 1, model.LossRejectedInvalid)},
+			pending: []model.Loss{carried, rejected},
+		},
+		{
+			name:       "AddLoss not durable and SyncLosses fails: Drop acknowledges nothing",
+			addLoss:    faultNotDurable,
+			syncLosses: faultFailing,
+			drop:       true,
+			dropErr:    true,
+			pending:    []model.Loss{carried, rejected},
 		},
 		{
 			name:    "AddLoss refused: Drop fails and keeps the batch",
@@ -762,7 +782,7 @@ func TestLossMethodsNotDurable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, output.BatchLimits{MaxSamples: 1, MaxBody: 1 << 20})
-			fb := &faultyBuffer{ackLosses: tc.ackLosses}
+			fb := &faultyBuffer{ackLosses: tc.ackLosses, syncLosses: tc.syncLosses}
 			h.wrap = func(b *buffer.Buffer) output.Buffer { fb.Buffer = b; return fb }
 			h.open()
 			if err := h.buf.AddLoss(carried); err != nil {
@@ -773,6 +793,18 @@ func TestLossMethodsNotDurable(t *testing.T) {
 			b := h.next()
 			if !sameLosses(b.Losses, []model.Loss{carried}) {
 				t.Fatalf("sealed losses %v, want %v", b.Losses, []model.Loss{carried})
+			}
+
+			if !tc.drop {
+				h.confirm(b)
+				h.append(bulk(1))
+				if after := h.next(); len(after.Losses) != 0 {
+					t.Fatalf("the next batch carries %v again", after.Losses)
+				}
+
+				if fb.ackLossesCalls != 1 {
+					t.Fatalf("AckLosses called %d times, want once", fb.ackLossesCalls)
+				}
 			}
 
 			if tc.drop {
@@ -793,11 +825,50 @@ func TestLossMethodsNotDurable(t *testing.T) {
 					t.Fatalf("inflight after a failed Drop: %v next %d, want the batch kept", stored, next)
 				}
 
+				if s := h.buf.Stats(); s.Records != 1 {
+					t.Fatalf("buffer holds %d records after a failed Drop, want 1 (nothing acknowledged)", s.Records)
+				}
+
 				if again := h.next(); again != b {
 					t.Fatal("Next after a failed Drop returned another batch")
 				}
 			}
 		})
+	}
+}
+
+// TestRejectWaitsForADurableMarker: a record larger than max_body is
+// acknowledged only once its rejected_invalid marker is durable (ruling R41).
+func TestRejectWaitsForADurableMarker(t *testing.T) {
+	h := newHarness(t, output.BatchLimits{MaxSamples: 10, MaxBody: 600})
+	fb := &faultyBuffer{addLoss: faultNotDurable, syncLosses: faultFailing}
+	h.wrap = func(b *buffer.Buffer) output.Buffer { fb.Buffer = b; return fb }
+	h.open()
+	big := model.SampleRecord(model.Sample{
+		Device: "press-01", Signal: "note", TS: epoch.Add(time.Second),
+		Value: model.StringValue(strings.Repeat("x", 1000)), Quality: model.Good, Priority: model.Bulk,
+	})
+	h.append(big, bulk(0))
+
+	if b, err := h.bt.Next(context.Background()); err == nil {
+		t.Fatalf("Next() with a marker that cannot be written = batch seq %d, want an error", b.Seq)
+	}
+
+	if s := h.buf.Stats(); s.Records != 2 {
+		t.Fatalf("buffer holds %d records, want 2: the oversized record is not acknowledged", s.Records)
+	}
+
+	fb.addLoss, fb.syncLosses = faultNone, faultNone
+	b := h.next()
+	marker := markerOf(model.Bulk, big, big, 1, model.LossRejectedInvalid)
+	if got, want := bodySamples(t, b.Body), []string{"temp=10"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("body samples %v, want %v", got, want)
+	}
+
+	// The failed attempt left its marker applied in memory; the retry adds
+	// it again: reported twice, never lost.
+	if !sameLosses(b.Losses, []model.Loss{marker, marker}) {
+		t.Fatalf("batch losses %v, want the marker twice", b.Losses)
 	}
 }
 
@@ -922,9 +993,11 @@ func TestSealedRecordsCutByRecovery(t *testing.T) {
 	}
 }
 
-// TestCrashBetweenSaveAndAckLosses: the batch carrying the markers is saved
-// but the markers are still pending in the buffer. They must travel once.
-func TestCrashBetweenSaveAndAckLosses(t *testing.T) {
+// TestCrashBetweenSaveAndAckLossesReportsMarkersTwice: the batch carrying
+// the markers is saved but the markers are still pending in the buffer. They
+// travel with the resent batch and again with the next one: reported twice,
+// never lost (ruling R40).
+func TestCrashBetweenSaveAndAckLossesReportsMarkersTwice(t *testing.T) {
 	h := newHarness(t, output.BatchLimits{MaxSamples: 1, MaxBody: 1 << 20})
 	h.wrap = func(b *buffer.Buffer) output.Buffer { return &faultyBuffer{Buffer: b, ackLosses: faultLost} }
 	h.open()
@@ -941,35 +1014,107 @@ func TestCrashBetweenSaveAndAckLosses(t *testing.T) {
 	resent := h.next()
 	assertSameBatch(t, resent, sealed)
 
-	if pending := h.buf.PendingLosses(); len(pending) != 0 {
-		t.Fatalf("pending losses after restart %v, want none: the inflight batch carries them", pending)
-	}
-
 	h.confirm(resent)
-	if after := h.next(); len(after.Losses) != 0 {
-		t.Fatalf("the next batch carries %v again", after.Losses)
+	if after := h.next(); !sameLosses(after.Losses, []model.Loss{carried}) {
+		t.Fatalf("the next batch carries %v, want %v again", after.Losses, []model.Loss{carried})
 	}
 }
 
-// TestShrinkHandsTheRestBackToEviction: after a split the batch no longer
-// carries the rest, so evicting it later is a loss the buffer counts.
-func TestShrinkHandsTheRestBackToEviction(t *testing.T) {
-	f := bulkFrameSize(t)
-	h := newHarness(t, output.BatchLimits{MaxSamples: 3, MaxBody: 1 << 20})
-	h.opts.SegmentSize = 3*f + f/2
-	h.opts.MaxSize = 6*f + f/2
-	h.open()
-
+// TestCrashBetweenConfirmAckAndClear: the records are acknowledged but the
+// inflight batch is not cleared. After a restart the identical batch is
+// resent (the backend answers duplicate), its acknowledgement is a no-op,
+// and nothing appended meanwhile is lost.
+func TestCrashBetweenConfirmAckAndClear(t *testing.T) {
+	h := newHarness(t, output.BatchLimits{MaxSamples: 2, MaxBody: 1 << 20}).open()
 	h.append(bulk(0), bulk(1), bulk(2))
-	if _, err := h.bt.Shrink(h.next(), 1); err != nil {
+	sealed := h.next()
+
+	if err := os.Mkdir(filepath.Join(h.dir, "inflight.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.bt.Confirm(sealed); err == nil {
+		t.Fatal("Confirm() with a failing inflight write = nil, want an error")
+	}
+
+	if s := h.buf.Stats(); s.Records != 1 {
+		t.Fatalf("buffer holds %d records after the acknowledgement, want 1", s.Records)
+	}
+
+	h.restart()
+	resent := h.next()
+	assertSameBatch(t, resent, sealed)
+	h.confirm(resent)
+
+	h.append(bulk(3))
+	after := h.next()
+	if got, want := bodySamples(t, after.Body), []string{"temp=12", "temp=13"}; !reflect.DeepEqual(got, want) || after.Seq != sealed.Seq+1 {
+		t.Fatalf("next batch seq %d samples %v, want seq %d samples %v", after.Seq, got, sealed.Seq+1, want)
+	}
+}
+
+// TestShrinkCountsAnInteriorGap: a corrupt record in an older segment drops
+// the rest of that segment at recovery, leaving a gap inside the batch's
+// records while those after it survive. A split counts the gap.
+func TestShrinkCountsAnInteriorGap(t *testing.T) {
+	f := bulkFrameSize(t)
+	h := newHarness(t, output.BatchLimits{MaxSamples: 6, MaxBody: 1 << 20})
+	h.opts.SegmentSize = 3*f + f/2
+	h.open()
+	h.append(bulk(0), bulk(1), bulk(2), bulk(3), bulk(4), bulk(5))
+	sealed := h.next()
+
+	if err := h.buf.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	h.buf = nil
+	segments, err := filepath.Glob(filepath.Join(h.dir, "bulk", "*.seg"))
+	if err != nil || len(segments) < 2 {
+		t.Fatalf("bulk segments %v, %v; want at least two", segments, err)
+	}
+
+	sort.Strings(segments)
+	corruptByte(t, segments[0], f+f/2) // inside the payload of bulk(1)
+
+	h.open()
+	resent := h.next()
+	assertSameBatch(t, resent, sealed)
+	first, err := h.bt.Shrink(resent, 1)
+	if err != nil {
 		t.Fatalf("Shrink() = %v", err)
 	}
 
-	h.append(bulk(3), bulk(4), bulk(5), bulk(6))
-
 	want := []model.Loss{markerOf(model.Bulk, bulk(1), bulk(2), 2, model.LossBufferFull)}
 	if pending := h.buf.PendingLosses(); !sameLosses(pending, want) {
-		t.Fatalf("pending losses after evicting the handed back records: %v, want %v", pending, want)
+		t.Fatalf("pending losses after Shrink: %v, want %v", pending, want)
+	}
+
+	h.confirm(first)
+	rest := h.next()
+	if got, want := bodySamples(t, rest.Body), []string{"temp=13", "temp=14", "temp=15"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("remainder samples %v, want %v", got, want)
+	}
+}
+
+func corruptByte(t *testing.T, path string, off int64) {
+	t.Helper()
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer file.Close()
+
+	b := make([]byte, 1)
+	if _, err := file.ReadAt(b, off); err != nil {
+		t.Fatal(err)
+	}
+
+	b[0] ^= 0xff
+	if _, err := file.WriteAt(b, off); err != nil {
+		t.Fatal(err)
 	}
 }
 

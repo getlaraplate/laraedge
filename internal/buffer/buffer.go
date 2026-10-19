@@ -19,12 +19,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/swolley/laraplate-edge/internal/atomicfile"
 	"github.com/swolley/laraplate-edge/internal/clock"
 	"github.com/swolley/laraplate-edge/internal/model"
 )
@@ -45,7 +44,7 @@ const (
 	ackedFileName       = "acked"
 	lossesFileName      = "losses"
 	segmentSizeFileName = "segment_size"
-	tmpSuffix           = ".tmp"
+	tmpSuffix           = atomicfile.TmpSuffix
 	stateVersion        = 1
 )
 
@@ -751,6 +750,30 @@ func (b *Buffer) AckLosses(n int) error {
 	return nil
 }
 
+// SyncLosses writes the pending loss markers now when an earlier write
+// failed, instead of waiting for the next sync tick, so that a caller can
+// make a marker durable before acknowledging the records it stands for. It
+// returns nil when nothing is waiting to be written, and an error wrapping
+// ErrNotDurable when the write fails again.
+func (b *Buffer) SyncLosses() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.closed {
+		return ErrClosed
+	}
+
+	if !b.lossesDirty {
+		return nil
+	}
+
+	if err := b.persistLossesLocked(); err != nil {
+		return fmt.Errorf("buffer: sync loss markers: %w", errors.Join(ErrNotDurable, err))
+	}
+
+	return nil
+}
+
 // Head returns the oldest readable position of queue p: the first record
 // neither confirmed nor evicted. It returns 0 for an invalid priority.
 func (b *Buffer) Head(p model.Priority) Position {
@@ -1011,66 +1034,12 @@ func readLosses(dir string) ([]model.Loss, error) {
 	return losses, nil
 }
 
-// writeJSONAtomic replaces dir/name with the JSON of v: temporary file,
-// fsync, rename, fsync of the directory where supported.
+// writeJSONAtomic replaces dir/name with the JSON of v atomically.
 func writeJSONAtomic(dir, name string, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", name, err)
 	}
 
-	tmp := filepath.Join(dir, name+tmpSuffix)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("write %s: %w", name, err)
-	}
-
-	_, writeErr := f.Write(data)
-	if writeErr == nil {
-		writeErr = f.Sync()
-	}
-
-	closeErr := f.Close()
-	if err := errors.Join(writeErr, closeErr); err != nil {
-		_ = os.Remove(tmp)
-
-		return fmt.Errorf("write %s: %w", name, err)
-	}
-
-	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		_ = os.Remove(tmp)
-
-		return fmt.Errorf("replace %s: %w", name, err)
-	}
-
-	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("replace %s: %w", name, err)
-	}
-
-	return nil
-}
-
-// syncDir makes the directory entries of dir durable. Windows has no
-// directory sync, and some filesystems refuse it; both count as done.
-func syncDir(dir string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("sync directory: %w", err)
-	}
-
-	syncErr := d.Sync()
-	closeErr := d.Close()
-	if errors.Is(syncErr, syscall.EINVAL) || errors.Is(syncErr, errors.ErrUnsupported) {
-		syncErr = nil
-	}
-
-	if err := errors.Join(syncErr, closeErr); err != nil {
-		return fmt.Errorf("sync directory %s: %w", dir, err)
-	}
-
-	return nil
+	return atomicfile.Write(dir, name, data)
 }

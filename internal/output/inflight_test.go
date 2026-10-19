@@ -121,6 +121,23 @@ func TestInflightRefusesSeqThatGoesBack(t *testing.T) {
 	}
 }
 
+func TestInflightStoredBatchBlocksANewSeq(t *testing.T) {
+	dir := t.TempDir()
+	inf, _, _ := loadInflight(t, dir)
+	if err := inf.Save(storedBatch(0)); err != nil {
+		t.Fatalf("Save(seq 0) = %v", err)
+	}
+
+	if err := inf.Save(storedBatch(1)); err == nil {
+		t.Fatal("Save(seq 1) over the unconfirmed batch seq 0 = nil, want an error")
+	}
+
+	_, stored, next := loadInflight(t, dir)
+	if stored == nil || stored.Seq != 0 || next != 1 {
+		t.Fatalf("stored batch %v next_seq %d, want seq 0 kept and next_seq 1", stored, next)
+	}
+}
+
 func TestInflightShrunkBatchKeepsItsSeq(t *testing.T) {
 	inf, _, _ := loadInflight(t, t.TempDir())
 	if err := inf.Save(storedBatch(0)); err != nil {
