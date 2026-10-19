@@ -193,6 +193,19 @@ type plan struct {
 	kept           int
 }
 
+// outputStop says what follows the stop of an output.
+type outputStop int
+
+const (
+	// stopForRestart: the output starts again; the router holds its records.
+	stopForRestart outputStop = iota
+	// stopRemoved: the output leaves the configuration; its directory is
+	// kept, with a warning when it holds unsent records.
+	stopRemoved
+	// stopShutdown: the supervisor closes.
+	stopShutdown
+)
+
 // journal records what an Apply did, so that a rollback can undo it.
 type journal struct {
 	stoppedInputs  []config.Input
@@ -211,8 +224,10 @@ type journal struct {
 // kept) and added ones start. When a component fails to start, or an input
 // does not start within the start timeout, what this Apply started is
 // stopped and what it stopped is started again: ResultRolledBack with the
-// errors. On success the document is saved as the last valid one; the error
-// is only for that save failing, with ResultApplied.
+// errors. When ctx is cancelled during a failed apply, the rollback still
+// runs but there is no outcome: Apply returns the context error. On success
+// the document is saved as the last valid one; the error is then only for
+// that save failing, with ResultApplied.
 func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, error) {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
@@ -240,6 +255,13 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	closeInputs(built)
 	if len(errs) > 0 {
 		errs = append(errs, s.rollback(j)...)
+		if err := ctx.Err(); err != nil {
+			// A shutdown is not an attempt: the document was never given its
+			// chance, so there is no outcome to report (ruling R45).
+			s.log.Warn("supervisor: configuration apply cancelled; the previous one runs", "version", doc.Version, "errors", errs)
+
+			return Outcome{}, fmt.Errorf("supervisor: apply cancelled: %w", err)
+		}
 		s.log.Error("supervisor: configuration rolled back to the previous one", "version", doc.Version, "errors", errs)
 
 		return Outcome{Result: ResultRolledBack, Errors: errs}, nil
@@ -371,7 +393,11 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 		j.stoppedInputs = append(j.stoppedInputs, s.stopInput(id))
 	}
 	for _, id := range p.stopOutputs {
-		cfg, _ := s.stopOutput(id, p.removedOutputs[id])
+		how := stopForRestart
+		if p.removedOutputs[id] {
+			how = stopRemoved
+		}
+		cfg, _ := s.stopOutput(id, how)
 		j.stoppedOutputs = append(j.stoppedOutputs, cfg)
 	}
 
@@ -404,8 +430,11 @@ func (s *Supervisor) rollback(j journal) []string {
 		s.stopInput(id)
 	}
 	for _, id := range slices.Backward(j.startedOutputs) {
-		added := !slices.ContainsFunc(j.stoppedOutputs, func(o config.Output) bool { return o.ID == id })
-		_, _ = s.stopOutput(id, added)
+		how := stopRemoved
+		if slices.ContainsFunc(j.stoppedOutputs, func(o config.Output) bool { return o.ID == id }) {
+			how = stopForRestart
+		}
+		_, _ = s.stopOutput(id, how)
 	}
 
 	var errs []string
@@ -413,6 +442,7 @@ func (s *Supervisor) rollback(j journal) []string {
 		if err := s.startOutput(cfg); err != nil {
 			errs = append(errs, fmt.Sprintf("rollback: output %s: %v", cfg.ID, err))
 			s.setFailed(s.failedOut, cfg.ID, cfg.Type, err)
+			s.router.RemoveOutput(cfg.ID)
 		}
 	}
 	for _, cfg := range j.stoppedInputs {
@@ -514,20 +544,25 @@ func (s *Supervisor) startOutput(cfg config.Output) error {
 	return nil
 }
 
-// stopOutput stops routing to the output, stops its sending and closes its
-// buffer, which syncs it. A removed output with unsent records leaves a
-// warning: its directory is kept.
-func (s *Supervisor) stopOutput(id string, removed bool) (config.Output, error) {
+// stopOutput stops routing to the output, or holds its records when it
+// restarts (ruling R46), stops its sending and closes its buffer, which syncs
+// it. A removed output with unsent records leaves a warning: its directory
+// is kept.
+func (s *Supervisor) stopOutput(id string, how outputStop) (config.Output, error) {
 	s.mu.Lock()
 	ro := s.outputs[id]
 	delete(s.outputs, id)
 	s.mu.Unlock()
 
-	s.router.RemoveOutput(id)
+	if how == stopForRestart {
+		s.router.Hold(id)
+	} else {
+		s.router.RemoveOutput(id)
+	}
 	ro.cancel()
 	<-ro.done
 
-	if removed {
+	if how == stopRemoved {
 		if n := ro.buf.Stats().Records; n > 0 {
 			s.log.Warn("supervisor: output removed; its unsent records remain in its directory", "output", id, "records", n, "dir", ro.dir)
 		}
@@ -541,15 +576,22 @@ func (s *Supervisor) stopOutput(id string, removed bool) (config.Output, error) 
 	return ro.cfg, err
 }
 
-// startInput starts in within the start timeout. Its births are sent once,
-// before its first record or when Start returns, whichever comes first.
+// startInput starts in within the start timeout. Its devices are registered
+// with the router, and their births sent, once the input is live: before its
+// first record or when Start returns, whichever comes first. Until then an
+// output reconnecting sends no birth for them.
 func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.Input) error {
 	lifeCtx, cancel := context.WithCancel(s.ctx)
 	live := &atomic.Bool{}
 	live.Store(true)
 
 	var once sync.Once
-	births := func() { once.Do(func() { s.router.BirthInput(cfg.ID) }) }
+	births := func() {
+		once.Do(func() {
+			s.router.SetInput(cfg)
+			s.router.BirthInput(cfg.ID)
+		})
+	}
 	emit := func(rec model.Record) {
 		if !live.Load() {
 			return
@@ -558,7 +600,6 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 		s.router.Emit(rec)
 	}
 
-	s.router.SetInput(cfg)
 	err := s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, emit) }, func() {
 		if err := in.Close(); err != nil {
 			s.log.Warn("supervisor: cannot close an input that did not start", "input", cfg.ID, "error", err)
@@ -675,7 +716,7 @@ func (s *Supervisor) Close() error {
 
 	var errs []error
 	for _, id := range outputs {
-		if _, err := s.stopOutput(id, false); err != nil {
+		if _, err := s.stopOutput(id, stopShutdown); err != nil {
 			errs = append(errs, fmt.Errorf("supervisor: output %s: %w", id, err))
 		}
 	}

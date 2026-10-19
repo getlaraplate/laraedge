@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/swolley/laraplate-edge/internal/clock"
 	"github.com/swolley/laraplate-edge/internal/config"
@@ -13,9 +14,14 @@ import (
 	"github.com/swolley/laraplate-edge/internal/model"
 )
 
+// HoldLimit bounds the records kept in memory for an output while it
+// restarts; the records beyond it become buffer_full loss markers.
+const HoldLimit = 10_000
+
 // Appender is what the router uses of an output's buffer (*buffer.Buffer).
 type Appender interface {
 	Append(r model.Record) error
+	AddLoss(l model.Loss) error
 }
 
 // Router fans every record out to the buffers of the outputs whose route
@@ -36,6 +42,49 @@ type Router struct {
 type target struct {
 	route config.Route
 	buf   Appender
+	// hold, while the output restarts, keeps what would have been appended.
+	hold *holdQueue
+}
+
+// holdQueue keeps the records of a restarting output, at most HoldLimit;
+// the others are counted per priority with their ts range (ruling R46).
+type holdQueue struct {
+	mu   sync.Mutex
+	recs []model.Record
+	lost map[model.Priority]*model.Loss
+}
+
+func (q *holdQueue) add(rec model.Record) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if len(q.recs) < HoldLimit {
+		q.recs = append(q.recs, rec)
+
+		return
+	}
+
+	ts := recordTS(rec)
+	l := q.lost[rec.Priority()]
+	if l == nil {
+		l = &model.Loss{Priority: rec.Priority(), FromTS: ts, ToTS: ts, Reason: model.LossBufferFull}
+		q.lost[rec.Priority()] = l
+	}
+	l.Samples++
+	if ts.Before(l.FromTS) {
+		l.FromTS = ts
+	}
+	if ts.After(l.ToTS) {
+		l.ToTS = ts
+	}
+}
+
+func recordTS(rec model.Record) time.Time {
+	if rec.Sample != nil {
+		return rec.Sample.TS
+	}
+
+	return rec.Event.TS
 }
 
 // NewRouter returns a router without outputs or inputs. A nil log means
@@ -50,26 +99,88 @@ func NewRouter(clk clock.Clock, log *slog.Logger) *Router {
 
 // SetOutput routes to buf the records matching route, from now on, after
 // appending the births of the running inputs' devices it routes: no sample
-// reaches the output before the birth of its device. The caller hands over a
-// buffer ready for appends: its batcher already built.
+// reaches the output before the birth of its device. When the output was
+// held, the held records follow the births, routed again with route, and
+// the records beyond HoldLimit become buffer_full markers on buf. The caller
+// hands over a buffer ready for appends: its batcher already built.
 func (r *Router) SetOutput(id string, route config.Route, buf Appender) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.outputs[id]; !ok {
+	old, ok := r.outputs[id]
+	if !ok {
 		r.order = append(r.order, id)
 		slices.Sort(r.order)
 	}
 	r.outputs[id] = target{route: route, buf: buf}
 	r.birthTo(id)
+
+	if ok && old.hold != nil {
+		r.flush(id, old.hold)
+	}
 }
 
-// RemoveOutput stops routing to output id. When it returns no append to its
-// buffer is running or will start.
+// flush appends the held records of output id and its overflow markers.
+func (r *Router) flush(id string, q *holdQueue) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	t := r.outputs[id]
+	for _, rec := range q.recs {
+		switch {
+		case rec.Sample != nil:
+			if t.route.Match(rec.Sample.Device, rec.Sample.Signal) {
+				r.append(id, t.buf, rec)
+			}
+		case rec.Event != nil:
+			r.event(id, *rec.Event)
+		}
+	}
+
+	for _, p := range []model.Priority{model.Critical, model.Bulk} {
+		l := q.lost[p]
+		if l == nil {
+			continue
+		}
+		r.log.Warn("router: records beyond the hold limit while the output restarted; recorded as lost", "output", id, "priority", p.String(), "samples", l.Samples)
+		if err := t.buf.AddLoss(*l); err != nil {
+			r.log.Warn("router: cannot record the loss marker of a restart", "output", id, "priority", p.String(), "error", err)
+		}
+	}
+}
+
+// Hold keeps, in memory, what would be appended to output id until the next
+// SetOutput of id: the output restarts (ruling R46). When it returns no
+// append to the previous buffer is running or will start.
+func (r *Router) Hold(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	t, ok := r.outputs[id]
+	if !ok {
+		return
+	}
+	r.outputs[id] = target{route: t.route, hold: &holdQueue{lost: map[model.Priority]*model.Loss{}}}
+}
+
+// RemoveOutput stops routing to output id; records held for it are
+// discarded with a warning. When it returns no append to its buffer is
+// running or will start.
 func (r *Router) RemoveOutput(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if t, ok := r.outputs[id]; ok && t.hold != nil {
+		t.hold.mu.Lock()
+		n := len(t.hold.recs)
+		for _, l := range t.hold.lost {
+			n += l.Samples
+		}
+		t.hold.mu.Unlock()
+		if n > 0 {
+			r.log.Warn("router: output removed while held; its held records are discarded", "output", id, "records", n)
+		}
+	}
 	delete(r.outputs, id)
 	r.order = slices.DeleteFunc(r.order, func(o string) bool { return o == id })
 }
@@ -104,7 +215,7 @@ func (r *Router) Emit(rec model.Record) {
 		for _, id := range r.order {
 			t := r.outputs[id]
 			if t.route.Match(rec.Sample.Device, rec.Sample.Signal) {
-				r.append(id, t.buf, rec)
+				r.deliver(id, t, rec)
 			}
 		}
 	case rec.Event != nil:
@@ -196,7 +307,18 @@ func (r *Router) event(id string, ev model.DeviceEvent) {
 	if ev.Kind == model.Birth {
 		ev.Signals = routed
 	}
-	r.append(id, t.buf, model.EventRecord(ev))
+	r.deliver(id, t, model.EventRecord(ev))
+}
+
+// deliver appends rec to the output's buffer, or holds it while the output
+// restarts.
+func (r *Router) deliver(id string, t target, rec model.Record) {
+	if t.hold != nil {
+		t.hold.add(rec)
+
+		return
+	}
+	r.append(id, t.buf, rec)
 }
 
 func (r *Router) append(id string, buf Appender, rec model.Record) {

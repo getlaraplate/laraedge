@@ -14,11 +14,17 @@ import (
 
 // Input is one running input instance (ruling R33).
 type Input interface {
-	// Start connects and starts reading. It returns once the input is
-	// running, or an error when it cannot start; it must give up when ctx is
-	// done. The goroutines it starts stop when ctx is cancelled. emit receives
-	// every sample and device event, from any goroutine of the input, and
-	// may block while the record is written to the buffers.
+	// Start starts reading. It returns once the input is running, or an
+	// error when it cannot start; it must give up when ctx is done. Start
+	// fails only on an invalid configuration or a local resource error (a
+	// serial port that cannot be opened, a file that cannot be read), never
+	// because the machine is unreachable: an unreachable machine is reported
+	// by death after the death tolerance and birth on recovery, while the
+	// input keeps retrying (ruling R47). A failing Start rolls the whole
+	// configuration back. The goroutines it starts stop when ctx is
+	// cancelled. emit receives every sample and device event, from any
+	// goroutine of the input, and may block while the record is written to
+	// the buffers.
 	//
 	// The supervisor sends the births of the input's devices itself, on
 	// start; the input emits death after its death tolerance without a
@@ -33,7 +39,7 @@ type Input interface {
 }
 
 // Factory builds the input of cfg. It only validates and prepares: nothing
-// may connect before Start, so the supervisor can build every new input of a
+// may open a connection or a device before Start, so the supervisor can build every new input of a
 // document and refuse the document without touching the running ones.
 type Factory func(cfg config.Input, clk clock.Clock) (Input, error)
 

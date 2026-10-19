@@ -29,13 +29,25 @@ type fakeApplier struct {
 	outcome supervisor.Outcome
 	version int64
 	applied chan config.Document
+	entered chan struct{}
+	// hook runs inside Apply, after entered is signalled.
+	hook func(ctx context.Context)
 }
 
 func newFakeApplier() *fakeApplier {
-	return &fakeApplier{outcome: supervisor.Outcome{Result: supervisor.ResultApplied}, applied: make(chan config.Document, 64)}
+	return &fakeApplier{
+		outcome: supervisor.Outcome{Result: supervisor.ResultApplied},
+		applied: make(chan config.Document, 64),
+		entered: make(chan struct{}, 64),
+	}
 }
 
-func (a *fakeApplier) Apply(_ context.Context, doc config.Document) (supervisor.Outcome, error) {
+func (a *fakeApplier) Apply(ctx context.Context, doc config.Document) (supervisor.Outcome, error) {
+	a.entered <- struct{}{}
+	if a.hook != nil {
+		a.hook(ctx)
+	}
+
 	a.mu.Lock()
 	a.docs = append(a.docs, doc)
 	out := a.outcome

@@ -1,8 +1,11 @@
 package provider_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"log/slog"
 	"net/http"
@@ -214,13 +217,43 @@ func (f *laraplateFixture) pollAgain(gets int) {
 	waitTimers(f.t, f.clk, 1)
 }
 
-func (f *laraplateFixture) lastAttempt() string {
-	data, err := os.ReadFile(filepath.Join(f.dataDir, "config", "last-attempt"))
+// providerState is the persisted state of the provider.
+type providerState struct {
+	LastAttempt *struct {
+		Version int64  `json:"version"`
+		Outcome string `json:"outcome"`
+	} `json:"last_attempt"`
+	PendingReports []map[string]any `json:"pending_reports"`
+}
+
+func (f *laraplateFixture) state() providerState {
+	f.t.Helper()
+
+	var st providerState
+	data, err := os.ReadFile(filepath.Join(f.dataDir, "config", "laraplate-state.json"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return st
+	}
 	if err != nil {
-		return "error: " + err.Error()
+		f.t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		f.t.Fatalf("state %s: %v", data, err)
 	}
 
-	return strings.TrimSpace(string(data))
+	return st
+}
+
+// lastAttempt returns "version outcome" of the persisted last attempt.
+func (f *laraplateFixture) lastAttempt() string {
+	f.t.Helper()
+
+	st := f.state()
+	if st.LastAttempt == nil {
+		return "none"
+	}
+
+	return itoa(int(st.LastAttempt.Version)) + " " + st.LastAttempt.Outcome
 }
 
 func report(v int, outcome string, errs ...string) map[string]any {
@@ -310,8 +343,8 @@ func TestLaraplateRefusesAnOlderVersionOnce(t *testing.T) {
 	if v := sup.AppliedVersion(); v != 5 {
 		t.Fatalf("AppliedVersion() = %d, want the running 5", v)
 	}
-	if got := f.lastAttempt(); got != "3" {
-		t.Fatalf("last-attempt = %q, want 3", got)
+	if got := f.lastAttempt(); got != "3 rejected" {
+		t.Fatalf("last attempt = %q, want 3 rejected", got)
 	}
 
 	// The backend keeps answering the refused version: it is neither applied
@@ -525,5 +558,128 @@ func TestNewLaraplateRefusesAnInsecureURL(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewLaraplate() accepted plain http to a remote host")
+	}
+}
+
+// TestLaraplateCancelledApplyIsNotAnAttempt: a shutdown during the apply
+// records nothing, so the version is downloaded and applied after the
+// restart (ruling R45).
+func TestLaraplateCancelledApplyIsNotAnAttempt(t *testing.T) {
+	f := newLaraplateFixture(t)
+	f.be.setActive(9, doc(9))
+	a := newFakeApplier()
+	a.hook = func(ctx context.Context) { <-ctx.Done() }
+	a.setOutcome(supervisor.Outcome{Result: supervisor.ResultRolledBack, Errors: []string{"inputs.0: start cancelled: context canceled"}})
+	r := f.start(a)
+
+	select {
+	case <-a.entered:
+	case <-time.After(guard):
+		t.Fatal("the document was not applied")
+	}
+	r.stop(t)
+
+	if got := f.be.reportsSoFar(); len(got) != 0 {
+		t.Fatalf("reports = %v, want none for a cancelled apply", got)
+	}
+	if got := f.lastAttempt(); got != "none" {
+		t.Fatalf("last attempt = %q, want none", got)
+	}
+
+	b := newFakeApplier()
+	f.start(b)
+	if got := b.next(t); got.Version != 9 {
+		t.Fatalf("applied version %d after the restart, want 9", got.Version)
+	}
+	f.be.waitReports(t, 1)
+	if g := f.be.getsSoFar()[1]; g.hasQuery {
+		t.Fatalf("request after the restart asked for version %q, want none", g.query)
+	}
+}
+
+// TestLaraplateAppliedAttemptDoesNotHideALostVersion: an applied version
+// that the agent no longer runs after a restart (its last valid document
+// could not be saved, or the offline start rolled back) is downloaded and
+// applied again (ruling R45).
+func TestLaraplateAppliedAttemptDoesNotHideALostVersion(t *testing.T) {
+	tests := []struct {
+		name      string
+		running   int64
+		wantQuery string
+	}{
+		{name: "an older last valid document runs", running: 3, wantQuery: "3"},
+		{name: "nothing runs", running: 0, wantQuery: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newLaraplateFixture(t)
+			f.be.setActive(5, doc(5))
+			r := f.start(newFakeApplier())
+			f.be.waitReports(t, 1)
+			r.stop(t)
+			if got := f.lastAttempt(); got != "5 applied" {
+				t.Fatalf("last attempt = %q, want 5 applied", got)
+			}
+
+			b := newFakeApplier()
+			b.version = tt.running
+			f.start(b)
+			if got := b.next(t); got.Version != 5 {
+				t.Fatalf("applied version %d after the restart, want 5", got.Version)
+			}
+			if g := f.be.getsSoFar()[1]; g.query != tt.wantQuery || g.hasQuery != (tt.wantQuery != "") {
+				t.Fatalf("request after the restart asked for %q (present %v), want %q", g.query, g.hasQuery, tt.wantQuery)
+			}
+			f.be.waitReports(t, 2)
+		})
+	}
+}
+
+// TestLaraplatePendingReportSurvivesARestart: a report the backend did not
+// record is persisted and sent after a restart (ruling R45).
+func TestLaraplatePendingReportSurvivesARestart(t *testing.T) {
+	f := newLaraplateFixture(t)
+	f.be.setActive(5, doc(5))
+	f.be.set(func(be *configBackend) { be.reportStatus = []int{http.StatusServiceUnavailable} })
+	r := f.start(newFakeApplier())
+	f.be.waitReports(t, 1)
+	waitTimers(t, f.clk, 1)
+	r.stop(t)
+
+	if st := f.state(); !reflect.DeepEqual(st.PendingReports, []map[string]any{report(5, "applied")}) {
+		t.Fatalf("pending reports = %v, want the undelivered one", st.PendingReports)
+	}
+
+	b := newFakeApplier()
+	b.version = 5
+	f.start(b)
+	f.be.waitGets(t, 2)
+	waitTimers(t, f.clk, 1)
+
+	if got := f.be.reportsSoFar(); !reflect.DeepEqual(got, []map[string]any{report(5, "applied"), report(5, "applied")}) {
+		t.Fatalf("reports = %v, want the pending report sent again after the restart", got)
+	}
+	if st := f.state(); len(st.PendingReports) != 0 {
+		t.Fatalf("pending reports = %v after delivery, want none", st.PendingReports)
+	}
+	if n := b.count(); n != 0 {
+		t.Fatalf("applied %d documents after the restart, want none (304)", n)
+	}
+}
+
+func TestLaraplateRefusedReportIsDropped(t *testing.T) {
+	f := newLaraplateFixture(t)
+	f.be.setActive(5, doc(5))
+	f.be.set(func(be *configBackend) { be.reportStatus = []int{http.StatusUnprocessableEntity} })
+	f.start(newFakeApplier())
+	f.be.waitReports(t, 1)
+	f.pollAgain(2)
+
+	if got := f.be.reportsSoFar(); len(got) != 1 {
+		t.Fatalf("reports = %v, want the refused one sent once", got)
+	}
+	if st := f.state(); len(st.PendingReports) != 0 {
+		t.Fatalf("pending reports = %v, want none", st.PendingReports)
 	}
 }

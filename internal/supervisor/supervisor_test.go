@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -625,5 +626,131 @@ func TestRollbackReportsAPreviousInputThatDoesNotStartAgain(t *testing.T) {
 	wantInputs = []InputStatus{{ID: "a", Driver: config.DriverSimulated, State: InputRunning}}
 	if st := f.sup.Status(); !reflect.DeepEqual(st.Inputs, wantInputs) {
 		t.Fatalf("Status().Inputs = %+v, want a running", st.Inputs)
+	}
+}
+
+func TestChangedOutputKeepsRecordsEmittedWhileItRestarts(t *testing.T) {
+	f := newFixture(t)
+	doc1 := f.document(1, []inSpec{{id: "b", devices: []string{"b1"}}}, []outSpec{{id: "change"}})
+	f.mustApply(doc1)
+	f.be.waitItem(t, "change", birthB1)
+
+	// The unchanged input emits between the stop of the previous output and
+	// the start of the new one.
+	f.sup.trace = func(step string) {
+		if step == "buffer change" {
+			f.drv.instance(t, "b").send("b1", "count")
+		}
+	}
+	f.mustApply(f.document(2, []inSpec{{id: "b", devices: []string{"b1"}}}, []outSpec{{id: "change", variant: 1}}))
+
+	got := f.be.waitItem(t, "change", "b1/count")
+	if want := []string{birthB1, birthB1, "b1/count"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("change received %q, want the restart birth then the held sample %q", got, want)
+	}
+}
+
+func TestRollbackOfAChangedOutputKeepsItsBufferAndSeq(t *testing.T) {
+	f := newFixture(t)
+	doc1 := f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}})
+	f.mustApply(doc1)
+	f.be.waitItem(t, "main", birthA1)
+
+	// A record waits in the buffer while the backend refuses.
+	f.be.refuse("main", 503, 503, 503)
+	f.drv.instance(t, "a").send("a1", "state")
+	f.waitStatus("main backing off", outputState("main", "backoff"))
+
+	f.drv.failStart["b"] = errRefused
+	out := f.apply(f.document(2,
+		[]inSpec{{id: "a", devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}},
+		[]outSpec{{id: "main", variant: 1}}))
+	if out.Result != ResultRolledBack {
+		t.Fatalf("Apply() = %+v, want rolled_back", out)
+	}
+	if got := f.output("main").cfg.Raw; string(got) != string(doc1.Outputs[0].Raw) {
+		t.Fatalf("main runs %s, want the previous configuration", got)
+	}
+
+	deadline := time.Now().Add(guard)
+	for !slices.Contains(f.be.got("main"), "a1/state") {
+		if time.Now().After(deadline) {
+			t.Fatalf("main received %q, want the buffered sample after the rollback", f.be.got("main"))
+		}
+		f.clk.Advance(time.Minute)
+		runtime.Gosched()
+	}
+	seqs := f.be.seqsOf("main")
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] != seqs[i-1]+1 {
+			t.Fatalf("main source_seq %v, want consecutive across the rollback", seqs)
+		}
+	}
+}
+
+func TestBirthsOnlyForLiveInputs(t *testing.T) {
+	f := newFixture(t)
+	f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	f.be.waitItem(t, "main", birthA1)
+
+	f.drv.hang["b"] = true
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- f.apply(f.document(2, []inSpec{{id: "a", devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}}, []outSpec{{id: "main"}}))
+	}()
+	f.drv.waitCalled(t, "b")
+
+	// An output reconnecting while b is still starting.
+	f.sup.router.BirthTo("main")
+
+	f.clk.Advance(DefaultStartTimeout)
+	select {
+	case out := <-done:
+		if out.Result != ResultRolledBack {
+			t.Fatalf("Apply() = %+v, want rolled_back", out)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return")
+	}
+
+	f.drv.instance(t, "a").send("a1", "count")
+	if got := f.be.waitItem(t, "main", "a1/count"); slices.Contains(got, birthB1) {
+		t.Fatalf("main received %q, with a birth for an input that never ran", got)
+	}
+}
+
+func TestApplyCancelledIsNotAnOutcome(t *testing.T) {
+	f := newFixture(t)
+	doc1 := f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, nil)
+	f.mustApply(doc1)
+
+	f.drv.hang["b"] = true
+	ctx, cancel := context.WithCancel(t.Context())
+	type result struct {
+		out Outcome
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := f.sup.Apply(ctx, f.document(2, []inSpec{{id: "a", variant: 1, devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}}, nil))
+		done <- result{out, err}
+	}()
+	f.drv.waitCalled(t, "b")
+	cancel()
+
+	var res result
+	select {
+	case res = <-done:
+	case <-time.After(guard):
+		t.Fatal("Apply did not return after cancel")
+	}
+	if res.out.Result != "" || !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("Apply() = %+v, %v; want no outcome and context.Canceled", res.out, res.err)
+	}
+	if got := f.drv.instance(t, "a").cfg.Raw; string(got) != string(doc1.Inputs[0].Raw) {
+		t.Fatalf("input a runs %s, want the previous configuration", got)
+	}
+	if v := f.sup.AppliedVersion(); v != 1 {
+		t.Fatalf("AppliedVersion() = %d, want 1", v)
 	}
 }

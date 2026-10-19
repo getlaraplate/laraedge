@@ -37,10 +37,10 @@ const (
 )
 
 const (
-	configRoute     = "/api/v1/detail/mes/machine-agent-configs"
-	reportRoute     = "/api/v1/insert/mes/machine-agent-config-reports"
-	lastAttemptName = "last-attempt"
-	requestTimeout  = 30 * time.Second
+	configRoute    = "/api/v1/detail/mes/machine-agent-configs"
+	reportRoute    = "/api/v1/insert/mes/machine-agent-config-reports"
+	stateName      = "laraplate-state.json"
+	requestTimeout = 30 * time.Second
 	// maxConfigResponse bounds a configuration response: the document, at
 	// most config.MaxDocumentSize, and its envelope, with room for the
 	// backend's own formatting.
@@ -64,7 +64,7 @@ type LaraplateConfig struct {
 	Resolver output.SecretResolver
 	// Applier applies the documents.
 	Applier Applier
-	// DataDir holds config/last-attempt.
+	// DataDir holds config/laraplate-state.json.
 	DataDir string
 	// Clock drives the polling; nil means clock.Real().
 	Clock clock.Clock
@@ -78,12 +78,17 @@ type LaraplateConfig struct {
 // Laraplate polls the backend for the active configuration of this agent's
 // source every poll interval, from the start (spec 5.4, 5.5). It asks with
 // ?version=N, N the highest of the applied version and the last attempted
-// one (ruling R32), so the backend answers 304 while nothing changed. A new
-// document is applied and its outcome reported, with the errors and the agent
-// version; a report that cannot be delivered is sent again at the next poll.
-// The last attempted version is kept in data_dir/config/last-attempt, so a
-// rejected or rolled back version is neither applied nor reported again,
-// also after a restart.
+// one when that attempt was not applied (rulings R32, R45), so the backend
+// answers 304 while nothing changed. A new document is applied and its
+// outcome reported, with the errors and the agent version.
+//
+// data_dir/config/laraplate-state.json keeps, atomically, the last attempt
+// with its outcome and the reports not yet delivered: a rejected or rolled
+// back version is neither applied nor reported again, also after a restart;
+// an applied version the agent no longer runs after a restart is downloaded
+// again; an undelivered report is sent at every poll, from the first one
+// after a restart, until the backend records it (2xx) or refuses it (422).
+// An apply cut short by the shutdown is not an attempt and records nothing.
 type Laraplate struct {
 	configURL string
 	reportURL string
@@ -97,8 +102,20 @@ type Laraplate struct {
 	interval  time.Duration
 
 	// Owned by Run.
-	lastAttempt int64
+	lastAttempt attempt
 	pending     []report
+}
+
+// attempt is the last version the provider tried to apply and its outcome.
+type attempt struct {
+	Version int64  `json:"version"`
+	Outcome string `json:"outcome"`
+}
+
+// state is what the provider persists.
+type state struct {
+	LastAttempt    *attempt `json:"last_attempt,omitempty"`
+	PendingReports []report `json:"pending_reports"`
 }
 
 // report is the body of a configuration report.
@@ -148,9 +165,8 @@ func NewLaraplate(cfg LaraplateConfig) (*Laraplate, error) {
 		l.interval = bootstrap.DefaultPollSeconds * time.Second
 	}
 
-	l.lastAttempt, err = l.readLastAttempt()
-	if err != nil {
-		l.log.Warn("provider: cannot read the last attempted configuration version; starting from the applied one", "error", err)
+	if err := l.readState(); err != nil {
+		l.log.Warn("provider: cannot read the provider state; starting from the applied configuration without pending reports", "error", err)
 	}
 
 	return l, nil
@@ -207,7 +223,11 @@ func (l *Laraplate) poll(ctx context.Context) {
 	l.sendReports(ctx, token)
 
 	target := l.configURL
-	if n := max(l.applier.AppliedVersion(), l.lastAttempt); n > 0 {
+	n := l.applier.AppliedVersion()
+	if l.lastAttempt.Outcome != supervisor.ResultApplied {
+		n = max(n, l.lastAttempt.Version)
+	}
+	if n > 0 {
 		target += "?version=" + strconv.FormatInt(n, 10)
 	}
 
@@ -247,8 +267,8 @@ func (l *Laraplate) handle(ctx context.Context, token string, body []byte) {
 		return
 	}
 
-	if answer.Version == l.lastAttempt {
-		l.log.Debug("provider: configuration version already attempted", "version", answer.Version)
+	if answer.Version == l.lastAttempt.Version && l.lastAttempt.Outcome != supervisor.ResultApplied {
+		l.log.Debug("provider: configuration version already attempted", "version", answer.Version, "outcome", l.lastAttempt.Outcome)
 
 		return
 	}
@@ -258,11 +278,7 @@ func (l *Laraplate) handle(ctx context.Context, token string, body []byte) {
 		return
 	}
 
-	l.lastAttempt = answer.Version
-	if err := l.writeLastAttempt(answer.Version); err != nil {
-		l.log.Warn("provider: cannot persist the last attempted configuration version", "version", answer.Version, "error", err)
-	}
-
+	l.lastAttempt = attempt{Version: answer.Version, Outcome: out.Result}
 	l.pending = append(l.pending, report{
 		Version:      answer.Version,
 		Outcome:      out.Result,
@@ -273,6 +289,7 @@ func (l *Laraplate) handle(ctx context.Context, token string, body []byte) {
 		l.log.Warn("provider: too many undelivered configuration reports; dropping the oldest", "dropped", n)
 		l.pending = l.pending[n:]
 	}
+	l.saveState()
 	l.sendReports(ctx, token)
 }
 
@@ -316,8 +333,10 @@ func (l *Laraplate) apply(ctx context.Context, published int64, raw json.RawMess
 	}
 
 	out, err := l.applier.Apply(ctx, doc)
-	if out.Result == "" {
-		l.log.Error("provider: configuration not applied", "version", published, "error", err)
+	if out.Result == "" || ctx.Err() != nil {
+		// A shutdown during the apply: the document had no chance, so
+		// nothing is recorded and it is applied after the restart.
+		l.log.Warn("provider: configuration apply interrupted; it will be attempted again", "version", published, "error", err)
 
 		return out, false
 	}
@@ -327,8 +346,16 @@ func (l *Laraplate) apply(ctx context.Context, published int64, raw json.RawMess
 }
 
 // sendReports posts the pending reports in order and stops at the first one
-// not delivered. A 422 can never succeed: that report is dropped.
+// not delivered. A 422 can never succeed: that report is dropped. The state
+// is saved when the list changed.
 func (l *Laraplate) sendReports(ctx context.Context, token string) {
+	before := len(l.pending)
+	defer func() {
+		if len(l.pending) != before {
+			l.saveState()
+		}
+	}()
+
 	for len(l.pending) > 0 {
 		r := l.pending[0]
 		body, err := json.Marshal(r)
@@ -398,29 +425,50 @@ func (l *Laraplate) do(ctx context.Context, method, target string, body []byte, 
 	return resp.StatusCode, data, nil
 }
 
-func (l *Laraplate) readLastAttempt() (int64, error) {
-	data, err := os.ReadFile(filepath.Join(l.dir, lastAttemptName))
+// readState loads the persisted state; a missing file is an empty state.
+func (l *Laraplate) readState() error {
+	data, err := os.ReadFile(filepath.Join(l.dir, stateName))
 	if errors.Is(err, fs.ErrNotExist) {
-		return 0, nil
+		return nil
 	}
 	if err != nil {
-		return 0, err
-	}
-
-	n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("%s does not hold a version", filepath.Join(l.dir, lastAttemptName))
-	}
-
-	return n, nil
-}
-
-func (l *Laraplate) writeLastAttempt(v int64) error {
-	if err := os.MkdirAll(l.dir, 0o700); err != nil {
 		return err
 	}
 
-	return atomicfile.Write(l.dir, lastAttemptName, []byte(strconv.FormatInt(v, 10)+"\n"))
+	var st state
+	if err := json.Unmarshal(data, &st); err != nil {
+		return fmt.Errorf("%s is corrupt", filepath.Join(l.dir, stateName))
+	}
+	if st.LastAttempt != nil {
+		l.lastAttempt = *st.LastAttempt
+	}
+	l.pending = st.PendingReports
+
+	return nil
+}
+
+// saveState persists the last attempt and the pending reports atomically. A
+// failure is logged; the state in memory stays authoritative until the next
+// save.
+func (l *Laraplate) saveState() {
+	st := state{PendingReports: l.pending}
+	if l.lastAttempt.Version > 0 {
+		la := l.lastAttempt
+		st.LastAttempt = &la
+	}
+	if st.PendingReports == nil {
+		st.PendingReports = []report{}
+	}
+
+	data, err := json.Marshal(st)
+	if err == nil {
+		if err = os.MkdirAll(l.dir, 0o700); err == nil {
+			err = atomicfile.Write(l.dir, stateName, data)
+		}
+	}
+	if err != nil {
+		l.log.Warn("provider: cannot persist the provider state", "error", err)
+	}
 }
 
 // capErrors keeps the first MaxReportErrors messages, each cut to

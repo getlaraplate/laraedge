@@ -22,9 +22,19 @@ var start = time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
 
 // sink is a fake output buffer recording what it receives.
 type sink struct {
-	mu   sync.Mutex
-	recs []model.Record
-	err  error
+	mu     sync.Mutex
+	recs   []model.Record
+	losses []model.Loss
+	err    error
+}
+
+func (s *sink) AddLoss(l model.Loss) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.losses = append(s.losses, l)
+
+	return nil
 }
 
 func (s *sink) Append(r model.Record) error {
@@ -259,5 +269,83 @@ func TestRouterSetOutputBirthsTheRunningDevicesFirst(t *testing.T) {
 	want := []string{"birth press-07 [temp]", "birth oven-02 [temp]", "oven-02/temp"}
 	if got := s.got(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("new output got %q, want %q", got, want)
+	}
+}
+
+func TestRouterHoldsARestartingOutput(t *testing.T) {
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
+	r.SetInput(line())
+	old := &sink{}
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, old)
+	before := len(old.got())
+
+	r.Hold("main")
+	r.Emit(sample("press-07", "state"))
+	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: "oven-02", TS: start}))
+	r.Emit(sample("oven-02", "temp"))
+	if got := old.got(); len(got) != before {
+		t.Fatalf("the previous buffer received %q while held", got[before:])
+	}
+
+	reopened := &sink{}
+	r.SetOutput("main", config.Route{Include: []string{"press-07", "oven-02/temp"}}, reopened)
+
+	want := []string{
+		"birth press-07 [state temp]", "birth oven-02 [temp]",
+		"press-07/state", "death oven-02 []", "oven-02/temp",
+	}
+	if got := reopened.got(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reopened output got %q, want births then the held records %q", got, want)
+	}
+	if len(reopened.losses) != 0 {
+		t.Fatalf("losses = %+v, want none under the hold limit", reopened.losses)
+	}
+}
+
+func TestRouterHoldOverflowBecomesLossMarkers(t *testing.T) {
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
+	r.Hold("main")
+
+	at := func(i int) time.Time { return start.Add(time.Duration(i) * time.Millisecond) }
+	for range pipeline.HoldLimit {
+		r.Emit(sample("press-07", "state"))
+	}
+	for i := 1; i <= 3; i++ {
+		r.Emit(model.SampleRecord(model.Sample{Device: "press-07", Signal: "temp", TS: at(i), Value: model.IntValue(1), Quality: model.Good, Priority: model.Bulk}))
+	}
+	r.Emit(model.SampleRecord(model.Sample{Device: "press-07", Signal: "state", TS: at(9), Value: model.IntValue(1), Quality: model.Good, Priority: model.Critical}))
+
+	reopened := &sink{}
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, reopened)
+
+	if n := len(reopened.recs); n != pipeline.HoldLimit {
+		t.Fatalf("reopened output got %d records, want the %d held", n, pipeline.HoldLimit)
+	}
+	want := []model.Loss{
+		{Priority: model.Critical, FromTS: at(9), ToTS: at(9), Samples: 1, Reason: model.LossBufferFull},
+		{Priority: model.Bulk, FromTS: at(1), ToTS: at(3), Samples: 3, Reason: model.LossBufferFull},
+	}
+	if !reflect.DeepEqual(reopened.losses, want) {
+		t.Fatalf("losses = %+v, want %+v", reopened.losses, want)
+	}
+}
+
+func TestRouterRemovingAHeldOutputDiscardsItsRecords(t *testing.T) {
+	var logs bytes.Buffer
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.NewJSONHandler(&logs, nil)))
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
+	r.Hold("main")
+	r.Emit(sample("press-07", "state"))
+
+	r.RemoveOutput("main")
+	again := &sink{}
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, again)
+
+	if got := again.got(); len(got) != 0 {
+		t.Fatalf("a new output got %q held for a removed one", got)
+	}
+	if !strings.Contains(logs.String(), `"records":1`) {
+		t.Fatalf("no warning about the discarded record in %s", logs.String())
 	}
 }
