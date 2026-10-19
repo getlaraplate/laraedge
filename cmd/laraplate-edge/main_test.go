@@ -37,10 +37,10 @@ func TestRun(t *testing.T) {
 			wantStderr: []string{"unknown command", "frobnicate", "usage:"},
 		},
 		{
-			name:       "run is a stub",
-			args:       []string{"run", "--bootstrap", "bootstrap.yaml"},
+			name:       "run with a missing bootstrap file",
+			args:       []string{"run", "--bootstrap", "no-such-bootstrap.yaml"},
 			wantCode:   1,
-			wantStderr: []string{"not implemented yet"},
+			wantStderr: []string{"laraplate-edge run:", "no-such-bootstrap.yaml"},
 		},
 		{
 			name:       "run requires bootstrap",

@@ -1,0 +1,202 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/swolley/laraplate-edge/internal/bootstrap"
+	"github.com/swolley/laraplate-edge/internal/clock"
+	"github.com/swolley/laraplate-edge/internal/config"
+	"github.com/swolley/laraplate-edge/internal/input"
+	"github.com/swolley/laraplate-edge/internal/provider"
+	"github.com/swolley/laraplate-edge/internal/secrets"
+	"github.com/swolley/laraplate-edge/internal/supervisor"
+	"github.com/swolley/laraplate-edge/internal/version"
+)
+
+// agentDeps are what runAgent takes from its environment; tests replace them.
+type agentDeps struct {
+	// lookupEnv reads the environment for secret://env/ references.
+	lookupEnv func(string) (string, bool)
+	// clock drives every timer.
+	clock clock.Clock
+	// drivers is the input driver registry.
+	drivers map[string]input.Factory
+	// logger receives the logs; nil means JSON on stderr.
+	logger *slog.Logger
+	// started, when set, receives the supervisor once it exists (tests).
+	started func(*supervisor.Supervisor)
+}
+
+// productionDeps are the dependencies of the real agent.
+func productionDeps() agentDeps {
+	return agentDeps{
+		lookupEnv: os.LookupEnv,
+		clock:     clock.Real(),
+		drivers:   map[string]input.Factory{},
+	}
+}
+
+// runAgent runs the agent of the bootstrap file until ctx is done (SIGINT,
+// SIGTERM), then stops the provider and closes the supervisor, which syncs
+// and closes every buffer. Each value received on reload (SIGHUP) reloads
+// the bootstrap file: the outputs resolve their tokens again, the file
+// provider rereads its file, and changed settings, which need a restart, are
+// logged.
+func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload <-chan struct{}, stderr io.Writer) (err error) {
+	boot, err := bootstrap.Load(bootstrapPath)
+	if err != nil {
+		return err
+	}
+
+	log := deps.logger
+	if log == nil {
+		log = slog.New(slog.NewJSONHandler(stderr, nil))
+	}
+
+	if err := prepareDataDir(boot.DataDir); err != nil {
+		return err
+	}
+
+	store := config.NewStore(boot.DataDir)
+	resolver := secrets.NewResolver(secrets.WithLookupEnv(deps.lookupEnv))
+	sup, err := supervisor.New(supervisor.Config{
+		DataDir:  boot.DataDir,
+		Store:    store,
+		Drivers:  deps.drivers,
+		Resolver: resolver,
+		Clock:    deps.clock,
+		Logger:   log,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, sup.Close())
+		log.Info("agent: stopped")
+	}()
+
+	fileReload := make(chan struct{}, 1)
+	runProvider, err := newProvider(boot, sup, resolver, fileReload, deps.clock, log)
+	if err != nil {
+		return err
+	}
+
+	if deps.started != nil {
+		deps.started(sup)
+	}
+	log.Info("agent: starting", "agent_id", boot.AgentID, "version", version.String(), "provider", boot.Config.Provider, "data_dir", boot.DataDir)
+
+	provider.ApplyLastValid(ctx, store, sup, log)
+
+	reloadCtx, stopReloads := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() { handleReloads(reloadCtx, bootstrapPath, boot, sup, fileReload, reload, log) })
+
+	err = runProvider(ctx)
+	stopReloads()
+	wg.Wait()
+
+	return err
+}
+
+// newProvider builds the provider the bootstrap names and returns its Run.
+func newProvider(boot bootstrap.File, sup *supervisor.Supervisor, resolver *secrets.Resolver, fileReload <-chan struct{}, clk clock.Clock, log *slog.Logger) (func(context.Context) error, error) {
+	switch boot.Config.Provider {
+	case bootstrap.ProviderFile:
+		p, err := provider.NewFile(provider.FileConfig{
+			Path:    boot.Config.File,
+			Applier: sup,
+			Reload:  fileReload,
+			Clock:   clk,
+			Logger:  log,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return p.Run, nil
+	case bootstrap.ProviderLaraplate:
+		p, err := provider.NewLaraplate(provider.LaraplateConfig{
+			URL:          boot.Config.Laraplate.URL,
+			Token:        boot.Config.Laraplate.Token,
+			PollInterval: time.Duration(boot.Config.Laraplate.PollSeconds) * time.Second,
+			Resolver:     resolver,
+			Applier:      sup,
+			DataDir:      boot.DataDir,
+			Clock:        clk,
+			Logger:       log,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return p.Run, nil
+	default:
+		return nil, fmt.Errorf("bootstrap: unknown provider %q", boot.Config.Provider)
+	}
+}
+
+// handleReloads reloads the bootstrap file on every value of reload until
+// ctx is done. A file that no longer loads is reported and changes nothing.
+// Otherwise the outputs resolve their tokens again at once (token rotation,
+// spec 10.6), the file provider rereads its document, and every changed
+// setting is logged at warn: this build applies them at the next restart.
+func handleReloads(ctx context.Context, path string, running bootstrap.File, sup *supervisor.Supervisor, fileReload chan<- struct{}, reload <-chan struct{}, log *slog.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-reload:
+		}
+
+		next, err := bootstrap.Load(path)
+		if err != nil {
+			log.Error("agent: bootstrap reload refused; the running settings stay", "error", err)
+
+			continue
+		}
+
+		for _, key := range changedSettings(running, next) {
+			log.Warn("agent: bootstrap setting changed; it applies at the next restart", "key", key)
+		}
+
+		sup.ReloadCredentials()
+		if running.Config.Provider == bootstrap.ProviderFile {
+			select {
+			case fileReload <- struct{}{}:
+			default:
+			}
+		}
+		log.Info("agent: bootstrap reloaded; credentials are resolved again")
+	}
+}
+
+// changedSettings returns the bootstrap keys whose values differ. The values
+// are never returned: a reference may be logged, a value must not.
+func changedSettings(a, b bootstrap.File) []string {
+	var keys []string
+	check := func(key string, changed bool) {
+		if changed {
+			keys = append(keys, key)
+		}
+	}
+
+	check("agent_id", a.AgentID != b.AgentID)
+	check("data_dir", a.DataDir != b.DataDir)
+	check("status_listen", a.StatusListen != b.StatusListen)
+	check("status_token", a.StatusToken != b.StatusToken)
+	check("config.provider", a.Config.Provider != b.Config.Provider)
+	check("config.file", a.Config.File != b.Config.File)
+	check("config.laraplate.url", a.Config.Laraplate.URL != b.Config.Laraplate.URL)
+	check("config.laraplate.token", a.Config.Laraplate.Token != b.Config.Laraplate.Token)
+	check("config.laraplate.poll_seconds", a.Config.Laraplate.PollSeconds != b.Config.Laraplate.PollSeconds)
+
+	return keys
+}

@@ -2,11 +2,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/swolley/laraplate-edge/internal/config"
 	"github.com/swolley/laraplate-edge/internal/version"
@@ -81,7 +84,19 @@ func runRun(args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	return notImplemented(stderr, "run")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	reload := make(chan struct{}, 1)
+	stopReload := notifyReload(reload)
+	defer stopReload()
+
+	if err := runAgent(ctx, *bootstrap, productionDeps(), reload, stderr); err != nil {
+		fmt.Fprintf(stderr, "laraplate-edge run: %v\n", err)
+		return exitFailure
+	}
+
+	return exitOK
 }
 
 // runConfig runs "config validate <file>": both validation layers, every

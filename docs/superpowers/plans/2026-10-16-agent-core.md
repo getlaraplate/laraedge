@@ -140,10 +140,10 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 - Produces (first): `input.Input` with `Start(ctx, emit func(model.Record)) error` and `Probe(ctx) ([]model.Sample, error)`, developed against a fake input; Task 9 implements it.
 - Produces: `supervisor.Supervisor` with `Apply(ctx, config.Document) error` (by difference: unchanged inputs and outputs keep running; a component that does not start within the timeout rolls back to the last valid document), `Status() supervisor.Status`; `provider.File` (polling modification time, reload on `SIGHUP`), `provider.Laraplate` (poll every `poll_seconds`, `?version=` the applied version, `304` no-op, reports `applied` / `rejected` / `rolled_back` with errors and the agent version).
 
-- [ ] **Step 1: Failing tests.** Router fans a sample to every output whose `route.include` matches (default `*`); `birth` on start, on a configuration change touching the device and on output reconnection; `death` after the tolerance; apply by difference keeps an unchanged output's buffer and `source_seq`; a failing new input rolls back and reports `rolled_back`; an older `version` is refused and reported `rejected` (Review Focus); the laraplate provider sends `?version=` and treats `304` as no change against a fake backend; `SIGHUP` reloads the bootstrap and calls `ReloadCredentials` (Review Focus).
-- [ ] **Step 2: Router and supervisor.**
-- [ ] **Step 3: Providers and `run`.**
-- [ ] **Step 4: Run tests with `-race`, commit.**
+- [x] **Step 1: Failing tests.** Router fans a sample to every output whose `route.include` matches (default `*`); `birth` on start, on a configuration change touching the device and on output reconnection; `death` after the tolerance; apply by difference keeps an unchanged output's buffer and `source_seq`; a failing new input rolls back and reports `rolled_back`; an older `version` is refused and reported `rejected` (Review Focus); the laraplate provider sends `?version=` and treats `304` as no change against a fake backend; `SIGHUP` reloads the bootstrap and calls `ReloadCredentials` (Review Focus).
+- [x] **Step 2: Router and supervisor.**
+- [x] **Step 3: Providers and `run`.**
+- [x] **Step 4: Run tests with `-race`, commit.**
 
 ### Task 9: `simulated` input
 

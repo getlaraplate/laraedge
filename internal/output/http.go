@@ -172,7 +172,7 @@ func NewHTTP(cfg HTTPConfig) (*HTTP, error) {
 		return nil, fail("no batcher")
 	}
 
-	client, err := httpClient(cfg.Client)
+	client, err := NewClient(cfg.Client)
 	if err != nil {
 		return nil, fail("client: %w", err)
 	}
@@ -227,9 +227,12 @@ func ingestEndpoint(raw string) (string, error) {
 	return strings.TrimRight(u.String(), "/") + ingestPath, nil
 }
 
-// httpClient returns the client to use: a copy of c that never follows
-// redirects, or the default client when c is nil.
-func httpClient(c *http.Client) (*http.Client, error) {
+// NewClient returns the client the agent uses to reach a backend: a copy of
+// c that never follows redirects, or, when c is nil, a client with the
+// system roots, TLS 1.2 or later and the proxy from the environment. A
+// client whose transport skips certificate verification is refused. Only
+// tests pass a non-nil c.
+func NewClient(c *http.Client) (*http.Client, error) {
 	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 	if c == nil {
