@@ -561,15 +561,15 @@ func TestNewLaraplateRefusesAnInsecureURL(t *testing.T) {
 	}
 }
 
-// TestLaraplateCancelledApplyIsNotAnAttempt: a shutdown during the apply
-// records nothing, so the version is downloaded and applied after the
-// restart (ruling R45).
+// TestLaraplateCancelledApplyIsNotAnAttempt: an apply the shutdown cut
+// short (the supervisor returns no outcome) records nothing, so the version
+// is downloaded and applied after the restart (ruling R45).
 func TestLaraplateCancelledApplyIsNotAnAttempt(t *testing.T) {
 	f := newLaraplateFixture(t)
 	f.be.setActive(9, doc(9))
 	a := newFakeApplier()
 	a.hook = func(ctx context.Context) { <-ctx.Done() }
-	a.setOutcome(supervisor.Outcome{Result: supervisor.ResultRolledBack, Errors: []string{"inputs.0: start cancelled: context canceled"}})
+	a.setOutcome(supervisor.Outcome{})
 	r := f.start(a)
 
 	select {
@@ -681,5 +681,38 @@ func TestLaraplateRefusedReportIsDropped(t *testing.T) {
 	}
 	if st := f.state(); len(st.PendingReports) != 0 {
 		t.Fatalf("pending reports = %v, want none", st.PendingReports)
+	}
+}
+
+// TestLaraplateAppliedDuringShutdownIsStillReported: an apply that
+// succeeded while the shutdown cancelled the context is an attempt: its
+// report is persisted and sent after the restart.
+func TestLaraplateAppliedDuringShutdownIsStillReported(t *testing.T) {
+	f := newLaraplateFixture(t)
+	f.be.setActive(9, doc(9))
+	a := newFakeApplier()
+	a.hook = func(ctx context.Context) { <-ctx.Done() }
+	r := f.start(a)
+
+	select {
+	case <-a.entered:
+	case <-time.After(guard):
+		t.Fatal("the document was not applied")
+	}
+	r.stop(t)
+
+	if got := f.lastAttempt(); got != "9 applied" {
+		t.Fatalf("last attempt = %q, want 9 applied", got)
+	}
+	if st := f.state(); !reflect.DeepEqual(st.PendingReports, []map[string]any{report(9, "applied")}) {
+		t.Fatalf("pending reports = %v, want the applied report", st.PendingReports)
+	}
+
+	b := newFakeApplier()
+	b.version = 9
+	f.start(b)
+	f.be.waitReports(t, 1)
+	if got := f.be.reportsSoFar(); !reflect.DeepEqual(got, []map[string]any{report(9, "applied")}) {
+		t.Fatalf("reports = %v, want the applied report after the restart", got)
 	}
 }

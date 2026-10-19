@@ -282,6 +282,8 @@ func TestRouterHoldsARestartingOutput(t *testing.T) {
 	r.Hold("main")
 	r.Emit(sample("press-07", "state"))
 	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: "oven-02", TS: start}))
+	// A held birth is not flushed: SetOutput has just sent the current ones.
+	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Birth, Device: "oven-02", TS: start}))
 	r.Emit(sample("oven-02", "temp"))
 	if got := old.got(); len(got) != before {
 		t.Fatalf("the previous buffer received %q while held", got[before:])
@@ -303,7 +305,9 @@ func TestRouterHoldsARestartingOutput(t *testing.T) {
 }
 
 func TestRouterHoldOverflowBecomesLossMarkers(t *testing.T) {
-	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
+	var logs bytes.Buffer
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.NewJSONHandler(&logs, nil)))
+	r.SetInput(config.Input{ID: "press", Devices: []config.Device{{Device: "press-07", Points: []config.Point{{Signal: "state", Type: "string"}}}}})
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
 	r.Hold("main")
 
@@ -315,11 +319,16 @@ func TestRouterHoldOverflowBecomesLossMarkers(t *testing.T) {
 		r.Emit(model.SampleRecord(model.Sample{Device: "press-07", Signal: "temp", TS: at(i), Value: model.IntValue(1), Quality: model.Good, Priority: model.Bulk}))
 	}
 	r.Emit(model.SampleRecord(model.Sample{Device: "press-07", Signal: "state", TS: at(9), Value: model.IntValue(1), Quality: model.Good, Priority: model.Critical}))
+	// Device events past the limit are not samples: a birth is sent again
+	// anyway, a lost death is logged with its device.
+	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Birth, Device: "press-07", TS: at(10),
+		Signals: []model.SignalInfo{{Signal: "state", DataType: model.DataTypeString}}}))
+	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: "press-07", TS: at(11)}))
 
 	reopened := &sink{}
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, reopened)
 
-	if n := len(reopened.recs); n != pipeline.HoldLimit {
+	if n := len(reopened.recs) - 1; n != pipeline.HoldLimit {
 		t.Fatalf("reopened output got %d records, want the %d held", n, pipeline.HoldLimit)
 	}
 	want := []model.Loss{
@@ -328,6 +337,9 @@ func TestRouterHoldOverflowBecomesLossMarkers(t *testing.T) {
 	}
 	if !reflect.DeepEqual(reopened.losses, want) {
 		t.Fatalf("losses = %+v, want %+v", reopened.losses, want)
+	}
+	if !strings.Contains(logs.String(), `"level":"WARN"`) || !strings.Contains(logs.String(), `"device":"press-07"`) || !strings.Contains(logs.String(), "death") {
+		t.Fatalf("no warning naming the device of the lost death in %s", logs.String())
 	}
 }
 
@@ -347,5 +359,20 @@ func TestRouterRemovingAHeldOutputDiscardsItsRecords(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `"records":1`) {
 		t.Fatalf("no warning about the discarded record in %s", logs.String())
+	}
+}
+
+func TestRouterHoldingAHeldOutputKeepsItsRecords(t *testing.T) {
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
+	r.Hold("main")
+	r.Emit(sample("press-07", "state"))
+
+	r.Hold("main")
+	reopened := &sink{}
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, reopened)
+
+	if got := reopened.got(); !reflect.DeepEqual(got, []string{"press-07/state"}) {
+		t.Fatalf("reopened output got %q, want the record held before the second Hold", got)
 	}
 }

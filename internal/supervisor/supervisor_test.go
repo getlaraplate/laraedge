@@ -754,3 +754,107 @@ func TestApplyCancelledIsNotAnOutcome(t *testing.T) {
 		t.Fatalf("AppliedVersion() = %d, want 1", v)
 	}
 }
+
+// TestFailedOutputHoldsItsRecords: an output whose rollback restart fails
+// keeps the records routed to it in a hold until a later document starts it
+// (flushed) or removes it (discarded with a warning) (ruling R48).
+func TestFailedOutputHoldsItsRecords(t *testing.T) {
+	tests := []struct {
+		name  string
+		later func(f *fixture) config.Document
+		check func(t *testing.T, f *fixture)
+	}{
+		{
+			name: "a later document starts it",
+			later: func(f *fixture) config.Document {
+				return f.document(3, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main", variant: 2}})
+			},
+			check: func(t *testing.T, f *fixture) {
+				got := f.be.waitItem(t, "main", "a1/state")
+				if want := []string{birthA1, birthA1, "a1/state"}; !reflect.DeepEqual(got, want) {
+					t.Fatalf("main received %q, want the restart birth then the held sample %q", got, want)
+				}
+			},
+		},
+		{
+			name: "a later document removes it",
+			later: func(f *fixture) config.Document {
+				return f.document(3, []inSpec{{id: "a", devices: []string{"a1"}}}, nil)
+			},
+			check: func(t *testing.T, f *fixture) {
+				if !strings.Contains(f.logs.String(), "held records are discarded") || !strings.Contains(f.logs.String(), `"records":1`) {
+					t.Fatalf("no warning about the discarded held record in %s", f.logs.String())
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+			f.be.waitItem(t, "main", birthA1)
+			f.waitStatus("main confirmed", func(s Status) bool {
+				return len(s.Outputs) == 1 && !s.Outputs[0].LastConfirmation.IsZero()
+			})
+
+			// A corrupt inflight file makes both the new and the previous
+			// configuration of main fail to start.
+			inflight := filepath.Join(f.dataDir, "outputs", "main", "inflight")
+			saved, err := os.ReadFile(inflight)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(inflight, []byte("{corrupt"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			out := f.apply(f.document(2, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main", variant: 1}}))
+			if out.Result != ResultRolledBack || len(out.Errors) != 2 || !strings.HasPrefix(out.Errors[1], "rollback: output main: ") {
+				t.Fatalf("Apply() = %+v, want rolled_back with the failed restart of main", out)
+			}
+			st := f.sup.Status()
+			if len(st.Outputs) != 1 || st.Outputs[0].State != StateFailed {
+				t.Fatalf("Status().Outputs = %+v, want main failed", st.Outputs)
+			}
+
+			f.drv.instance(t, "a").send("a1", "state")
+
+			if err := os.WriteFile(inflight, saved, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f.mustApply(tt.later(f))
+			tt.check(t, f)
+		})
+	}
+}
+
+// TestInputEmittingAfterAFailedStartRegistersNothing: an input that emits
+// after its start failed neither registers its devices nor sends a record.
+func TestInputEmittingAfterAFailedStartRegistersNothing(t *testing.T) {
+	f := newFixture(t)
+	f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	f.be.waitItem(t, "main", birthA1)
+
+	release := make(chan struct{})
+	f.drv.lateEmit["b"] = release
+	f.drv.failStart["b"] = errRefused
+	out := f.apply(f.document(2, []inSpec{{id: "a", devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}}, []outSpec{{id: "main"}}))
+	if out.Result != ResultRolledBack {
+		t.Fatalf("Apply() = %+v, want rolled_back", out)
+	}
+
+	close(release)
+	select {
+	case <-f.drv.lateDone:
+	case <-time.After(guard):
+		t.Fatal("the late emit did not run")
+	}
+	f.sup.router.BirthTo("main")
+	f.drv.instance(t, "a").send("a1", "count")
+
+	got := f.be.waitItem(t, "main", "a1/count")
+	if slices.Contains(got, birthB1) || slices.Contains(got, "b1/state") {
+		t.Fatalf("main received %q, with records of an input whose start failed", got)
+	}
+}

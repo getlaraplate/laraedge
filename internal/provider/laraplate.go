@@ -333,9 +333,12 @@ func (l *Laraplate) apply(ctx context.Context, published int64, raw json.RawMess
 	}
 
 	out, err := l.applier.Apply(ctx, doc)
-	if out.Result == "" || ctx.Err() != nil {
-		// A shutdown during the apply: the document had no chance, so
-		// nothing is recorded and it is applied after the restart.
+	if out.Result == "" {
+		// The supervisor's signal of an apply cut short by the shutdown: the
+		// document had no chance, so nothing is recorded and it is applied
+		// after the restart. An outcome is an attempt even when the context
+		// is done by now: it is recorded and reported (after the restart if
+		// need be).
 		l.log.Warn("provider: configuration apply interrupted; it will be attempted again", "version", published, "error", err)
 
 		return out, false

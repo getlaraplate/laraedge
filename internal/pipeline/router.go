@@ -46,12 +46,20 @@ type target struct {
 	hold *holdQueue
 }
 
-// holdQueue keeps the records of a restarting output, at most HoldLimit;
-// the others are counted per priority with their ts range (ruling R46).
+// holdQueue keeps the records of a restarting or failed output, at most
+// HoldLimit; the samples beyond it are counted per priority with their ts
+// range (ruling R46). Device events beyond it are not samples: a birth is
+// sent again when the output starts, a death is remembered by device to be
+// logged.
 type holdQueue struct {
-	mu   sync.Mutex
-	recs []model.Record
-	lost map[model.Priority]*model.Loss
+	mu         sync.Mutex
+	recs       []model.Record
+	lost       map[model.Priority]*model.Loss
+	lostDeaths []string
+}
+
+func newHoldQueue() *holdQueue {
+	return &holdQueue{lost: map[model.Priority]*model.Loss{}}
 }
 
 func (q *holdQueue) add(rec model.Record) {
@@ -60,6 +68,14 @@ func (q *holdQueue) add(rec model.Record) {
 
 	if len(q.recs) < HoldLimit {
 		q.recs = append(q.recs, rec)
+
+		return
+	}
+
+	if rec.Event != nil {
+		if rec.Event.Kind == model.Death && !slices.Contains(q.lostDeaths, rec.Event.Device) {
+			q.lostDeaths = append(q.lostDeaths, rec.Event.Device)
+		}
 
 		return
 	}
@@ -132,10 +148,13 @@ func (r *Router) flush(id string, q *holdQueue) {
 			if t.route.Match(rec.Sample.Device, rec.Sample.Signal) {
 				r.append(id, t.buf, rec)
 			}
-		case rec.Event != nil:
+		case rec.Event != nil && rec.Event.Kind != model.Birth:
+			// Held births are dropped: SetOutput has just sent the current
+			// ones, possibly with a wider signal list.
 			r.event(id, *rec.Event)
 		}
 	}
+	r.logLostDeaths(id, q)
 
 	for _, p := range []model.Priority{model.Critical, model.Bulk} {
 		l := q.lost[p]
@@ -149,18 +168,28 @@ func (r *Router) flush(id string, q *holdQueue) {
 	}
 }
 
+// logLostDeaths warns about each device whose death went past the hold
+// limit of output id.
+func (r *Router) logLostDeaths(id string, q *holdQueue) {
+	for _, device := range q.lostDeaths {
+		r.log.Warn("router: a death beyond the hold limit of a restarting output is lost", "output", id, "device", device)
+	}
+}
+
 // Hold keeps, in memory, what would be appended to output id until the next
-// SetOutput of id: the output restarts (ruling R46). When it returns no
-// append to the previous buffer is running or will start.
+// SetOutput of id, which flushes it, or RemoveOutput of id, which discards
+// it: the output restarts, or failed to and waits for a later document
+// (rulings R46, R48). Holding a held output changes nothing. When it returns
+// no append to the previous buffer is running or will start.
 func (r *Router) Hold(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	t, ok := r.outputs[id]
-	if !ok {
+	if !ok || t.hold != nil {
 		return
 	}
-	r.outputs[id] = target{route: t.route, hold: &holdQueue{lost: map[model.Priority]*model.Loss{}}}
+	r.outputs[id] = target{route: t.route, hold: newHoldQueue()}
 }
 
 // RemoveOutput stops routing to output id; records held for it are
@@ -176,10 +205,11 @@ func (r *Router) RemoveOutput(id string) {
 		for _, l := range t.hold.lost {
 			n += l.Samples
 		}
-		t.hold.mu.Unlock()
 		if n > 0 {
 			r.log.Warn("router: output removed while held; its held records are discarded", "output", id, "records", n)
 		}
+		r.logLostDeaths(id, t.hold)
+		t.hold.mu.Unlock()
 	}
 	delete(r.outputs, id)
 	r.order = slices.DeleteFunc(r.order, func(o string) bool { return o == id })

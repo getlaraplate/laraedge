@@ -270,8 +270,17 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	s.mu.Lock()
 	s.applied, s.version = true, doc.Version
 	clear(s.failedIn)
+	failedOut := sortedKeys(s.failedOut)
 	clear(s.failedOut)
 	s.mu.Unlock()
+
+	// A failed output the document no longer has drops its held records;
+	// one it has was started, which flushed them.
+	for _, id := range failedOut {
+		if !slices.ContainsFunc(doc.Outputs, func(o config.Output) bool { return o.ID == id }) {
+			s.router.RemoveOutput(id)
+		}
+	}
 
 	s.log.Info("supervisor: configuration applied", "version", doc.Version,
 		"started", len(p.startInputs)+len(p.startOutputs),
@@ -424,7 +433,8 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 // rollback stops what j started and starts again what j stopped. An output
 // the failed document added is stopped like a removed one: its directory is
 // kept. A previous component that does not start again is reported failed in
-// Status; its error is returned.
+// Status, its error is returned and, for an output, the router keeps holding
+// its records (ruling R48).
 func (s *Supervisor) rollback(j journal) []string {
 	for _, id := range slices.Backward(j.startedInputs) {
 		s.stopInput(id)
@@ -442,7 +452,8 @@ func (s *Supervisor) rollback(j journal) []string {
 		if err := s.startOutput(cfg); err != nil {
 			errs = append(errs, fmt.Sprintf("rollback: output %s: %v", cfg.ID, err))
 			s.setFailed(s.failedOut, cfg.ID, cfg.Type, err)
-			s.router.RemoveOutput(cfg.ID)
+			// The router keeps holding its records until a later document
+			// starts or removes it (ruling R48).
 		}
 	}
 	for _, cfg := range j.stoppedInputs {
@@ -585,19 +596,30 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 	live := &atomic.Bool{}
 	live.Store(true)
 
-	var once sync.Once
-	births := func() {
-		once.Do(func() {
+	// regMu makes the live check and the registration one step, shared with
+	// the failure path: an emit racing a failed start cannot register the
+	// input after the failure removed it.
+	var regMu sync.Mutex
+	registered := false
+	register := func() bool {
+		regMu.Lock()
+		defer regMu.Unlock()
+
+		if !live.Load() {
+			return false
+		}
+		if !registered {
+			registered = true
 			s.router.SetInput(cfg)
 			s.router.BirthInput(cfg.ID)
-		})
+		}
+
+		return true
 	}
 	emit := func(rec model.Record) {
-		if !live.Load() {
-			return
+		if register() {
+			s.router.Emit(rec)
 		}
-		births()
-		s.router.Emit(rec)
 	}
 
 	err := s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, emit) }, func() {
@@ -606,14 +628,16 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 		}
 	})
 	if err != nil {
+		regMu.Lock()
 		live.Store(false)
-		cancel()
 		s.router.RemoveInput(cfg.ID)
+		regMu.Unlock()
+		cancel()
 
 		return err
 	}
 
-	births()
+	register()
 	s.step("input " + cfg.ID)
 
 	s.mu.Lock()
@@ -708,7 +732,12 @@ func (s *Supervisor) Close() error {
 	s.mu.Lock()
 	inputs := sortedKeys(s.inputs)
 	outputs := sortedKeys(s.outputs)
+	failedOut := sortedKeys(s.failedOut)
 	s.mu.Unlock()
+
+	for _, id := range failedOut {
+		s.router.RemoveOutput(id)
+	}
 
 	for _, id := range inputs {
 		s.stopInput(id)

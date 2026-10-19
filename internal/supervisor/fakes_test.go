@@ -37,10 +37,14 @@ type fakeDriver struct {
 	hang      map[string]bool
 	failBuild map[string]error
 	failNth   map[string]int // fail the nth Start of an input
-	running   map[string]*fakeInput
-	starts    []string // "id raw" of every Start called
-	closed    []string // ids of every Close of a started input
-	called    chan string
+	// lateEmit makes Start leave a goroutine that emits b1/state once the
+	// channel is closed, then closes lateDone.
+	lateEmit map[string]chan struct{}
+	lateDone chan struct{}
+	running  map[string]*fakeInput
+	starts   []string // "id raw" of every Start called
+	closed   []string // ids of every Close of a started input
+	called   chan string
 }
 
 func newFakeDriver() *fakeDriver {
@@ -49,6 +53,8 @@ func newFakeDriver() *fakeDriver {
 		hang:      map[string]bool{},
 		failBuild: map[string]error{},
 		failNth:   map[string]int{},
+		lateEmit:  map[string]chan struct{}{},
+		lateDone:  make(chan struct{}),
 		running:   map[string]*fakeInput{},
 		called:    make(chan string, 64),
 	}
@@ -135,8 +141,20 @@ func (in *fakeInput) Start(ctx context.Context, emit func(model.Record)) error {
 	if n := d.failNth[in.cfg.ID]; n > 0 && d.countStarts(in.cfg.ID) == n {
 		err = errRefused
 	}
+	late := d.lateEmit[in.cfg.ID]
 	d.mu.Unlock()
 	d.called <- in.cfg.ID
+
+	if late != nil {
+		go func() {
+			defer close(d.lateDone)
+			<-late
+			emit(model.SampleRecord(model.Sample{
+				Device: "b1", Signal: "state", TS: time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC),
+				Value: model.IntValue(918273), Quality: model.Good, Priority: model.Critical,
+			}))
+		}()
+	}
 
 	if hang {
 		<-ctx.Done()
