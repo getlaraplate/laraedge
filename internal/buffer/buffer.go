@@ -37,6 +37,9 @@ const (
 	DefaultSegmentSize   int64         = 16 << 20
 )
 
+// MaxSegmentSize bounds Options.SegmentSize and a pinned queue segment size.
+const MaxSegmentSize int64 = 1 << 30
+
 const (
 	diskCheckInterval   = time.Second
 	ackedFileName       = "acked"
@@ -244,8 +247,8 @@ func withDefaults(o Options) (Options, error) {
 	switch {
 	case o.MaxSize < 0:
 		return o, fmt.Errorf("buffer: negative max size %d", o.MaxSize)
-	case o.SegmentSize < 0:
-		return o, fmt.Errorf("buffer: negative segment size %d", o.SegmentSize)
+	case o.SegmentSize < 0 || o.SegmentSize > MaxSegmentSize:
+		return o, fmt.Errorf("buffer: segment size %d outside [0, %d]", o.SegmentSize, MaxSegmentSize)
 	case o.FsyncInterval < 0:
 		return o, fmt.Errorf("buffer: negative fsync interval %v", o.FsyncInterval)
 	case o.MinFreeRatio < 0 || o.MinFreeRatio >= 1:
@@ -328,7 +331,7 @@ func (b *Buffer) Append(r model.Record) error {
 
 	size := int64(len(frame))
 	if size > q.segmentSize || size > b.opts.MaxSize {
-		b.dropWithMarker(q.priority, r, "record larger than a segment or the buffer")
+		b.dropRecord(q.priority, r, "record larger than a segment or the buffer")
 
 		return fmt.Errorf("buffer: append: frame of %d bytes above the segment size %d or the buffer size %d: %w", size, q.segmentSize, b.opts.MaxSize, ErrTooLarge)
 	}
@@ -341,7 +344,7 @@ func (b *Buffer) Append(r model.Record) error {
 		}
 
 		if err = b.store(q, frame); err != nil && !errors.Is(err, errFloorBreached) {
-			b.dropWithMarker(q.priority, r, "record dropped after a failed retry")
+			b.dropRecord(q.priority, r, "write failed after an eviction and a retry")
 			b.log.Error("buffer: record dropped after a failed retry", "queue", q.priority.String(), "device", r.Device(), "error", err)
 
 			return fmt.Errorf("buffer: append to the %s queue: %w", q.priority, errors.Join(ErrDropped, err))
@@ -349,7 +352,7 @@ func (b *Buffer) Append(r model.Record) error {
 	}
 
 	if errors.Is(err, errFloorBreached) {
-		b.dropUnderFloor(q.priority, r)
+		b.dropRecord(q.priority, r, "free disk floor breached by other data")
 
 		return fmt.Errorf("buffer: append to the %s queue: %w", q.priority, errors.Join(ErrDropped, err))
 	}
@@ -371,21 +374,13 @@ func (b *Buffer) markerTS(r model.Record) time.Time {
 	return b.opts.Clock.Now()
 }
 
-// dropWithMarker records the drop of r in a new buffer_full marker of its own.
-func (b *Buffer) dropWithMarker(p model.Priority, r model.Record, why string) {
-	ts := b.markerTS(r)
-	if err := b.addLossLocked(model.Loss{Priority: p, FromTS: ts, ToTS: ts, Samples: 1, Reason: model.LossBufferFull}); err != nil {
-		b.log.Error("buffer: cannot write the loss markers, retrying at the next sync", "reason", why, "error", err)
-	}
-}
-
-// dropUnderFloor records the drop of r while the free disk floor is breached.
-// The drop is added to the newest pending buffer_full marker of the same
-// class when that marker is the last one and was never handed out, so a
-// lasting breach leaves one growing marker instead of one per record; that
-// change is written at the next sync tick, the declared durability limit of
-// records themselves. Otherwise a new marker is written at once.
-func (b *Buffer) dropUnderFloor(p model.Priority, r model.Record) {
+// dropRecord records the drop of r. The drop is added to the newest pending
+// buffer_full marker of the same class when that marker is the last one and
+// was never handed out, so a lasting condition (a breached floor, a disk that
+// refuses every write) leaves one growing marker instead of one per record;
+// that change is written at the next sync tick, the declared durability
+// limit of records themselves. Otherwise a new marker is written at once.
+func (b *Buffer) dropRecord(p model.Priority, r model.Record, why string) {
 	ts := b.markerTS(r)
 	if n := len(b.losses); n > b.frozen {
 		last := &b.losses[n-1]
@@ -406,8 +401,10 @@ func (b *Buffer) dropUnderFloor(p model.Priority, r model.Record) {
 		}
 	}
 
-	b.log.Warn("buffer: free disk floor breached by other data, dropping new records", "queue", p.String(), "dir", b.dir)
-	b.dropWithMarker(p, r, "free disk floor breached")
+	b.log.Warn("buffer: dropping records", "queue", p.String(), "reason", why)
+	if err := b.addLossLocked(model.Loss{Priority: p, FromTS: ts, ToTS: ts, Samples: 1, Reason: model.LossBufferFull}); err != nil {
+		b.log.Error("buffer: cannot write the loss markers, retrying at the next sync", "reason", why, "error", err)
+	}
 }
 
 // store rotates the active segment when the frame does not fit, makes room
@@ -432,10 +429,10 @@ func (b *Buffer) store(q *queue, frame []byte) error {
 
 // makeRoom evicts segments until a frame of size fits MaxSize and the disk
 // is above its free floor. Over MaxSize any segment may go, active ones
-// rotated first. Under the floor alone only whole older segments go: the
-// breach comes from other data on the disk, and rotating the active segments
-// on every record would churn files without freeing space; with nothing
-// else left it returns errFloorBreached.
+// rotated first. Under the floor alone the order is evictOlder's: the breach
+// comes from other data on the disk, and rotating the critical active
+// segment on every record would churn files without freeing space; with
+// nothing of that left it returns errFloorBreached.
 func (b *Buffer) makeRoom(size int64, forceDiskCheck bool) error {
 	for {
 		over := b.critical.bytes()+b.bulk.bytes()+size > b.opts.MaxSize
@@ -485,13 +482,18 @@ func (b *Buffer) evictOne() (bool, error) {
 	return b.evict(q)
 }
 
-// evictOlder evicts the oldest non-active bulk segment, or the oldest
-// non-active critical one. It reports false when only active segments are left.
+// evictOlder is the eviction order under a floor-only breach: older bulk
+// segments, then the bulk active segment when it holds data (rotated and
+// evicted once: dropped records are not written, so it stays empty), then
+// older critical segments. Critical active segments are never rotated here.
+// It reports false when nothing of that is left.
 func (b *Buffer) evictOlder() (bool, error) {
-	for _, q := range []*queue{b.bulk, b.critical} {
-		if len(q.segments) > 1 {
-			return b.evict(q)
-		}
+	if b.bulk.bytes() > 0 {
+		return b.evict(b.bulk)
+	}
+
+	if len(b.critical.segments) > 1 {
+		return b.evict(b.critical)
 	}
 
 	return false, nil

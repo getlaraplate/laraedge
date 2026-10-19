@@ -798,10 +798,10 @@ func TestFreeDiskFloor(t *testing.T) {
 			wantBulk: bulkRange(0, 2),
 		},
 		{
-			name: "a second later with only active segments left the record is dropped", segmentFrames: 10, bulk: 2, advance: time.Second,
-			free: []uint64{4, 50}, trigger: bulk(2), wantCalls: 1, wantDropped: true,
-			wantLosses: []model.Loss{loss(model.Bulk, bulk(2), bulk(2), 1)},
-			wantBulk:   bulkRange(0, 1),
+			name: "a second later the floor evicts the bulk active segment", segmentFrames: 10, bulk: 2, advance: time.Second,
+			free: []uint64{4, 50}, trigger: bulk(2), wantCalls: 2,
+			wantLosses: []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2)},
+			wantBulk:   bulkRange(2, 2),
 		},
 		{
 			name: "unreadable disk statistics drop nothing", segmentFrames: 10, bulk: 2, advance: time.Second,
@@ -1185,6 +1185,7 @@ func TestOpenOptions(t *testing.T) {
 	}{
 		{"negative max size", Options{MaxSize: -1}, true},
 		{"negative segment size", Options{SegmentSize: -1}, true},
+		{"segment size above 1 GiB", Options{SegmentSize: 1<<30 + 1}, true},
 		{"negative fsync interval", Options{FsyncInterval: -time.Second}, true},
 		{"negative free ratio", Options{MinFreeRatio: -0.1}, true},
 		{"free ratio of one", Options{MinFreeRatio: 1}, true},
@@ -1272,12 +1273,12 @@ func TestRotationSyncsTheSegmentAPendingSyncPassTook(t *testing.T) {
 	b := openBuffer(t, dir, opts, h)
 	<-armed
 
-	mustAppend(t, b, bulk(0))
+	mustAppend(t, b, bulk(0), bulk(1)) // the segment is full: the next record rotates it
 	old := segmentFiles(t, filepath.Join(dir, "bulk"))[0]
 	clk.Advance(opts.FsyncInterval)
 	<-captured // the pass holds the active bulk file and has cleared its dirty flag
 
-	mustAppend(t, b, bulk(1), bulk(2)) // bulk(2) rotates the segment the pass holds
+	mustAppend(t, b, bulk(2)) // rotates the segment the pass holds, writing nothing more to it
 	if n := len(segmentFiles(t, filepath.Join(dir, "bulk"))); n != 2 {
 		t.Fatalf("bulk queue has %d segment files, want 2 after the rotation", n)
 	}
@@ -1379,6 +1380,7 @@ func TestEvictionWaitsForDurableMarkers(t *testing.T) {
 	tests := []struct {
 		name        string
 		frames      int64
+		appends     int
 		failures    int
 		wantDropped bool
 		wantLosses  []model.Loss
@@ -1386,20 +1388,25 @@ func TestEvictionWaitsForDurableMarkers(t *testing.T) {
 		wantDurable []model.Loss
 	}{
 		{
-			name: "the marker is written right after the deletion freed space", frames: 5, failures: 1,
+			name: "the marker is written right after the deletion freed space", frames: 5, appends: 1, failures: 1,
 			wantLosses:  []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2)},
 			wantBulk:    bulkRange(2, 6),
 			wantDurable: []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2)},
 		},
 		{
-			name: "the write after the deletion succeeds and eviction goes on", frames: 4, failures: 1,
+			name: "the write after the deletion succeeds and eviction goes on", frames: 4, appends: 1, failures: 1,
 			wantLosses:  []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2), loss(model.Bulk, bulk(2), bulk(3), 2)},
 			wantBulk:    bulkRange(4, 6),
 			wantDurable: []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2), loss(model.Bulk, bulk(2), bulk(3), 2)},
 		},
 		{
-			name: "a marker that stays unwritten stops eviction and drops the record", frames: 4, failures: -1, wantDropped: true,
-			wantLosses: []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2), loss(model.Bulk, bulk(6), bulk(6), 1)},
+			name: "a marker that stays unwritten stops eviction and drops the record into it", frames: 4, appends: 1, failures: -1, wantDropped: true,
+			wantLosses: []model.Loss{loss(model.Bulk, bulk(0), bulk(6), 3)},
+			wantBulk:   bulkRange(2, 5),
+		},
+		{
+			name: "a lasting write failure keeps one marker in memory", frames: 4, appends: 40, failures: -1, wantDropped: true,
+			wantLosses: []model.Loss{loss(model.Bulk, bulk(0), bulk(45), 42)},
 			wantBulk:   bulkRange(2, 5),
 		},
 	}
@@ -1417,8 +1424,10 @@ func TestEvictionWaitsForDurableMarkers(t *testing.T) {
 			opts.MaxSize = limit(tc.frames)
 			b = openBuffer(t, dir, opts, hooks{writeLosses: writer.write})
 			writer.set(tc.failures)
-			if err := b.Append(bulk(6)); tc.wantDropped != errors.Is(err, ErrDropped) || (!tc.wantDropped && err != nil) {
-				t.Fatalf("Append() = %v, wantDropped %v", err, tc.wantDropped)
+			for i := range tc.appends {
+				if err := b.Append(bulk(6 + i)); tc.wantDropped != errors.Is(err, ErrDropped) || (!tc.wantDropped && err != nil) {
+					t.Fatalf("Append(bulk(%d)) = %v, wantDropped %v", 6+i, err, tc.wantDropped)
+				}
 			}
 
 			assertLosses(t, b, tc.wantLosses)
@@ -1481,7 +1490,6 @@ func TestFloorBreachCoalescesDrops(t *testing.T) {
 			opts.SegmentSize = 10*f + f/2
 			opts.DiskUsage = disk.usage
 			b := openBuffer(t, dir, opts, hooks{})
-			mustAppend(t, b, bulk(0), bulk(1))
 
 			before := append(segmentFiles(t, filepath.Join(dir, "critical")), segmentFiles(t, filepath.Join(dir, "bulk"))...)
 			disk.reset(nil, 1)
@@ -1505,7 +1513,7 @@ func TestFloorBreachCoalescesDrops(t *testing.T) {
 			}
 
 			assertLosses(t, b, tc.want)
-			assertRecords(t, b, model.Bulk, bulkRange(0, 1))
+			assertRecords(t, b, model.Bulk, nil)
 			if got := b.Stats().Dropped[model.LossBufferFull]; got != samples {
 				t.Fatalf("Stats().Dropped = %d, want %d", got, samples)
 			}
@@ -1605,5 +1613,98 @@ func TestBlockBytesClampsNegativeCounts(t *testing.T) {
 		if tc.got != tc.want {
 			t.Fatalf("%s: blockBytes = %d, want %d", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+func TestFloorEvictionOrder(t *testing.T) {
+	tests := []struct {
+		name         string
+		bulk         int
+		free         []uint64
+		trigger      model.Record
+		wantDropped  bool
+		wantLosses   []model.Loss
+		wantCritical []model.Record
+		wantBulk     []model.Record
+	}{
+		{
+			name: "older bulk segments go first", bulk: 3, free: []uint64{1, 50}, trigger: bulk(3),
+			wantLosses:   []model.Loss{loss(model.Bulk, bulk(0), bulk(1), 2)},
+			wantCritical: critRange(0, 3), wantBulk: bulkRange(2, 3),
+		},
+		{
+			name: "the bulk active segment goes before older critical segments", bulk: 1, free: []uint64{1, 50}, trigger: bulk(1),
+			wantLosses:   []model.Loss{loss(model.Bulk, bulk(0), bulk(0), 1)},
+			wantCritical: critRange(0, 3), wantBulk: bulkRange(1, 1),
+		},
+		{
+			name: "older critical segments go once bulk is empty, then records drop", bulk: 1, free: []uint64{1}, trigger: bulk(1),
+			wantDropped: true,
+			wantLosses: []model.Loss{
+				loss(model.Bulk, bulk(0), bulk(0), 1),
+				loss(model.Critical, crit(0), crit(1), 2),
+				loss(model.Bulk, bulk(1), bulk(1), 1),
+			},
+			wantCritical: critRange(2, 3),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := clock.NewFake(epoch)
+			disk := newFakeDisk(100)
+			opts := testOptions(t, clk)
+			opts.DiskUsage = disk.usage
+			b := openBuffer(t, t.TempDir(), opts, hooks{})
+			mustAppend(t, b, critRange(0, 3)...)
+			mustAppend(t, b, bulkRange(0, tc.bulk-1)...)
+
+			disk.reset(nil, tc.free...)
+			clk.Advance(time.Second)
+			if err := b.Append(tc.trigger); tc.wantDropped != errors.Is(err, ErrDropped) || (!tc.wantDropped && err != nil) {
+				t.Fatalf("Append() = %v, wantDropped %v", err, tc.wantDropped)
+			}
+
+			assertLosses(t, b, tc.wantLosses)
+			assertRecords(t, b, model.Critical, tc.wantCritical)
+			assertRecords(t, b, model.Bulk, tc.wantBulk)
+		})
+	}
+}
+
+func TestPinnedSegmentSizeIsValidated(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantErr bool
+	}{
+		{"one GiB is accepted", `{"version":1,"segment_size":1073741824}`, false},
+		{"above one GiB", `{"version":1,"segment_size":1073741825}`, true},
+		{"absurd size", `{"version":1,"segment_size":9223372036854775807}`, true},
+		{"not larger than a header", `{"version":1,"segment_size":8}`, true},
+		{"unknown version", `{"version":2,"segment_size":4096}`, true},
+		{"not JSON", `16777216`, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "bulk"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := os.WriteFile(filepath.Join(dir, "bulk", "segment_size"), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			b, err := open(dir, testOptions(t, clock.NewFake(epoch)), hooks{})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("open() error = %v, wantErr %v", err, tc.wantErr)
+			}
+
+			if err == nil {
+				mustClose(t, b)
+			}
+		})
 	}
 }

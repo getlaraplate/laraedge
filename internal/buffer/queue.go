@@ -166,7 +166,7 @@ func pinSegmentSize(dir string, fallback int64) (int64, error) {
 		return 0, fmt.Errorf("parse %s: %w", segmentSizeFileName, err)
 	}
 
-	if state.Version != stateVersion || state.SegmentSize <= headerSize {
+	if state.Version != stateVersion || state.SegmentSize <= headerSize || state.SegmentSize > MaxSegmentSize {
 		return 0, fmt.Errorf("%s: version %d, size %d not usable", segmentSizeFileName, state.Version, state.SegmentSize)
 	}
 
