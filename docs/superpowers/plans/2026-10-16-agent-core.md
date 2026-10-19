@@ -80,9 +80,9 @@ Everything else is written with the standard library: UUIDv7 (`crypto/rand` and 
 **Interfaces:**
 - Produces: `bootstrap.Load(path string) (bootstrap.File, error)` with the spec keys and defaults, plus `status_token` (a `secret://` reference, required by Task 10 when `status_listen` is not a loopback address); `secrets.Resolver` with `Resolve(ctx, ref string) (string, error)` for `secret://env/NAME` and `secret://file/PATH` (file mode must not be group- or world-readable on Linux); `secrets.IsReference(s string) bool`; `secrets.ErrUnavailable` for `secret://keystore/...` (C1).
 
-- [ ] **Step 1: Failing tests.** Defaults (`status_listen`, `poll_seconds` 60); a plain token value in `config.laraplate.token` is refused; an unknown key is refused; `secret://file` with mode `0644` refused on Linux; an unset env variable resolves to an error naming the reference, never a value; a keystore reference gives `ErrUnavailable`.
-- [ ] **Step 2: Implementation.**
-- [ ] **Step 3: Run tests, commit.**
+- [x] **Step 1: Failing tests.** Defaults (`status_listen`, `poll_seconds` 60); a plain token value in `config.laraplate.token` is refused; an unknown key is refused; `secret://file` with mode `0644` refused on Linux; an unset env variable resolves to an error naming the reference, never a value; a keystore reference gives `ErrUnavailable`.
+- [x] **Step 2: Implementation.**
+- [x] **Step 3: Run tests, commit.**
 
 ### Task 4: Disk buffer
 
