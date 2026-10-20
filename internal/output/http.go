@@ -18,11 +18,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/clock"
-	"github.com/swolley/laraplate-edge/internal/docrules"
-	"github.com/swolley/laraplate-edge/internal/model"
-	"github.com/swolley/laraplate-edge/internal/secrets"
-	"github.com/swolley/laraplate-edge/internal/version"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/docrules"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/secrets"
+	"github.com/getlaraplate/laraplate-edge/internal/version"
 )
 
 const (

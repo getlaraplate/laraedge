@@ -15,9 +15,9 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/swolley/laraplate-edge/internal/config"
-	"github.com/swolley/laraplate-edge/internal/model"
-	"github.com/swolley/laraplate-edge/schema"
+	"github.com/getlaraplate/laraplate-edge/internal/config"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/schema"
 )
 
 // base is a document this build applies; the refusal cases edit it.

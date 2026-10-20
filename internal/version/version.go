@@ -3,7 +3,7 @@ package version
 
 // version is set at link time:
 //
-//	go build -ldflags "-X github.com/swolley/laraplate-edge/internal/version.version=1.2.3"
+//	go build -ldflags "-X github.com/getlaraplate/laraplate-edge/internal/version.version=1.2.3"
 var version = "dev"
 
 // String returns the agent version, or "dev" for an unversioned build.

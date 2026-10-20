@@ -7,8 +7,8 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/swolley/laraplate-edge/internal/config"
-	"github.com/swolley/laraplate-edge/internal/supervisor"
+	"github.com/getlaraplate/laraplate-edge/internal/config"
+	"github.com/getlaraplate/laraplate-edge/internal/supervisor"
 )
 
 // Applier is what a provider uses of the supervisor.

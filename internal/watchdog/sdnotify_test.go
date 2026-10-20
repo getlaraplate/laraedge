@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
 )
 
 // guard bounds every wait; it is a deadlock guard, never a timing assertion.

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/swolley/laraplate-edge/internal/config"
+	"github.com/getlaraplate/laraplate-edge/internal/config"
 )
 
 // FuzzParse checks that Parse never fails internally or panics, that it

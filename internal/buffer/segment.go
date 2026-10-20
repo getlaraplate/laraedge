@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/atomicfile"
-	"github.com/swolley/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
 )
 
 // Record framing: uint32 payload length | uint32 CRC32C of the payload |

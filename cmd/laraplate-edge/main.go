@@ -11,9 +11,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/swolley/laraplate-edge/internal/config"
-	"github.com/swolley/laraplate-edge/internal/logging"
-	"github.com/swolley/laraplate-edge/internal/version"
+	"github.com/getlaraplate/laraplate-edge/internal/config"
+	"github.com/getlaraplate/laraplate-edge/internal/logging"
+	"github.com/getlaraplate/laraplate-edge/internal/version"
 )
 
 const (

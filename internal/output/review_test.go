@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/buffer"
-	"github.com/swolley/laraplate-edge/internal/model"
-	"github.com/swolley/laraplate-edge/internal/output"
+	"github.com/getlaraplate/laraplate-edge/internal/buffer"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/output"
 )
 
 func death(device string) model.Record {

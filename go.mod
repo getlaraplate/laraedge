@@ -1,4 +1,4 @@
-module github.com/swolley/laraplate-edge
+module github.com/getlaraplate/laraplate-edge
 
 go 1.27
 

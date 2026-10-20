@@ -36,11 +36,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/clock"
-	"github.com/swolley/laraplate-edge/internal/config"
-	"github.com/swolley/laraplate-edge/internal/docrules"
-	"github.com/swolley/laraplate-edge/internal/input"
-	"github.com/swolley/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/config"
+	"github.com/getlaraplate/laraplate-edge/internal/docrules"
+	"github.com/getlaraplate/laraplate-edge/internal/input"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
 )
 
 // DefaultSeed is the seed when the connection sets none.

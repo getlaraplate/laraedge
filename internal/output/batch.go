@@ -13,10 +13,10 @@ import (
 	"slices"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/buffer"
-	"github.com/swolley/laraplate-edge/internal/clock"
-	"github.com/swolley/laraplate-edge/internal/envelope"
-	"github.com/swolley/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/buffer"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/envelope"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
 )
 
 // priorities is the order of the records in a batch: critical first.

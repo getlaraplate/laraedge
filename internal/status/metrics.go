@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/buffer"
-	"github.com/swolley/laraplate-edge/internal/model"
-	"github.com/swolley/laraplate-edge/internal/output"
-	"github.com/swolley/laraplate-edge/internal/supervisor"
+	"github.com/getlaraplate/laraplate-edge/internal/buffer"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/output"
+	"github.com/getlaraplate/laraplate-edge/internal/supervisor"
 )
 
 // metricsContentType is the Prometheus text exposition format 0.0.4.

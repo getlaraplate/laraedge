@@ -14,7 +14,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/swolley/laraplate-edge/internal/docrules"
+	"github.com/getlaraplate/laraplate-edge/internal/docrules"
 )
 
 const (

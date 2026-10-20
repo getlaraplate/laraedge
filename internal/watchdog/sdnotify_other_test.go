@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
 )
 
 func TestNotifierIsANoOpOutsideLinux(t *testing.T) {

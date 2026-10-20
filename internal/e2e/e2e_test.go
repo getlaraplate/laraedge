@@ -58,11 +58,11 @@ func runMain(m *testing.M) int {
 	defer os.RemoveAll(dir)
 
 	agentBinary = filepath.Join(dir, "laraplate-edge")
-	args := []string{"build", "-o", agentBinary, "-ldflags", "-X github.com/swolley/laraplate-edge/internal/version.version=" + agentVersion}
+	args := []string{"build", "-o", agentBinary, "-ldflags", "-X github.com/getlaraplate/laraplate-edge/internal/version.version=" + agentVersion}
 	if raceEnabled() {
 		args = append(args, "-race")
 	}
-	args = append(args, "github.com/swolley/laraplate-edge/cmd/laraplate-edge")
+	args = append(args, "github.com/getlaraplate/laraplate-edge/cmd/laraplate-edge")
 	build := exec.Command("go", args...)
 	build.Stdout, build.Stderr = os.Stderr, os.Stderr
 	if err := build.Run(); err != nil {

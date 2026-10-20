@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"sync"
 
-	"github.com/swolley/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
 )
 
 // counterBits is the width of the rand_a field used as a sequence counter.

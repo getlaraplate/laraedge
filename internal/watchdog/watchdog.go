@@ -9,7 +9,7 @@ package watchdog
 import (
 	"log/slog"
 
-	"github.com/swolley/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
 )
 
 // Config configures a Notifier.

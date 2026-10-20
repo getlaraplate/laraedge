@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/swolley/laraplate-edge/internal/version"
+	"github.com/getlaraplate/laraplate-edge/internal/version"
 )
 
 func TestRun(t *testing.T) {

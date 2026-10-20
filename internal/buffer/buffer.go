@@ -24,9 +24,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/atomicfile"
-	"github.com/swolley/laraplate-edge/internal/clock"
-	"github.com/swolley/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
 )
 
 // Defaults applied to zero Options fields.

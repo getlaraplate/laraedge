@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/swolley/laraplate-edge/internal/atomicfile"
+	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
 )
 
 func TestWrite(t *testing.T) {

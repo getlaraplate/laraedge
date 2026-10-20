@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/clock"
-	"github.com/swolley/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
 )
 
 var epoch = time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)

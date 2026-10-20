@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/clock"
-	"github.com/swolley/laraplate-edge/internal/config"
-	"github.com/swolley/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraplate-edge/internal/config"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
 )
 
 const examplesDir = "../../../examples/simulated"

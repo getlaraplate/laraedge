@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/docrules"
-	"github.com/swolley/laraplate-edge/internal/model"
-	"github.com/swolley/laraplate-edge/internal/secrets"
+	"github.com/getlaraplate/laraplate-edge/internal/docrules"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/secrets"
 )
 
 // SchemaName is the value of the document's schema key.

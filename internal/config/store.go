@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/swolley/laraplate-edge/internal/atomicfile"
+	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
 )
 
 // lastValidName is the file holding the last valid document.

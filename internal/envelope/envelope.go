@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/swolley/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/model"
 )
 
 const (
