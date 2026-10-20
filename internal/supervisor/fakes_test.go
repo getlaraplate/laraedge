@@ -53,8 +53,10 @@ type fakeDriver struct {
 	closeEmit map[string]bool
 	running   map[string]*fakeInput
 	starts    []string // "id raw" of every Start called
-	closed    []string // ids of every Close of a started input
-	called    chan string
+	// emits holds, by input id, the emit of every Start called, in order.
+	emits  map[string][]func(model.Record)
+	closed []string // ids of every Close of a started input
+	called chan string
 }
 
 func newFakeDriver() *fakeDriver {
@@ -71,6 +73,7 @@ func newFakeDriver() *fakeDriver {
 		blockClosed:  make(chan struct{}),
 		closeEmit:    map[string]bool{},
 		running:      map[string]*fakeInput{},
+		emits:        map[string][]func(model.Record){},
 		called:       make(chan string, 64),
 	}
 }
@@ -91,6 +94,20 @@ func (d *fakeDriver) startCount(id string) int {
 	defer d.mu.Unlock()
 
 	return d.countStarts(id)
+}
+
+// emitOf returns the emit the nth Start (from 1) of input id received.
+func (d *fakeDriver) emitOf(t *testing.T, id string, n int) func(model.Record) {
+	t.Helper()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if n < 1 || n > len(d.emits[id]) {
+		t.Fatalf("input %s has %d starts, not %d", id, len(d.emits[id]), n)
+	}
+
+	return d.emits[id][n-1]
 }
 
 func (d *fakeDriver) countStarts(id string) int {
@@ -153,6 +170,7 @@ func (in *fakeInput) Start(ctx context.Context, emit func(model.Record)) error {
 	d := in.d
 	d.mu.Lock()
 	d.starts = append(d.starts, in.cfg.ID+" "+string(in.cfg.Raw))
+	d.emits[in.cfg.ID] = append(d.emits[in.cfg.ID], emit)
 	hang, err := d.hang[in.cfg.ID], d.failStart[in.cfg.ID]
 	if n := d.failNth[in.cfg.ID]; n > 0 && d.countStarts(in.cfg.ID) == n {
 		err = errRefused
@@ -243,6 +261,18 @@ func (in *fakeInput) send(device, signal string) {
 	}))
 }
 
+// sendValue emits a good sample of device/signal with value v.
+func (in *fakeInput) sendValue(device, signal string, v model.Value) {
+	in.d.mu.Lock()
+	emit := in.emit
+	in.d.mu.Unlock()
+
+	emit(model.SampleRecord(model.Sample{
+		Device: device, Signal: signal, TS: time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC),
+		Value: v, Quality: model.Good, Priority: model.Critical,
+	}))
+}
+
 // sendDeath emits the death of device.
 func (in *fakeInput) sendDeath(device string) {
 	in.d.mu.Lock()
@@ -259,6 +289,10 @@ type backend struct {
 	mu     sync.Mutex
 	script map[string][]int // per output, statuses answered first, then 202
 	items  map[string][]string
+	// detail holds, per output, every accepted item with its values: a
+	// sample as "device/signal=value quality", a birth as
+	// "birth device [signal:data_type ...]".
+	detail map[string][]string
 	// unique and uniqueSeqs hold, per output, the items and the source_seq
 	// of each message_id once: what the backend keeps when an unconfirmed
 	// batch is resent identical.
@@ -276,6 +310,7 @@ func newBackend(t *testing.T) *backend {
 	be := &backend{
 		script:     map[string][]int{},
 		items:      map[string][]string{},
+		detail:     map[string][]string{},
 		unique:     map[string][]string{},
 		uniqueSeqs: map[string][]uint64{},
 		seen:       map[string]map[string]bool{},
@@ -312,10 +347,13 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 			Device  string `json:"device"`
 			Type    string `json:"type"`
 			Samples []struct {
-				Signal string `json:"signal"`
+				Signal  string `json:"signal"`
+				Value   any    `json:"value"`
+				Quality string `json:"quality"`
 			} `json:"samples"`
 			Signals []struct {
-				Signal string `json:"signal"`
+				Signal   string `json:"signal"`
+				DataType string `json:"data_type"`
 			} `json:"signals"`
 		} `json:"devices"`
 	}
@@ -329,24 +367,29 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 	be.auth[out] = append(be.auth[out], r.Header.Get("Authorization"))
 	if status == http.StatusAccepted {
 		be.seqs[out] = append(be.seqs[out], env.SourceSeq)
-		var items []string
+		var items, detail []string
 		for _, d := range env.Devices {
 			switch d.Type {
 			case "birth":
-				var names []string
+				var names, typed []string
 				for _, s := range d.Signals {
 					names = append(names, s.Signal)
+					typed = append(typed, s.Signal+":"+s.DataType)
 				}
 				items = append(items, fmt.Sprintf("birth %s %v", d.Device, names))
+				detail = append(detail, fmt.Sprintf("birth %s %v", d.Device, typed))
 			case "death":
 				items = append(items, "death "+d.Device)
+				detail = append(detail, "death "+d.Device)
 			default:
 				for _, s := range d.Samples {
 					items = append(items, d.Device+"/"+s.Signal)
+					detail = append(detail, fmt.Sprintf("%s/%s=%v %s", d.Device, s.Signal, s.Value, s.Quality))
 				}
 			}
 		}
 		be.items[out] = append(be.items[out], items...)
+		be.detail[out] = append(be.detail[out], detail...)
 		if be.seen[out] == nil {
 			be.seen[out] = map[string]bool{}
 		}
@@ -447,6 +490,28 @@ func (be *backend) waitItem(t *testing.T, out, item string) []string {
 	})
 
 	return upTo
+}
+
+func (be *backend) detailOf(out string) []string {
+	be.mu.Lock()
+	defer be.mu.Unlock()
+
+	return append([]string(nil), be.detail[out]...)
+}
+
+// waitDetail waits until output out received item, as detail writes it, n
+// times.
+func (be *backend) waitDetail(t *testing.T, out, item string, n int) {
+	t.Helper()
+
+	deadline := time.After(guard)
+	for countItems(be.detailOf(out), item) < n {
+		select {
+		case <-be.changed:
+		case <-deadline:
+			t.Fatalf("backend: %s did not receive %s %d times; received %q", out, item, n, be.detailOf(out))
+		}
+	}
 }
 
 // envStore is a fake environment for secrets.WithLookupEnv.

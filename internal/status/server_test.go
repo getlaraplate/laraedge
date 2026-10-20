@@ -68,7 +68,7 @@ func sampleStatus() supervisor.Status {
 		Applied: true,
 		Version: 7,
 		Inputs: []supervisor.InputStatus{
-			{ID: "line", Driver: "simulated", State: supervisor.InputRunning},
+			{ID: "line", Driver: "simulated", State: supervisor.InputRunning, TransformErrors: 3},
 			{ID: "probe", Driver: "simulated", State: supervisor.StateFailed, LastError: "start: scenario_file: cannot read"},
 		},
 		Outputs: []supervisor.OutputStatus{
@@ -422,8 +422,8 @@ func TestStatusJSON(t *testing.T) {
 		"config_applied": true,
 		"config_version": 7.0,
 		"inputs": []any{
-			map[string]any{"id": "line", "driver": "simulated", "state": "running"},
-			map[string]any{"id": "probe", "driver": "simulated", "state": "failed", "last_error": "start: scenario_file: cannot read"},
+			map[string]any{"id": "line", "driver": "simulated", "state": "running", "transform_errors": 3.0},
+			map[string]any{"id": "probe", "driver": "simulated", "state": "failed", "last_error": "start: scenario_file: cannot read", "transform_errors": 0.0},
 		},
 		"outputs": []any{
 			map[string]any{

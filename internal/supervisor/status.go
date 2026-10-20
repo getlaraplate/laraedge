@@ -30,6 +30,9 @@ type InputStatus struct {
 	State string
 	// LastError is why a failed input is not running.
 	LastError string
+	// TransformErrors counts the runtime errors of the input's transform
+	// chains since the agent started, across the restarts of the input.
+	TransformErrors uint64
 }
 
 // OutputStatus describes one output.
@@ -61,10 +64,16 @@ func (s *Supervisor) Status() Status {
 	st := Status{Applied: s.applied, Version: s.version}
 
 	for id, ri := range s.inputs {
-		st.Inputs = append(st.Inputs, InputStatus{ID: id, Driver: ri.cfg.Driver, State: InputRunning})
+		st.Inputs = append(st.Inputs, InputStatus{
+			ID: id, Driver: ri.cfg.Driver, State: InputRunning,
+			TransformErrors: s.transformErrors[id] + ri.proc.Errors(),
+		})
 	}
 	for id, f := range s.failedIn {
-		st.Inputs = append(st.Inputs, InputStatus{ID: id, Driver: f.kind, State: StateFailed, LastError: f.err})
+		st.Inputs = append(st.Inputs, InputStatus{
+			ID: id, Driver: f.kind, State: StateFailed, LastError: f.err,
+			TransformErrors: s.transformErrors[id],
+		})
 	}
 
 	for id, ro := range s.outputs {

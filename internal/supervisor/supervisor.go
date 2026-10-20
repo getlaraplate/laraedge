@@ -25,6 +25,7 @@ import (
 	"github.com/getlaraplate/laraplate-edge/internal/model"
 	"github.com/getlaraplate/laraplate-edge/internal/output"
 	"github.com/getlaraplate/laraplate-edge/internal/pipeline"
+	"github.com/getlaraplate/laraplate-edge/internal/transform"
 )
 
 // DefaultStartTimeout bounds the start of one input (ruling R10).
@@ -64,8 +65,8 @@ type Outcome struct {
 
 // Config configures a Supervisor.
 type Config struct {
-	// DataDir holds the output buffers (outputs/{id}) and the last valid
-	// document.
+	// DataDir holds the output buffers (outputs/{id}), the transform state of
+	// the inputs (inputs/{id}) and the last valid document.
 	DataDir string
 	// Store keeps the last valid document; nil means config.NewStore(DataDir).
 	Store *config.Store
@@ -118,13 +119,21 @@ type Supervisor struct {
 	outputs   map[string]*runningOutput
 	failedIn  map[string]failure
 	failedOut map[string]failure
+	// transformErrors holds, by input id, the runtime errors counted by the
+	// closed processors of that input, so the count reported never goes
+	// back when an input restarts.
+	transformErrors map[string]uint64
 }
 
+// runningInput is a started input with its transform processor. The
+// processor wraps the instance's emit: its lock comes before the instance's
+// in the lock order (ruling R2).
 type runningInput struct {
 	cfg    config.Input
 	in     input.Input
 	cancel context.CancelFunc
 	inst   *inputInstance
+	proc   *transform.Processor
 }
 
 // inputInstance is one start of an input, as the router sees it. It
@@ -135,8 +144,9 @@ type runningInput struct {
 // this instance, and its router registration, owned by its token, is removed
 // without touching one of a later instance of the same id (ruling R50).
 //
-// Lock order: inputInstance.mu, then the router's locks (Router.mu, then a
-// hold queue's), then an output buffer's lock inside Append or AddLoss.
+// Lock order: the input's transform processor, then inputInstance.mu, then
+// the router's locks (Router.mu, then a hold queue's), then an output
+// buffer's lock inside Append or AddLoss.
 // Supervisor.mu is taken before a buffer's lock (Status reads the buffer
 // figures under it) and never while an instance's or the router's lock is
 // held. No lock is ever taken in the other direction.
@@ -234,6 +244,8 @@ func New(cfg Config) (*Supervisor, error) {
 		outputs:   map[string]*runningOutput{},
 		failedIn:  map[string]failure{},
 		failedOut: map[string]failure{},
+
+		transformErrors: map[string]uint64{},
 	}
 	if s.store == nil {
 		s.store = config.NewStore(cfg.DataDir)
@@ -291,18 +303,19 @@ type journal struct {
 
 // Apply makes doc the running document. It refuses, with ResultRejected and
 // nothing changed, a document the build cannot run (config.CheckBuild, a
-// driver missing from the registry, an input its driver cannot build) or
-// whose version is lower than the applied one (a missing version counts as
-// 0; ruling R9). Otherwise it applies by difference, comparing each
-// component's Raw by id: unchanged inputs and outputs keep running untouched,
-// changed ones are restarted, removed ones stop (an output's directory is
-// kept) and added ones start. When a component fails to start, or an input
-// does not start within the start timeout, what this Apply started is
-// stopped and what it stopped is started again: ResultRolledBack with the
-// errors. When ctx is cancelled during a failed apply, the rollback still
-// runs but there is no outcome: Apply returns the context error. On success
-// the document is saved as the last valid one; the error is then only for
-// that save failing, with ResultApplied.
+// driver missing from the registry, a transform chain that does not type
+// check, an input its driver cannot build) or whose version is lower than
+// the applied one (a missing version counts as 0; ruling R9). Otherwise it
+// applies by difference, comparing each component's Raw by id: unchanged
+// inputs and outputs keep running untouched, changed ones are restarted,
+// removed ones stop (an output's directory is kept) and added ones start.
+// When a component fails to start, or an input does not start within the
+// start timeout, what this Apply started is stopped and what it stopped is
+// started again: ResultRolledBack with the errors. When ctx is cancelled
+// during a failed apply, the rollback still runs but there is no outcome:
+// Apply returns the context error. On success the document is saved as the
+// last valid one; the error is then only for that save failing, with
+// ResultApplied.
 func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, error) {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
@@ -389,6 +402,10 @@ func (s *Supervisor) check(doc config.Document) []string {
 			}
 		}
 	}
+
+	// Decision P1: config cannot type-check the chains, the supervisor does
+	// before anything is built.
+	msgs = append(msgs, transform.CheckDocument(doc)...)
 
 	return msgs
 }
@@ -684,18 +701,30 @@ func (s *Supervisor) stopOutput(id string, how outputStop, holdRoute config.Rout
 	return ro.cfg, err
 }
 
-// startInput starts in within the start timeout. Its devices are registered
-// with the router, and their births sent, once the input is live: before its
-// first record or when Start returns, whichever comes first. Until then an
-// output reconnecting sends no birth for them. A failed or abandoned start is
+// startInput starts in within the start timeout, behind a transform
+// processor built from cfg, which applies the point chains to what the input
+// emits and keeps its edge_counter state in DataDir/inputs/{id}. The
+// processor starts before the input. Its devices are registered with the
+// router, and their births sent, once the input is live: before its first
+// record or when Start returns, whichever comes first. Until then an output
+// reconnecting sends no birth for them. A failed or abandoned start is
 // retired before the input is closed: a goroutine it left behind cannot
 // register it or send a record, and its late cleanup cannot unregister the
-// instance a rollback started meanwhile.
+// instance a rollback started meanwhile. Its processor is closed before
+// startInput returns, the input of an abandoned start still running: no two
+// live processors of one input ever share the state file (ruling R11).
 func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.Input) error {
+	proc, err := transform.NewProcessor(cfg, s.dataDir, s.clk, s.log)
+	if err != nil {
+		return err
+	}
+
 	lifeCtx, cancel := context.WithCancel(s.ctx)
 	inst := &inputInstance{router: s.router, cfg: cfg, live: true}
+	proc.Start(lifeCtx)
+	emit := proc.Wrap(inst.emit)
 
-	err := s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, inst.emit) }, func() {
+	err = s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, emit) }, func() {
 		inst.retire()
 		if err := in.Close(); err != nil {
 			s.log.Warn("supervisor: cannot close an input that did not start", "input", cfg.ID, "error", err)
@@ -704,6 +733,7 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 	if err != nil {
 		inst.retire()
 		cancel()
+		s.closeProcessor(cfg.ID, proc)
 
 		return err
 	}
@@ -712,11 +742,22 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 	s.step("input " + cfg.ID)
 
 	s.mu.Lock()
-	s.inputs[cfg.ID] = &runningInput{cfg: cfg, in: in, cancel: cancel, inst: inst}
+	s.inputs[cfg.ID] = &runningInput{cfg: cfg, in: in, cancel: cancel, inst: inst, proc: proc}
 	delete(s.failedIn, cfg.ID)
 	s.mu.Unlock()
 
 	return nil
+}
+
+// closeProcessor closes the processor of input id, which waits for its
+// deadline goroutine, and keeps its error count. The caller holds no lock:
+// the processor's downstream emit takes the instance's and the router's.
+func (s *Supervisor) closeProcessor(id string, proc *transform.Processor) {
+	proc.Close()
+
+	s.mu.Lock()
+	s.transformErrors[id] += proc.Errors()
+	s.mu.Unlock()
 }
 
 // startBounded runs start in a goroutine and waits for it at most the start
@@ -760,7 +801,9 @@ func (s *Supervisor) startBounded(ctx context.Context, cancelStart context.Cance
 }
 
 // stopInput retires the input, which forgets its devices, then stops it:
-// nothing it emits while it closes is routed.
+// nothing it emits while it closes is routed. Its processor is closed once
+// the input's Close returned, so a restart of the input builds the next one
+// with the state file no longer written.
 func (s *Supervisor) stopInput(id string) config.Input {
 	s.mu.Lock()
 	ri := s.inputs[id]
@@ -772,6 +815,7 @@ func (s *Supervisor) stopInput(id string) config.Input {
 	if err := ri.in.Close(); err != nil {
 		s.log.Warn("supervisor: cannot close an input", "input", id, "error", err)
 	}
+	s.closeProcessor(id, ri.proc)
 
 	return ri.cfg
 }

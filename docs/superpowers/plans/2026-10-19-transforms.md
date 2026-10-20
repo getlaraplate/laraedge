@@ -112,9 +112,9 @@ created_on: 2026-10-19
 **Interfaces:**
 - Consumes: Task 3 `NewProcessor`, `Wrap`, `Start`, `Close`, `Errors`; Task 4 `CheckDocument`.
 
-- [ ] **Step 1: Failing tests.** A document with a chain applied end to end through the supervisor with the simulated input (`scale` on a measurement reaches the fake output scaled); a document whose chain does not type-check is `rejected` with the message, the running configuration untouched; restarting a changed input closes its processor (no emit after) and keeps `edge_counter` state for unchanged steps; the metric and the `/status` field appear with the error count.
-- [ ] **Step 2: Implement.** The processor is created with the input instance, started before `Start`, closed after the input's `Close`; `data_dir` comes from the supervisor's options.
-- [ ] **Step 3: Run** `go test -race ./internal/supervisor ./internal/status ./cmd/...`; commit.
+- [x] **Step 1: Failing tests.** A document with a chain applied end to end through the supervisor with the simulated input (`scale` on a measurement reaches the fake output scaled); a document whose chain does not type-check is `rejected` with the message, the running configuration untouched; restarting a changed input closes its processor (no emit after) and keeps `edge_counter` state for unchanged steps; the metric and the `/status` field appear with the error count.
+- [x] **Step 2: Implement.** The processor is created with the input instance, started before `Start`, closed after the input's `Close`; `data_dir` comes from the supervisor's options.
+- [x] **Step 3: Run** `go test -race ./internal/supervisor ./internal/status ./cmd/...`; commit.
 
 ### Task 6: `probe` and `config test`
 
