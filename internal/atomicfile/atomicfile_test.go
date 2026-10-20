@@ -1,8 +1,11 @@
 package atomicfile_test
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
@@ -56,11 +59,36 @@ func TestWrite(t *testing.T) {
 }
 
 func TestSyncDir(t *testing.T) {
-	if err := atomicfile.SyncDir(t.TempDir()); err != nil {
-		t.Fatalf("SyncDir(existing) = %v", err)
+	tests := []struct {
+		name    string
+		goos    string
+		missing bool
+		wantErr bool
+	}{
+		{name: "existing directory", goos: runtime.GOOS},
+		{name: "missing directory", goos: runtime.GOOS, missing: true, wantErr: true},
+		{name: "existing directory on windows", goos: "windows"},
+		{name: "missing directory on windows", goos: "windows", missing: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.missing {
+				dir = filepath.Join(dir, "missing")
+			}
+
+			err := atomicfile.SyncDirOn(dir, tc.goos)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SyncDir(%s) on %s = %v, want error %v", tc.name, tc.goos, err, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("SyncDir(%s) on %s = %v, want fs.ErrNotExist", tc.name, tc.goos, err)
+			}
+		})
 	}
 
-	if err := atomicfile.SyncDir(filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Fatal("SyncDir(missing) = nil, want an error")
+	// The exported function runs the branch of this system.
+	if err := atomicfile.SyncDir(filepath.Join(t.TempDir(), "missing")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("SyncDir(missing) = %v, want fs.ErrNotExist", err)
 	}
 }
