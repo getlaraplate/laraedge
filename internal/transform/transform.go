@@ -127,7 +127,7 @@ func (c *Chain) OutKind() model.ValueKind { return c.out }
 func (c *Chain) Apply(s model.Sample) ([]model.Sample, []error) {
 	var errs []error
 
-	out := c.run(0, []model.Sample{s}, &errs)
+	out := c.exit(c.run(0, []model.Sample{s}, &errs), &errs)
 
 	return out, errs
 }
@@ -163,7 +163,38 @@ func (c *Chain) Fire(now time.Time) ([]model.Sample, []error) {
 		}
 	}
 
-	return out, errs
+	return c.exit(out, &errs), errs
+}
+
+// exit enforces the chain-exit invariant: every sample leaving the chain has a
+// value of kind OutKind. A bad sample of another kind gets the zero value of
+// OutKind (its other fields are kept); a good integer leaving a float chain,
+// for example an untyped point whose driver emits integers, becomes a float.
+// Any other mismatch is a defect upstream: the sample becomes bad with the
+// zero value and the error is reported.
+func (c *Chain) exit(samples []model.Sample, errs *[]error) []model.Sample {
+	for i := range samples {
+		s := &samples[i]
+		if s.Value.Kind == c.out {
+			continue
+		}
+
+		switch {
+		case s.Quality == model.Bad:
+		case c.out == model.KindFloat && s.Value.Kind == model.KindInt:
+			s.Value = model.Value{Kind: model.KindFloat, Float: float64(s.Value.Int)}
+
+			continue
+		default:
+			s.Quality = model.Bad
+
+			*errs = append(*errs, errValueKind)
+		}
+
+		s.Value = model.Value{Kind: c.out}
+	}
+
+	return samples
 }
 
 // run flows samples through the stages from index from.

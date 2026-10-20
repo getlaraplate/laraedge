@@ -120,6 +120,17 @@ func TestRound(t *testing.T) {
 		{name: "ten decimals", transform: "round", params: "10", in: model.Value{Kind: model.KindFloat, Float: 1.23}, want: model.Value{Kind: model.KindFloat, Float: 1.23}},
 		{name: "huge float unchanged", transform: "round", params: "10", in: model.Value{Kind: model.KindFloat, Float: 1e300}, want: model.Value{Kind: model.KindFloat, Float: 1e300}},
 		{name: "integer passes unchanged", transform: "round", params: "1", in: model.IntValue(7), want: model.IntValue(7)},
+		{name: "decimal tie 1.005 goes up", transform: "round", params: "2", in: model.Value{Kind: model.KindFloat, Float: 1.005}, want: model.Value{Kind: model.KindFloat, Float: 1.01}},
+		{name: "decimal tie 0.285 goes up", transform: "round", params: "2", in: model.Value{Kind: model.KindFloat, Float: 0.285}, want: model.Value{Kind: model.KindFloat, Float: 0.29}},
+		{name: "decimal tie 2.675 goes up", transform: "round", params: "2", in: model.Value{Kind: model.KindFloat, Float: 2.675}, want: model.Value{Kind: model.KindFloat, Float: 2.68}},
+		{name: "negative decimal tie 1.005", transform: "round", params: "2", in: model.Value{Kind: model.KindFloat, Float: -1.005}, want: model.Value{Kind: model.KindFloat, Float: -1.01}},
+		{name: "negative decimal tie 0.285", transform: "round", params: "2", in: model.Value{Kind: model.KindFloat, Float: -0.285}, want: model.Value{Kind: model.KindFloat, Float: -0.29}},
+		{name: "below the tie stays down", transform: "round", params: "2", in: model.Value{Kind: model.KindFloat, Float: 1.0049}, want: model.Value{Kind: model.KindFloat, Float: 1}},
+		{name: "carry into the integer part", transform: "round", params: "2", in: model.Value{Kind: model.KindFloat, Float: 9.995}, want: model.Value{Kind: model.KindFloat, Float: 10}},
+		{name: "carry through zero decimals", transform: "round", params: "0", in: model.Value{Kind: model.KindFloat, Float: 999.5}, want: model.Value{Kind: model.KindFloat, Float: 1000}},
+		{name: "half to one from zero point five", transform: "round", params: "0", in: model.Value{Kind: model.KindFloat, Float: 0.5}, want: model.Value{Kind: model.KindFloat, Float: 1}},
+		{name: "fewer decimals than asked", transform: "round", params: "3", in: model.Value{Kind: model.KindFloat, Float: 1.5}, want: model.Value{Kind: model.KindFloat, Float: 1.5}},
+		{name: "tiny value rounds to zero", transform: "round", params: "2", in: model.Value{Kind: model.KindFloat, Float: 1e-300}, want: model.Value{Kind: model.KindFloat, Float: 0}},
 	})
 }
 
@@ -159,6 +170,11 @@ func TestMap(t *testing.T) {
 		{name: "string key", transform: "map", params: `{"table":{"OK":true}}`, in: model.StringValue("OK"), want: model.BoolValue(true)},
 		{name: "string key is case sensitive", transform: "map", params: `{"table":{"OK":true},"default":false}`, in: model.StringValue("ok"), want: model.BoolValue(false)},
 		{name: "float values", transform: "map", params: `{"table":{"a":1.5}}`, in: model.StringValue("a"), want: model.Value{Kind: model.KindFloat, Float: 1.5}},
+		{name: "whole and fractional values make a float table", transform: "map", params: `{"table":{"a":1,"b":1.5}}`, in: model.StringValue("a"), want: model.Value{Kind: model.KindFloat, Float: 1}},
+		{name: "fractional value of a float table", transform: "map", params: `{"table":{"a":1,"b":1.5}}`, in: model.StringValue("b"), want: model.Value{Kind: model.KindFloat, Float: 1.5}},
+		{name: "float default promotes integer values", transform: "map", params: `{"table":{"a":1},"default":2.5}`, in: model.StringValue("a"), want: model.Value{Kind: model.KindFloat, Float: 1}},
+		{name: "integer default promoted by float values", transform: "map", params: `{"table":{"a":1.5},"default":2}`, in: model.StringValue("z"), want: model.Value{Kind: model.KindFloat, Float: 2}},
+		{name: "all integers stay integer", transform: "map", params: `{"table":{"a":1,"b":2},"default":3}`, in: model.StringValue("b"), want: model.IntValue(2)},
 		{name: "default only kind", transform: "map", params: `{"table":{},"default":7}`, in: model.IntValue(1), want: model.IntValue(7)},
 	})
 }
@@ -223,7 +239,7 @@ func TestRegexExtract(t *testing.T) {
 	})
 }
 
-func TestBadInputPassesThroughEveryStatelessTransform(t *testing.T) {
+func TestBadInputIsNotComputedByAnyStatelessTransform(t *testing.T) {
 	tests := []struct {
 		transform string
 		params    string
@@ -255,8 +271,15 @@ func TestBadInputPassesThroughEveryStatelessTransform(t *testing.T) {
 				t.Errorf("errors: %v", errs)
 			}
 
-			if len(out) != 1 || out[0] != in {
-				t.Errorf("Apply = %+v, want the input unchanged", out)
+			// Not computed: only the chain-exit invariant may touch it, giving
+			// the zero value of the chain's kind when the kind differs.
+			want := in
+			if want.Value.Kind != chain.OutKind() {
+				want.Value = model.Value{Kind: chain.OutKind()}
+			}
+
+			if len(out) != 1 || out[0] != want {
+				t.Errorf("Apply = %+v, want %+v", out, want)
 			}
 		})
 	}
@@ -274,5 +297,50 @@ func TestStatelessTransformsHaveNoDeadline(t *testing.T) {
 
 	if out, errs := chain.Fire(t0); len(out) != 0 || len(errs) != 0 {
 		t.Errorf("Fire = %v, %v; want nothing", out, errs)
+	}
+}
+
+func TestNegativeZeroIsNormalised(t *testing.T) {
+	negZero := math.Copysign(0, -1)
+
+	tests := []struct {
+		name      string
+		transform string
+		params    string
+		in        model.Value
+	}{
+		{"scale", "scale", "-1", model.Value{Kind: model.KindFloat, Float: 0}},
+		{"scale of an int", "scale", "-1", model.IntValue(0)},
+		{"offset", "offset", "0", model.Value{Kind: model.KindFloat, Float: negZero}},
+		{"round towards zero", "round", "0", model.Value{Kind: model.KindFloat, Float: -0.4}},
+		{"round a negative tiny value", "round", "2", model.Value{Kind: model.KindFloat, Float: -1e-9}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			chain, err := transform.Compile([]config.Transform{step(tc.transform, tc.params)}, tc.in.Kind, nil)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+
+			out, errs := chain.Apply(sample(tc.in))
+			if len(errs) != 0 || len(out) != 1 {
+				t.Fatalf("Apply = %v, %v", out, errs)
+			}
+
+			if out[0].Value.Float != 0 || math.Signbit(out[0].Value.Float) {
+				t.Errorf("Value = %v (sign bit %v), want +0", out[0].Value.Float, math.Signbit(out[0].Value.Float))
+			}
+		})
+	}
+}
+
+func TestMapRefusalIsDeterministic(t *testing.T) {
+	// Two bad values: the sorted first key decides which message is reported.
+	for range 20 {
+		_, err := transform.Compile([]config.Transform{step("map", `{"table":{"b":null,"a":99999999999999999999}}`)}, model.KindString, nil)
+		if err == nil || err.Error() != "step 1 (map): table number is out of range" {
+			t.Fatalf("Compile error = %v", err)
+		}
 	}
 }

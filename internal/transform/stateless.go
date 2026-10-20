@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,8 +65,13 @@ func asFloat(v model.Value) (float64, bool) {
 	}
 }
 
-// finiteSample returns s carrying the float f, or errNotFinite (P6).
+// finiteSample returns s carrying the float f (negative zero normalised to
+// zero), or errNotFinite (P6).
 func finiteSample(s model.Sample, f float64) ([]model.Sample, error) {
+	if f == 0 {
+		f = 0 // normalise -0 to +0
+	}
+
 	v, err := model.FloatValue(f)
 	if err != nil {
 		return nil, errNotFinite
@@ -121,8 +127,8 @@ func buildOffset(c buildContext) (Step, error) {
 type roundStep struct {
 	stateless
 
-	in    model.ValueKind
-	scale float64
+	in       model.ValueKind
+	decimals int
 }
 
 func (r roundStep) OutKind() model.ValueKind { return r.in }
@@ -139,10 +145,56 @@ func (r roundStep) Apply(s model.Sample) ([]model.Sample, error) {
 			return []model.Sample{s}, nil
 		}
 
-		return finiteSample(s, math.Round(x*r.scale)/r.scale)
+		return finiteSample(s, roundHalfAway(x, r.decimals))
 	default:
 		return nil, errValueKind
 	}
+}
+
+// roundHalfAway rounds x to the given number of decimals, a decimal tie going
+// away from zero. It decides on the shortest decimal form of x (the digits the
+// technician sees), so 1.005 with two decimals is 1.01 although the binary
+// float is slightly below the tie. x must be finite and below 2^52 in
+// magnitude.
+func roundHalfAway(x float64, decimals int) float64 {
+	text := strconv.FormatFloat(math.Abs(x), 'f', -1, 64)
+
+	whole, frac, _ := strings.Cut(text, ".")
+	if len(frac) <= decimals {
+		return x
+	}
+
+	digits := []byte(whole + frac[:decimals])
+	if frac[decimals] >= '5' {
+		i := len(digits) - 1
+		for ; i >= 0; i-- {
+			if digits[i] != '9' {
+				digits[i]++
+
+				break
+			}
+
+			digits[i] = '0'
+		}
+
+		if i < 0 {
+			digits = append([]byte{'1'}, digits...)
+		}
+	}
+
+	cut := len(digits) - decimals
+	rounded := string(digits[:cut])
+
+	if decimals > 0 {
+		rounded += "." + string(digits[cut:])
+	}
+
+	f, err := strconv.ParseFloat(rounded, 64)
+	if err != nil {
+		return x
+	}
+
+	return math.Copysign(f, x)
 }
 
 func buildRound(c buildContext) (Step, error) {
@@ -151,7 +203,7 @@ func buildRound(c buildContext) (Step, error) {
 		return nil, err
 	}
 
-	return roundStep{in: c.In, scale: math.Pow10(int(decimals))}, nil
+	return roundStep{in: c.In, decimals: int(decimals)}, nil
 }
 
 // --- bit, bcd ---
@@ -318,32 +370,25 @@ func buildMap(c buildContext) (Step, error) {
 		return nil, errors.New("parameter table must be an object")
 	}
 
-	step := mapStep{table: make(map[string]model.Value, len(table))}
-
-	var kind model.ValueKind
-
-	note := func(v model.Value) error {
-		if kind != 0 && kind != v.Kind {
-			return errMapKinds
-		}
-
-		kind = v.Kind
-
-		return nil
+	keys := make([]string, 0, len(table))
+	for key := range table {
+		keys = append(keys, key)
 	}
 
-	for key, raw := range table {
-		v, err := mapValue(raw)
+	sort.Strings(keys)
+
+	values := make([]model.Value, 0, len(keys)+1)
+
+	for _, key := range keys {
+		v, err := mapValue(table[key])
 		if err != nil {
 			return nil, err
 		}
 
-		if err := note(v); err != nil {
-			return nil, err
-		}
-
-		step.table[key] = v
+		values = append(values, v)
 	}
+
+	hasDefault := false
 
 	if raw, has := obj["default"]; has {
 		v, err := mapValue(raw)
@@ -351,20 +396,63 @@ func buildMap(c buildContext) (Step, error) {
 			return nil, err
 		}
 
-		if err := note(v); err != nil {
-			return nil, err
-		}
-
-		step.def = &v
+		values = append(values, v)
+		hasDefault = true
 	}
 
-	if kind == 0 {
+	if len(values) == 0 {
 		return nil, errMapEmpty
 	}
 
-	step.out = kind
+	kind, err := unifyKinds(values)
+	if err != nil {
+		return nil, err
+	}
+
+	step := mapStep{table: make(map[string]model.Value, len(keys)), out: kind}
+
+	for i, v := range values {
+		v = promote(v, kind)
+
+		if hasDefault && i == len(values)-1 {
+			step.def = &v
+
+			break
+		}
+
+		step.table[keys[i]] = v
+	}
 
 	return step, nil
+}
+
+// unifyKinds returns the one kind of the values. Integers and floats are one
+// family: any float makes the kind float. Booleans and strings stand alone.
+func unifyKinds(values []model.Value) (model.ValueKind, error) {
+	kind := values[0].Kind
+
+	for _, v := range values[1:] {
+		switch {
+		case v.Kind == kind:
+		case isNumeric(v.Kind) && isNumeric(kind):
+			kind = model.KindFloat
+		default:
+			return 0, errMapKinds
+		}
+	}
+
+	return kind, nil
+}
+
+func isNumeric(k model.ValueKind) bool { return k == model.KindInt || k == model.KindFloat }
+
+// promote converts an integer value to a float when the table is float.
+func promote(v model.Value, kind model.ValueKind) model.Value {
+	if kind == model.KindFloat && v.Kind == model.KindInt {
+		return model.Value{Kind: model.KindFloat, Float: float64(v.Int)}
+	}
+
+	return v
 }
 
 // --- valid_range ---

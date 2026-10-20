@@ -75,7 +75,11 @@ func TestCompileTypeCheck(t *testing.T) {
 		{"map bool values", model.KindInt, []config.Transform{step("map", `{"table":{"1":true},"default":false}`)}, "", model.KindBool},
 		{"map mixed kinds", model.KindInt, []config.Transform{step("map", `{"table":{"1":"run","2":3}}`)}, "step 1 (map): table values and default must share one kind", 0},
 		{"map default of another kind", model.KindInt, []config.Transform{step("map", `{"table":{"1":"run"},"default":0}`)}, "step 1 (map): table values and default must share one kind", 0},
-		{"map int and float mixed", model.KindInt, []config.Transform{step("map", `{"table":{"1":1,"2":2.5}}`)}, "step 1 (map): table values and default must share one kind", 0},
+		{"map int and float unify to float", model.KindInt, []config.Transform{step("map", `{"table":{"1":1,"2":2.5}}`)}, "", model.KindFloat},
+		{"map whole float literal and fraction", model.KindInt, []config.Transform{step("map", `{"table":{"1":1.0,"2":1.5}}`)}, "", model.KindFloat},
+		{"map all integers", model.KindInt, []config.Transform{step("map", `{"table":{"1":1,"2":2},"default":3}`)}, "", model.KindInt},
+		{"map number and string", model.KindInt, []config.Transform{step("map", `{"table":{"1":1,"2":"x"}}`)}, "step 1 (map): table values and default must share one kind", 0},
+		{"map bool and number", model.KindInt, []config.Transform{step("map", `{"table":{"1":true},"default":0}`)}, "step 1 (map): table values and default must share one kind", 0},
 		{"map without values", model.KindInt, []config.Transform{step("map", `{"table":{}}`)}, "step 1 (map): table has no value", 0},
 		{"valid_range keeps kind", model.KindInt, []config.Transform{step("valid_range", `{"max":100}`)}, "", model.KindInt},
 		{"regex default string", model.KindString, []config.Transform{step("regex_extract", `{"pattern":"W=(.*)"}`)}, "", model.KindString},
@@ -343,7 +347,7 @@ func TestChainRuntimeErrorBecomesBadSampleOfStepKind(t *testing.T) {
 	}
 }
 
-func TestChainBadSamplePassesUnchanged(t *testing.T) {
+func TestChainBadSampleIsNotComputed(t *testing.T) {
 	chain, err := transform.Compile([]config.Transform{step("scale", "2"), step("round", "1")}, model.KindInt, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
@@ -356,8 +360,144 @@ func TestChainBadSamplePassesUnchanged(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
 	}
-	if len(out) != 1 || out[0] != in {
-		t.Fatalf("Apply = %+v, want the input unchanged", out)
+	// scale and round yield a float chain: the exit invariant gives the bad
+	// integer the zero float and keeps every other field.
+	want := in
+	want.Value = model.Value{Kind: model.KindFloat}
+
+	if len(out) != 1 || out[0] != want {
+		t.Fatalf("Apply = %+v, want %+v", out, want)
+	}
+}
+
+func TestChainExitKind(t *testing.T) {
+	badInt := intSample(5)
+	badInt.Quality = model.Bad
+
+	badString := sample(model.StringValue("junk"))
+	badString.Quality = model.Bad
+
+	tests := []struct {
+		name     string
+		steps    []config.Transform
+		in       model.ValueKind
+		sample   model.Sample
+		wantKind model.ValueKind
+		wantQ    model.Quality
+		wantVal  model.Value
+		wantErrs int
+	}{
+		{
+			name:     "valid_range then bit: out of range bad int leaves as bool false",
+			steps:    []config.Transform{step("valid_range", `{"max":1}`), step("bit", "0")},
+			in:       model.KindInt,
+			sample:   intSample(5),
+			wantKind: model.KindBool, wantQ: model.Bad, wantVal: model.Value{Kind: model.KindBool},
+		},
+		{
+			name:     "bcd error then map to string: leaves as empty string",
+			steps:    []config.Transform{step("bcd", "true"), step("map", `{"table":{"1":"one"}}`)},
+			in:       model.KindInt,
+			sample:   intSample(0x1A),
+			wantKind: model.KindString, wantQ: model.Bad, wantVal: model.Value{Kind: model.KindString},
+			wantErrs: 1,
+		},
+		{
+			name:     "bad string into regex_extract as float: leaves as 0.0",
+			steps:    []config.Transform{step("regex_extract", `{"pattern":"([0-9.]+)","as":"float"}`)},
+			in:       model.KindString,
+			sample:   badString,
+			wantKind: model.KindFloat, wantQ: model.Bad, wantVal: model.Value{Kind: model.KindFloat},
+		},
+		{
+			name:     "untyped point with round and an integer sample leaves as float",
+			steps:    []config.Transform{step("round", "1")},
+			in:       transform.KindOf(""),
+			sample:   intSample(7),
+			wantKind: model.KindFloat, wantQ: model.Good, wantVal: model.Value{Kind: model.KindFloat, Float: 7},
+		},
+		{
+			name:     "empty chain of an untyped point converts a good integer",
+			steps:    nil,
+			in:       transform.KindOf(""),
+			sample:   intSample(3),
+			wantKind: model.KindFloat, wantQ: model.Good, wantVal: model.Value{Kind: model.KindFloat, Float: 3},
+		},
+		{
+			name:     "good sample of an impossible kind becomes bad and is reported",
+			steps:    nil,
+			in:       model.KindBool,
+			sample:   sample(model.StringValue("x")),
+			wantKind: model.KindBool, wantQ: model.Bad, wantVal: model.Value{Kind: model.KindBool},
+			wantErrs: 1,
+		},
+		{
+			name:     "bad sample of the right kind is untouched",
+			steps:    []config.Transform{step("valid_range", `{"max":1}`)},
+			in:       model.KindInt,
+			sample:   badInt,
+			wantKind: model.KindInt, wantQ: model.Bad, wantVal: model.IntValue(5),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			chain, err := transform.Compile(tc.steps, tc.in, nil)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+
+			out, errs := chain.Apply(tc.sample)
+			if len(errs) != tc.wantErrs {
+				t.Errorf("errors = %v, want %d", errs, tc.wantErrs)
+			}
+
+			if len(out) != 1 {
+				t.Fatalf("Apply produced %d samples, want 1", len(out))
+			}
+
+			if out[0].Value.Kind != chain.OutKind() || chain.OutKind() != tc.wantKind {
+				t.Errorf("Value.Kind = %v, OutKind = %v, want %v", out[0].Value.Kind, chain.OutKind(), tc.wantKind)
+			}
+
+			if out[0].Quality != tc.wantQ || out[0].Value != tc.wantVal {
+				t.Errorf("sample = %+v, want quality %v value %+v", out[0], tc.wantQ, tc.wantVal)
+			}
+
+			if out[0].Device != tc.sample.Device || out[0].Signal != tc.sample.Signal || !out[0].TS.Equal(tc.sample.TS) || out[0].Priority != tc.sample.Priority {
+				t.Errorf("identity fields changed: %+v", out[0])
+			}
+		})
+	}
+}
+
+func TestChainFireExitKind(t *testing.T) {
+	deadline := t0.Add(time.Second)
+	emitted := sample(model.StringValue("late"))
+	emitted.Quality = model.Bad
+
+	// A timed step that is the chain's only step keeps its own kind; what it
+	// emits upstream of a kind-changing step still leaves with the chain kind.
+	timed := &fakeStep{
+		out:      model.KindInt,
+		apply:    func(s model.Sample) ([]model.Sample, error) { return []model.Sample{s}, nil },
+		deadline: deadline,
+		fire:     []model.Sample{emitted},
+	}
+
+	chain := transform.NewChain([]string{"timed"}, []transform.Step{timed}, model.KindInt)
+
+	out, errs := chain.Fire(deadline)
+	if len(errs) != 0 || len(out) != 1 {
+		t.Fatalf("Fire = %v, %v", out, errs)
+	}
+
+	if out[0].Value != (model.Value{Kind: model.KindInt}) || out[0].Quality != model.Bad {
+		t.Errorf("sample = %+v, want a bad zero integer", out[0])
+	}
+
+	if timed.fire[0].Value.Kind != model.KindString {
+		t.Error("the step's own slice was mutated")
 	}
 }
 
