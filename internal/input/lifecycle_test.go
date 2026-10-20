@@ -2,6 +2,7 @@ package input_test
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"runtime"
 	"sync"
@@ -64,17 +65,28 @@ func twoDevices() config.Input {
 }
 
 func TestSignals(t *testing.T) {
+	chain := func(name, params string) []config.Transform {
+		return []config.Transform{{Name: name, Params: json.RawMessage(params)}}
+	}
 	got := input.Signals(config.Device{Device: "d", Points: []config.Point{
 		{Signal: "on", Type: "bool"},
 		{Signal: "name", Type: "string"},
 		{Signal: "count", Type: "uint64", Unit: "pcs"},
 		{Signal: "raw"},
+		{Signal: "alarm", Type: "int16", Transforms: chain("bit", `0`)},
+		{Signal: "temp", Type: "float32", Unit: "°C", Transforms: chain("round", `1`)},
+		{Signal: "weight", Type: "string", Unit: "g", Transforms: chain("regex_extract", `{"pattern": "(\\d+)", "as": "integer"}`)},
+		{Signal: "parts", Type: "bool", Transforms: chain("edge_counter", `"rising"`)},
 	}})
 	want := []model.SignalInfo{
 		{Signal: "on", DataType: model.DataTypeBoolean},
 		{Signal: "name", DataType: model.DataTypeString},
 		{Signal: "count", DataType: model.DataTypeNumber, Unit: "pcs"},
 		{Signal: "raw", DataType: model.DataTypeNumber},
+		{Signal: "alarm", DataType: model.DataTypeBoolean},
+		{Signal: "temp", DataType: model.DataTypeNumber, Unit: "°C"},
+		{Signal: "weight", DataType: model.DataTypeNumber, Unit: "g"},
+		{Signal: "parts", DataType: model.DataTypeNumber},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Signals() = %+v, want %+v", got, want)

@@ -101,9 +101,9 @@ created_on: 2026-10-19
 **Interfaces:**
 - Produces: `transform.CheckDocument(doc config.Document) []string` (one message per bad chain, naming input, device, signal, step position and transform); `transform.OutputDataType(p config.Point) string` (birth data type of the chain's output kind; the point's own data type when the chain is empty or invalid); `input.Signals` uses it.
 
-- [ ] **Step 1: Failing tests.** Schema: every spec section 4 parameter shape accepted; `round: 11`, `bit: 64`, `deadband: "5"`, `valid_range: {}`, `regex_extract: {}`, `edge_counter: "up"`, `map: {}` refused with fixed messages; a plain value under a secret-like key still refused (regression). `CheckBuild` accepts point transforms and still refuses `derived` and plugins. `CheckDocument` refuses `bit` after `float32`. `Signals`: a point `int16` with `bit: 0` births `boolean`; `float32` with `round: 1` births `number`; `string` with `regex_extract {as: integer}` births `number`. The C2 backend fixtures still pass layer 1 (existing test).
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run** `go test -race ./internal/config ./internal/transform ./internal/input ./internal/pipeline`; commit.
+- [x] **Step 1: Failing tests.** Schema: every spec section 4 parameter shape accepted; `round: 11`, `bit: 64`, `deadband: "5"`, `valid_range: {}`, `regex_extract: {}`, `edge_counter: "up"`, `map: {}` refused with fixed messages; a plain value under a secret-like key still refused (regression). `CheckBuild` accepts point transforms and still refuses `derived` and plugins. `CheckDocument` refuses `bit` after `float32`. `Signals`: a point `int16` with `bit: 0` births `boolean`; `float32` with `round: 1` births `number`; `string` with `regex_extract {as: integer}` births `number`. The C2 backend fixtures still pass layer 1 (existing test).
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run** `go test -race ./internal/config ./internal/transform ./internal/input ./internal/pipeline`; commit.
 
 ### Task 5: Supervisor wiring and metric
 

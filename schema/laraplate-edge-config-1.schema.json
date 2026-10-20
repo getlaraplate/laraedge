@@ -152,12 +152,139 @@
       }
     },
     "transform": {
-      "description": "One step of the transform chain: an object with a single key naming a transform of the catalogue; its parameters are not interpreted by the schema.",
+      "description": "One step of the transform chain: an object with a single key naming a transform of the catalogue, whose value holds the transform's parameters.",
       "type": "object",
       "minProperties": 1,
       "maxProperties": 1,
       "propertyNames": {
         "enum": ["scale", "offset", "round", "bit", "bcd", "map", "valid_range", "deadband", "heartbeat", "min_interval", "debounce", "edge_counter", "derivative", "trim", "regex_extract"]
+      },
+      "properties": {
+        "scale": { "$ref": "#/$defs/transformScale" },
+        "offset": { "$ref": "#/$defs/transformOffset" },
+        "round": { "$ref": "#/$defs/transformRound" },
+        "bit": { "$ref": "#/$defs/transformBit" },
+        "bcd": { "$ref": "#/$defs/transformBcd" },
+        "map": { "$ref": "#/$defs/transformMap" },
+        "valid_range": { "$ref": "#/$defs/transformValidRange" },
+        "deadband": { "$ref": "#/$defs/transformDeadband" },
+        "heartbeat": { "$ref": "#/$defs/transformHeartbeat" },
+        "min_interval": { "$ref": "#/$defs/transformMinInterval" },
+        "debounce": { "$ref": "#/$defs/transformDebounce" },
+        "edge_counter": { "$ref": "#/$defs/transformEdgeCounter" },
+        "derivative": { "$ref": "#/$defs/transformDerivative" },
+        "trim": { "$ref": "#/$defs/transformTrim" },
+        "regex_extract": { "$ref": "#/$defs/transformRegexExtract" }
+      }
+    },
+    "transformScale": {
+      "description": "scale: multiplies a number by this factor; produces a float.",
+      "type": "number"
+    },
+    "transformOffset": {
+      "description": "offset: adds this amount to a number; produces a float.",
+      "type": "number"
+    },
+    "transformRound": {
+      "description": "round: rounds a float half away from zero to this many decimals; an integer passes unchanged.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10
+    },
+    "transformBit": {
+      "description": "bit: extracts the bit at this index (0 is the least significant) of an integer; produces a boolean.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 63
+    },
+    "transformBcd": {
+      "description": "bcd: decodes an integer written in binary-coded decimal; a nibble above 9 is a runtime error.",
+      "const": true
+    },
+    "transformMap": {
+      "description": "map: looks the value, rendered as text, up in table. The table values and the default share one kind (integers and floats together are floats), which the step produces; the table may be empty only with a default. A missing key with no default is a runtime error.",
+      "type": "object",
+      "required": ["table"],
+      "additionalProperties": false,
+      "properties": {
+        "table": {
+          "type": "object",
+          "additionalProperties": { "type": ["boolean", "number", "string"] }
+        },
+        "default": { "type": ["boolean", "number", "string"] }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "table": { "additionalProperties": { "type": "boolean" } },
+            "default": { "type": "boolean" }
+          }
+        },
+        {
+          "properties": {
+            "table": { "additionalProperties": { "type": "number" } },
+            "default": { "type": "number" }
+          }
+        },
+        {
+          "properties": {
+            "table": { "additionalProperties": { "type": "string" } },
+            "default": { "type": "string" }
+          }
+        }
+      ],
+      "if": { "not": { "required": ["default"] } },
+      "then": { "properties": { "table": { "minProperties": 1 } } }
+    },
+    "transformValidRange": {
+      "description": "valid_range: a number outside [min, max] keeps its value with quality bad. At least one bound; min must not exceed max (checked by the agent).",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "min": { "type": "number" },
+        "max": { "type": "number" }
+      }
+    },
+    "transformDeadband": {
+      "description": "deadband: sends a number when it moved from the last sent value by at least this absolute amount, or by this percentage of the last sent value (\"5%\"), or when its quality changed. The first value always passes.",
+      "if": { "type": "string" },
+      "then": { "pattern": "^[0-9]+(\\.[0-9]+)?%$" },
+      "else": { "type": "number", "minimum": 0 }
+    },
+    "transformHeartbeat": {
+      "description": "heartbeat: resends the last value with the current time when nothing left the step for this positive duration.",
+      "$ref": "#/$defs/duration"
+    },
+    "transformMinInterval": {
+      "description": "min_interval: at most one sample per positive interval: the latest of the window, with its own timestamp, at the window's end.",
+      "$ref": "#/$defs/duration"
+    },
+    "transformDebounce": {
+      "description": "debounce: sends a value only after it stayed unchanged for this positive duration, with the timestamp of the change.",
+      "$ref": "#/$defs/duration"
+    },
+    "transformEdgeCounter": {
+      "description": "edge_counter: the cumulative count of the edges of a boolean, persisted across restarts; produces an integer.",
+      "enum": ["rising", "falling", "both"]
+    },
+    "transformDerivative": {
+      "description": "derivative: the change per second of a number over the sample timestamps; produces a float.",
+      "const": true
+    },
+    "transformTrim": {
+      "description": "trim: removes the white space around a string.",
+      "const": true
+    },
+    "transformRegexExtract": {
+      "description": "regex_extract: the capture group (default 1) of an RE2 pattern over a string, converted to the kind named by as (default string). The pattern must compile and hold the group (checked by the agent). No match or a failed conversion is a runtime error.",
+      "type": "object",
+      "required": ["pattern"],
+      "additionalProperties": false,
+      "properties": {
+        "pattern": { "type": "string" },
+        "group": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "as": { "enum": ["string", "integer", "float"] }
       }
     },
     "derived": {

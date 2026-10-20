@@ -459,14 +459,15 @@ func TestApplyRefuses(t *testing.T) {
 					"schema": config.SchemaName, "version": 2, "outputs": []any{},
 					"inputs": []any{map[string]any{
 						"id": "a", "driver": config.DriverSimulated,
-						"devices": []any{map[string]any{"device": "a1", "points": []any{map[string]any{
-							"signal": "temp", "address": "t", "read": "subscribe",
-							"transforms": []any{map[string]any{"scale": 0.1}},
-						}}}},
+						"devices": []any{map[string]any{
+							"device":  "a1",
+							"points":  []any{map[string]any{"signal": "temp", "address": "t", "read": "subscribe"}},
+							"derived": []any{map[string]any{"signal": "d", "type": "int", "expr": "1"}},
+						}},
 					}},
 				})
 			},
-			want: []string{"inputs.0.devices.0.points.0.transforms: not available in this build"},
+			want: []string{"inputs.0.devices.0.derived: not available in this build"},
 		},
 		{
 			name: "an input the driver cannot build",
