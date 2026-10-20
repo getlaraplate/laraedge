@@ -904,3 +904,202 @@ func TestProcessorStartWritesNothingWithoutPrunedKeys(t *testing.T) {
 		t.Fatalf("Start wrote a state file with nothing to prune: %v", err)
 	}
 }
+
+// deathOf is the death of device at t0+at.
+func deathOf(device string, at time.Duration) model.Record {
+	return model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: device, TS: t0.Add(at)})
+}
+
+// describe renders records as "<offset>=<value>" for samples and "death" for
+// a death, the offset from t0.
+func describe(records []model.Record) string {
+	var parts []string
+
+	for _, r := range records {
+		if r.Event != nil {
+			parts = append(parts, r.Event.Kind.String())
+
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf("%s=%d", r.Sample.TS.Sub(t0), r.Sample.Value.Int))
+	}
+
+	return strings.Join(parts, ",")
+}
+
+// TestProcessorHeartbeatStopsAtTheDeviceDeath is ruling R14: after the
+// death of its device a heartbeat resends nothing, so the backend sees the
+// device unreachable, until a new sample leaves the step.
+func TestProcessorHeartbeatStopsAtTheDeviceDeath(t *testing.T) {
+	in := inputOf(
+		point{device: "press1", signal: "state", typ: "int16", steps: []config.Transform{step("heartbeat", `"10s"`)}},
+		point{device: "press2", signal: "state", typ: "int16", steps: []config.Transform{step("heartbeat", `"60s"`)}},
+	)
+	clk := clock.NewFake(t0)
+	p := newProcessor(t, in, t.TempDir(), clk, nil)
+	rec := &recorder{}
+	emit := p.Wrap(rec.emit)
+
+	p.Start(t.Context())
+
+	emit(sampleOf("press1", "state", 0, model.IntValue(3)))
+	emit(sampleOf("press2", "state", 0, model.IntValue(7)))
+	waitArmed(t, p, t0.Add(10*time.Second))
+
+	// The death of press1 disarms its heartbeat only: the goroutine now waits
+	// on the heartbeat of press2.
+	emit(deathOf("press1", time.Second))
+	waitArmed(t, p, t0.Add(60*time.Second))
+
+	clk.Advance(30 * time.Second)
+
+	emit(sampleOf("press1", "state", 40*time.Second, model.IntValue(4)))
+	waitArmed(t, p, t0.Add(50*time.Second))
+
+	if got, want := describe(rec.all()), "0s=3,0s=7,death,40s=4"; got != want {
+		t.Fatalf("emitted %s, want %s: no heartbeat of press1 between its death and its next sample", got, want)
+	}
+}
+
+// TestProcessorDeviceDeathReleasesAndCancels is ruling R14 for the steps
+// that hold a sample: min_interval sends its held sample before the death,
+// debounce drops its waiting value.
+func TestProcessorDeviceDeathReleasesAndCancels(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps []config.Transform
+		feed  []model.Record
+		want  string
+	}{
+		{
+			name:  "min_interval sends the held sample before the death",
+			steps: []config.Transform{step("min_interval", `"10s"`)},
+			feed: []model.Record{
+				sampleOf("press1", "state", 0, model.IntValue(1)),
+				sampleOf("press1", "state", 2*time.Second, model.IntValue(2)),
+				deathOf("press1", 3*time.Second),
+				sampleOf("press1", "state", 4*time.Second, model.IntValue(3)),
+			},
+			// The window closed with the death: the first sample after it passes at once.
+			want: "0s=1,2s=2,death,4s=3",
+		},
+		{
+			name:  "debounce drops the waiting value",
+			steps: []config.Transform{step("debounce", `"10s"`)},
+			feed: []model.Record{
+				sampleOf("press1", "state", 0, model.IntValue(1)),
+				deathOf("press1", time.Second),
+				sampleOf("press1", "state", 15*time.Second, model.IntValue(1)),
+			},
+			// Without the death, the sample at 15s would send 1 waiting since 0s.
+			want: "death",
+		},
+		{
+			name:  "the death of another device changes nothing",
+			steps: []config.Transform{step("min_interval", `"10s"`)},
+			feed: []model.Record{
+				sampleOf("press1", "state", 0, model.IntValue(1)),
+				sampleOf("press1", "state", 2*time.Second, model.IntValue(2)),
+				deathOf("press2", 3*time.Second),
+			},
+			want: "0s=1,death",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := inputOf(point{device: "press1", signal: "state", typ: "int16", steps: tc.steps})
+			p := newProcessor(t, in, t.TempDir(), clock.NewFake(t0), nil)
+			rec := &recorder{}
+			emit := p.Wrap(rec.emit)
+
+			for _, r := range tc.feed {
+				emit(r)
+			}
+
+			if got := describe(rec.all()); got != tc.want {
+				t.Errorf("emitted %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProcessorErrorSummaryClosesTheEpisodeOnTheClock: the summary of the
+// errors only counted is logged a quiet errorLogWindow after the last error,
+// by the deadline goroutine, without waiting for another error or Close.
+func TestProcessorErrorSummaryClosesTheEpisodeOnTheClock(t *testing.T) {
+	in := inputOf(point{device: "press1", signal: "code", typ: "uint16", steps: []config.Transform{step("bcd", "true")}})
+	log := &logSink{}
+	clk := clock.NewFake(t0)
+	p := newProcessor(t, in, t.TempDir(), clk, log.logger())
+	emit := p.Wrap((&recorder{}).emit)
+
+	p.Start(t.Context())
+
+	emit(sampleOf("press1", "code", 0, model.IntValue(0x1A)))
+	clk.Advance(10 * time.Second)
+	emit(sampleOf("press1", "code", 10*time.Second, model.IntValue(0x1A)))
+	emit(sampleOf("press1", "code", 10*time.Second, model.IntValue(0x1A)))
+
+	if n := len(log.entries(t)); n != 1 {
+		t.Fatalf("log entries = %d, want the first error only:\n%s", n, log.text())
+	}
+
+	waitArmed(t, p, t0.Add(70*time.Second))
+	clk.Advance(time.Minute)
+	waitUntil(t, "the summary", func() bool { return len(log.entries(t)) == 2 })
+
+	if s := log.entries(t)[1]; s["suppressed"] != float64(2) {
+		t.Fatalf("summary %v, want suppressed 2", s)
+	}
+
+	// The episode ended: the next error is logged in full, and no deadline is
+	// armed while nothing is counted.
+	waitUntil(t, "no deadline", func() bool { _, ok := transform.ArmedDeadline(p); return !ok })
+	emit(sampleOf("press1", "code", 80*time.Second, model.IntValue(0x1A)))
+
+	entries := log.entries(t)
+	if len(entries) != 3 || entries[2]["step"] != float64(1) || entries[2]["suppressed"] != nil {
+		t.Errorf("log:\n%s\nwant the error after the summary logged in full", log.text())
+	}
+}
+
+// TestRemoveStaleInputStates is ruling R15's helper: it removes the
+// directories of data_dir/inputs that keep refuses, and touches nothing
+// else, not even what a symbolic link there points to.
+func TestRemoveStaleInputStates(t *testing.T) {
+	if removed, err := transform.RemoveStaleInputStates(t.TempDir(), func(string) bool { return false }); err != nil || removed != nil {
+		t.Fatalf("RemoveStaleInputStates() without data_dir/inputs = %v, %v, want nothing", removed, err)
+	}
+
+	dataDir := t.TempDir()
+	root := filepath.Join(dataDir, "inputs")
+	outside := t.TempDir()
+
+	for _, dir := range []string{filepath.Join(root, "kept"), filepath.Join(root, "old", "nested"), filepath.Join(root, "older")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("no symbolic links here: %v", err)
+	}
+
+	removed, err := transform.RemoveStaleInputStates(dataDir, func(id string) bool { return id == "kept" })
+	if err != nil || fmt.Sprint(removed) != "[old older]" {
+		t.Fatalf("RemoveStaleInputStates() = %v, %v, want [old older]", removed, err)
+	}
+
+	for _, name := range []string{"kept", "notes.txt", "link"} {
+		if _, err := os.Lstat(filepath.Join(root, name)); err != nil {
+			t.Errorf("%s: %v, want it kept", name, err)
+		}
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("the link's target: %v, want it kept", err)
+	}
+}

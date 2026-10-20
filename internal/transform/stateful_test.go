@@ -759,3 +759,37 @@ func TestHeartbeatAfterAHoldBackStep(t *testing.T) {
 		},
 	})
 }
+
+// TestDeviceDownFlowsThroughTheChain checks the order of ruling R14 inside a
+// chain: the sample min_interval releases reaches the heartbeat after it,
+// whose own notice then disarms it.
+func TestDeviceDownFlowsThroughTheChain(t *testing.T) {
+	chain, err := transform.Compile([]config.Transform{step("min_interval", `"10s"`), step("heartbeat", `"5s"`)}, model.KindInt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sample := func(at time.Duration, v int64) model.Sample {
+		return model.Sample{Device: "press1", Signal: "state", TS: t0.Add(at), Value: i64(v), Quality: model.Good}
+	}
+
+	chain.Apply(sample(0, 1))
+	chain.Apply(sample(2*time.Second, 2))
+
+	got, errs := transform.DeviceDown(chain)
+	if len(errs) != 0 || len(got) != 1 || got[0].Value != i64(2) || !got[0].TS.Equal(t0.Add(2*time.Second)) {
+		t.Fatalf("DeviceDown() = %+v, %v, want the held sample 2 at +2s", got, errs)
+	}
+
+	if d, ok := chain.Deadline(); ok {
+		t.Errorf("Deadline() = %s after the death, want none", d.Sub(t0))
+	}
+
+	if out, _ := chain.Apply(sample(4*time.Second, 3)); len(out) != 1 {
+		t.Errorf("Apply() after the death = %+v, want the sample at once", out)
+	}
+
+	if d, ok := chain.Deadline(); !ok || !d.Equal(t0.Add(9*time.Second)) {
+		t.Errorf("Deadline() = %s, %v, want +9s: the next sample re-arms the heartbeat", d.Sub(t0), ok)
+	}
+}

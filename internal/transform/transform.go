@@ -111,6 +111,14 @@ type clockObserver interface {
 	observeNow(now time.Time)
 }
 
+// deviceObserver is implemented by a step that must know its device died
+// (ruling R14): heartbeat stops resending, min_interval releases its held
+// sample, debounce drops its waiting value. It returns what leaves the step
+// before the death.
+type deviceObserver interface {
+	deviceDown() []model.Sample
+}
+
 type stage struct {
 	name string
 	step Step
@@ -140,7 +148,10 @@ func (c *Chain) OutKind() model.ValueKind { return c.out }
 // Apply runs a sample through the chain. A sample produced by step k flows
 // through steps k+1 to n. A bad sample is not computed: it passes through
 // unchanged. A runtime error of a step yields a bad sample of that step's
-// output kind with the zero value, and the error in the second result.
+// output kind with the zero value, and the error in the second result. Every
+// sample leaving the chain has a value of kind OutKind (ruling R5): a bad
+// sample of another kind gets the zero value of OutKind, a good integer
+// leaving a float chain becomes a float (see exit).
 func (c *Chain) Apply(s model.Sample) ([]model.Sample, []error) {
 	var errs []error
 
@@ -184,6 +195,30 @@ func (c *Chain) Fire(now time.Time) ([]model.Sample, []error) {
 	for i, st := range c.stages {
 		if emitted := st.step.Fire(now); len(emitted) > 0 {
 			out = append(out, c.run(i+1, emitted, &errs)...)
+		}
+	}
+
+	return c.exit(out, &errs), errs
+}
+
+// deviceDown tells every step, in chain order, that the chain's device died;
+// what a step releases flows through the steps after it before they are
+// told, so a sample min_interval releases re-arms a later heartbeat, which
+// its own notice then disarms.
+func (c *Chain) deviceDown() ([]model.Sample, []error) {
+	var (
+		out  []model.Sample
+		errs []error
+	)
+
+	for i, st := range c.stages {
+		o, ok := st.step.(deviceObserver)
+		if !ok {
+			continue
+		}
+
+		if released := o.deviceDown(); len(released) > 0 {
+			out = append(out, c.run(i+1, released, &errs)...)
 		}
 	}
 

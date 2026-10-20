@@ -119,9 +119,10 @@ func NewProcessor(cfg config.Input, dataDir string, clk clock.Clock, logger *slo
 
 // Wrap returns the emit the input calls: it applies the chain of the
 // sample's point and passes the results to emit. Device events, and samples
-// of a point without a chain, pass through untouched. The deadline goroutine
-// emits through the emit of the last Wrap. After Close returns, the returned
-// function emits nothing.
+// of a point without a chain, pass through untouched; a death first tells the
+// chains of its device (ruling R14), and what they release is emitted before
+// it. The deadline goroutine emits through the emit of the last Wrap. After
+// Close returns, the returned function emits nothing.
 func (p *Processor) Wrap(emit func(model.Record)) func(model.Record) {
 	p.mu.Lock()
 	p.downstream = emit
@@ -138,6 +139,10 @@ func (p *Processor) process(emit func(model.Record), r model.Record) {
 		return
 	}
 
+	if r.Event != nil && r.Event.Kind == model.Death {
+		p.deviceDownLocked(emit, r.Event.Device)
+	}
+
 	var pc *pointChain
 	if r.Sample != nil {
 		pc = p.byKey[pointKey{device: r.Sample.Device, signal: r.Sample.Signal}]
@@ -149,8 +154,26 @@ func (p *Processor) process(emit func(model.Record), r model.Record) {
 		return
 	}
 
+	p.applyLocked(emit, pc, func() ([]model.Sample, []error) { return pc.chain.Apply(*r.Sample) })
+}
+
+// deviceDownLocked tells the chains of device that it died (ruling R14) and
+// emits what they release, before the death is forwarded. The caller holds
+// p.mu.
+func (p *Processor) deviceDownLocked(emit func(model.Record), device string) {
+	for _, pc := range p.points {
+		if pc.key.device == device {
+			p.applyLocked(emit, pc, pc.chain.deviceDown)
+		}
+	}
+}
+
+// applyLocked runs one operation on a chain, reports its errors, emits what
+// it produced and wakes the deadline goroutine when the chain's deadline
+// moved. The caller holds p.mu.
+func (p *Processor) applyLocked(emit func(model.Record), pc *pointChain, op func() ([]model.Sample, []error)) {
 	before, hadBefore := pc.chain.Deadline()
-	out, errs := pc.chain.Apply(*r.Sample)
+	out, errs := op()
 	p.reportLocked(pc.key, errs)
 
 	for _, s := range out {
@@ -158,10 +181,15 @@ func (p *Processor) process(emit func(model.Record), r model.Record) {
 	}
 
 	if after, hasAfter := pc.chain.Deadline(); hasAfter != hadBefore || !after.Equal(before) {
-		select {
-		case p.rearm <- struct{}{}:
-		default:
-		}
+		p.wakeLocked()
+	}
+}
+
+// wakeLocked makes the deadline goroutine read the deadlines again.
+func (p *Processor) wakeLocked() {
+	select {
+	case p.rearm <- struct{}{}:
+	default:
 	}
 }
 
@@ -216,7 +244,8 @@ func (p *Processor) Close() {
 // NewProcessor.
 func (p *Processor) Errors() uint64 { return p.errors.Load() }
 
-// run waits on the earliest deadline of the chains and fires the due ones.
+// run waits on the earliest deadline of the chains and of the error log, and
+// fires the due ones.
 func (p *Processor) run(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
 
@@ -284,6 +313,10 @@ func (p *Processor) arm() (timer clock.Timer, due, stop bool) {
 		}
 	}
 
+	if d, ok := p.errLog.deadline(); ok && (!found || d.Before(earliest)) {
+		earliest, found = d, true
+	}
+
 	if !found {
 		return nil, false, false
 	}
@@ -307,7 +340,8 @@ func (p *Processor) arm() (timer clock.Timer, due, stop bool) {
 	return timer, false, false
 }
 
-// fire lets the due chains emit what is due now, in configuration order.
+// fire logs the error summary when it is due, then lets the due chains emit
+// what is due now, in configuration order.
 func (p *Processor) fire() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -317,6 +351,7 @@ func (p *Processor) fire() {
 	}
 
 	now := p.clk.Now()
+	p.errLog.flush(now)
 
 	for _, pc := range p.points {
 		if d, ok := pc.chain.Deadline(); !ok || d.After(now) {
@@ -345,9 +380,15 @@ func (p *Processor) reportLocked(key pointKey, errs []error) {
 
 	p.errors.Add(uint64(len(errs)))
 
+	before, hadBefore := p.errLog.deadline()
+
 	now := p.clk.Now()
 	for _, err := range errs {
 		p.errLog.report(now, key, err)
+	}
+
+	if after, hasAfter := p.errLog.deadline(); hasAfter && (!hadBefore || after.Before(before)) {
+		p.wakeLocked()
 	}
 }
 
@@ -367,9 +408,10 @@ type errorKey struct {
 // logged in one summary at most once per errorLogWindow, measured on the
 // processor's clock. errorLogWindow without any error ends the episode: the
 // errors still counted are summarised and the next error is logged in full
-// again. Nothing logged carries a sample value. The
-// owner holds the processor's mutex around every call. Same shape as the
-// buffer's failure log.
+// again. The processor's deadline goroutine wakes at that end (deadline), so
+// the closing summary does not wait for another error or Close. Nothing
+// logged carries a sample value. The owner holds the processor's mutex
+// around every call. Same shape as the buffer's failure log.
 type errorLog struct {
 	log     *slog.Logger
 	inputID string
@@ -418,6 +460,16 @@ func (l *errorLog) report(now time.Time, key pointKey, err error) {
 	l.log.Warn("transform: runtime error, the sample is sent bad",
 		"input", l.inputID, "device", key.device, "signal", key.signal,
 		"step", stepErr.Position, "transform", stepErr.Name, "error", stepErr.Err.Error())
+}
+
+// deadline is when the episode ends if no error comes, while errors are
+// counted and not yet logged: flush then logs their summary.
+func (l *errorLog) deadline() (time.Time, bool) {
+	if l.suppressed == 0 {
+		return time.Time{}, false
+	}
+
+	return l.last.Add(errorLogWindow), true
 }
 
 // flush logs the summary once the window has passed, and ends the episode

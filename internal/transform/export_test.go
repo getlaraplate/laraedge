@@ -1,6 +1,10 @@
 package transform
 
-import "time"
+import (
+	"time"
+
+	"github.com/getlaraplate/laraplate-edge/internal/model"
+)
 
 // NewChain builds a Chain from ready steps, bypassing the catalogue, so tests
 // can drive the chain with fake steps.
@@ -14,3 +18,6 @@ func ArmedDeadline(p *Processor) (time.Time, bool) {
 
 	return p.armed, p.armedOK
 }
+
+// DeviceDown tells the chain's steps that their device died.
+func DeviceDown(c *Chain) ([]model.Sample, []error) { return c.deviceDown() }

@@ -17,6 +17,8 @@ import (
 // Chain.Fire calls every step. A bad sample never reaches Apply (the chain
 // passes it through); deadband, heartbeat, debounce and min_interval see it
 // through observeBad (rulings R9, R10), derivative and edge_counter ignore it.
+// heartbeat, min_interval and debounce also learn of their device's death
+// through deviceDown (ruling R14).
 
 func init() {
 	register("deadband", definition{accepts: acceptNumber, build: buildDeadband})
@@ -169,7 +171,9 @@ func buildDeadband(c buildContext) (Step, error) {
 // sample leaving the step is the last value too, so it is resent bad (ruling
 // R9). The deadline is the period after the later of the ts of the last
 // sample that left and the last clock time seen: a sample a hold-back step
-// emits on Fire carries an old ts, and must not be resent at once.
+// emits on Fire carries an old ts, and must not be resent at once. The death
+// of the device disarms it until the next sample leaves the step (ruling
+// R14): resending would hide that the device is unreachable.
 type heartbeat struct {
 	kind   model.ValueKind
 	period time.Duration
@@ -190,6 +194,12 @@ func (h *heartbeat) Apply(s model.Sample) ([]model.Sample, error) {
 
 func (h *heartbeat) observeBad(s model.Sample) []model.Sample {
 	h.leave(s)
+
+	return nil
+}
+
+func (h *heartbeat) deviceDown() []model.Sample {
+	h.has = false
 
 	return nil
 }
@@ -242,7 +252,9 @@ func buildHeartbeat(c buildContext) (Step, error) {
 // window [ts, ts+interval); samples inside the window are held, keeping only
 // the latest; at the window end the held sample leaves with its own ts and
 // the next window opens; a window that held nothing closes. A bad sample
-// passes at once and drops the held sample, which is older (ruling R10).
+// passes at once and drops the held sample, which is older (ruling R10). The
+// death of the device releases the held sample and closes the window (ruling
+// R14), so the first sample after it passes at once.
 type minInterval struct {
 	kind     model.ValueKind
 	interval time.Duration
@@ -277,6 +289,17 @@ func (m *minInterval) Fire(now time.Time) []model.Sample { return m.advance(now)
 func (m *minInterval) observeBad(s model.Sample) []model.Sample {
 	out := m.advance(s.TS)
 	m.held = nil
+
+	return out
+}
+
+func (m *minInterval) deviceDown() []model.Sample {
+	var out []model.Sample
+	if m.held != nil {
+		out = append(out, *m.held)
+	}
+
+	m.open, m.held = false, nil
 
 	return out
 }
@@ -318,7 +341,8 @@ func buildMinInterval(c buildContext) (Step, error) {
 // last sent value cancels it; the last sent value is not resent. A bad sample
 // cancels the waiting value, which was not seen unchanged for the delay
 // (ruling R10), and becomes the last that left, so the value sent before it
-// is sent again once it stays.
+// is sent again once it stays. The death of the device cancels the waiting
+// value too (ruling R14).
 type debounce struct {
 	kind  model.ValueKind
 	delay time.Duration
@@ -359,6 +383,12 @@ func (d *debounce) observeBad(s model.Sample) []model.Sample {
 	d.pending, d.sent = nil, false
 
 	return out
+}
+
+func (d *debounce) deviceDown() []model.Sample {
+	d.pending = nil
+
+	return nil
 }
 
 // due emits the waiting value when its deadline is at or before t. A sample

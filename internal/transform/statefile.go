@@ -198,6 +198,48 @@ func (s *stateFile) writeLocked() error {
 	return nil
 }
 
+// RemoveStaleInputStates removes the state directory of every input that
+// keep refuses: each directory directly in dataDir/inputs, named after an
+// input id, with everything in it (ruling R15). Nothing else is touched: a
+// file, a symbolic link or anything outside dataDir/inputs stays. It returns
+// the ids removed, in name order; a missing dataDir/inputs is not an error.
+// A directory that cannot be removed is reported in the error and the others
+// are still removed. The caller makes sure no processor of a removed input
+// is running.
+func RemoveStaleInputStates(dataDir string, keep func(inputID string) bool) ([]string, error) {
+	root := filepath.Join(dataDir, "inputs")
+
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("transform: list input states: %w", err)
+	}
+
+	var (
+		removed []string
+		errs    []error
+	)
+
+	for _, e := range entries {
+		if !e.IsDir() || keep(e.Name()) {
+			continue
+		}
+
+		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+			errs = append(errs, fmt.Errorf("transform: remove input state: %w", err))
+
+			continue
+		}
+
+		removed = append(removed, e.Name())
+	}
+
+	return removed, errors.Join(errs...)
+}
+
 // counterStore is the Store of one step, backed by the input's state file.
 type counterStore struct {
 	file *stateFile
