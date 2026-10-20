@@ -15,8 +15,8 @@ import (
 // deadlines are computed from sample timestamps, and Fire receives the clock
 // time from the chain's owner. Fire checks the step's own deadline, because
 // Chain.Fire calls every step. A bad sample never reaches Apply (the chain
-// passes it through), so it does not touch a step's state; deadband sees it
-// through observeBad, because a quality change is a reason to send.
+// passes it through); deadband, heartbeat, debounce and min_interval see it
+// through observeBad (rulings R9, R10), derivative and edge_counter ignore it.
 
 func init() {
 	register("deadband", definition{accepts: acceptNumber, build: buildDeadband})
@@ -113,15 +113,21 @@ func (d *deadband) moved(v float64) bool {
 
 	diff := math.Abs(v - d.last)
 
-	return diff > 0 && diff >= threshold
+	return diff > 0 && diff >= threshold*(1-thresholdTolerance)
 }
+
+// thresholdTolerance absorbs the rounding of a float subtraction, so a change
+// of exactly the threshold passes (0.3 - 0.2 is 0.09999999999999998).
+const thresholdTolerance = 1e-9
 
 // observeBad records that a bad sample left the step: the next good sample is
 // a quality change.
-func (d *deadband) observeBad(model.Sample) {
+func (d *deadband) observeBad(model.Sample) []model.Sample {
 	if d.sent {
 		d.lastQual = model.Bad
 	}
+
+	return nil
 }
 
 func buildDeadband(c buildContext) (Step, error) {
@@ -159,8 +165,11 @@ func buildDeadband(c buildContext) (Step, error) {
 // --- heartbeat ---
 
 // heartbeat passes every sample and, when nothing left the step for the
-// period, resends the last value with the clock time and its quality. The
-// deadline is the ts of the last sample that left plus the period.
+// period, resends the last value with the clock time and its quality. A bad
+// sample leaving the step is the last value too, so it is resent bad (ruling
+// R9). The deadline is the period after the later of the ts of the last
+// sample that left and the last clock time seen: a sample a hold-back step
+// emits on Fire carries an old ts, and must not be resent at once.
 type heartbeat struct {
 	kind   model.ValueKind
 	period time.Duration
@@ -168,19 +177,44 @@ type heartbeat struct {
 	has      bool
 	last     model.Sample
 	deadline time.Time
+	lastNow  time.Time
 }
 
 func (h *heartbeat) OutKind() model.ValueKind { return h.kind }
 
 func (h *heartbeat) Apply(s model.Sample) ([]model.Sample, error) {
-	h.has, h.last, h.deadline = true, s, s.TS.Add(h.period)
+	h.leave(s)
 
 	return []model.Sample{s}, nil
+}
+
+func (h *heartbeat) observeBad(s model.Sample) []model.Sample {
+	h.leave(s)
+
+	return nil
+}
+
+func (h *heartbeat) observeNow(now time.Time) {
+	if now.After(h.lastNow) {
+		h.lastNow = now
+	}
+}
+
+// leave records s as the last sample that left and arms the deadline.
+func (h *heartbeat) leave(s model.Sample) {
+	from := s.TS
+	if h.lastNow.After(from) {
+		from = h.lastNow
+	}
+
+	h.has, h.last, h.deadline = true, s, from.Add(h.period)
 }
 
 func (h *heartbeat) Deadline() (time.Time, bool) { return h.deadline, h.has }
 
 func (h *heartbeat) Fire(now time.Time) []model.Sample {
+	h.observeNow(now)
+
 	if !h.has || now.Before(h.deadline) {
 		return nil
 	}
@@ -207,7 +241,8 @@ func buildHeartbeat(c buildContext) (Step, error) {
 // (ruling R7). The first sample of a quiet period passes at once and opens a
 // window [ts, ts+interval); samples inside the window are held, keeping only
 // the latest; at the window end the held sample leaves with its own ts and
-// the next window opens; a window that held nothing closes.
+// the next window opens; a window that held nothing closes. A bad sample
+// passes at once and drops the held sample, which is older (ruling R10).
 type minInterval struct {
 	kind     model.ValueKind
 	interval time.Duration
@@ -238,6 +273,13 @@ func (m *minInterval) Apply(s model.Sample) ([]model.Sample, error) {
 func (m *minInterval) Deadline() (time.Time, bool) { return m.end, m.open && m.held != nil }
 
 func (m *minInterval) Fire(now time.Time) []model.Sample { return m.advance(now) }
+
+func (m *minInterval) observeBad(s model.Sample) []model.Sample {
+	out := m.advance(s.TS)
+	m.held = nil
+
+	return out
+}
 
 // advance ends every window that ended at or before t, emitting what each
 // held. A sample at or after the window end therefore leaves the held sample
@@ -273,7 +315,10 @@ func buildMinInterval(c buildContext) (Step, error) {
 
 // debounce sends a value only after it stayed unchanged for the delay, with
 // the ts of its change. A different value restarts the wait; a return to the
-// last sent value cancels it; the last sent value is not resent.
+// last sent value cancels it; the last sent value is not resent. A bad sample
+// cancels the waiting value, which was not seen unchanged for the delay
+// (ruling R10), and becomes the last that left, so the value sent before it
+// is sent again once it stays.
 type debounce struct {
 	kind  model.ValueKind
 	delay time.Duration
@@ -308,6 +353,13 @@ func (d *debounce) Deadline() (time.Time, bool) {
 }
 
 func (d *debounce) Fire(now time.Time) []model.Sample { return d.due(now) }
+
+func (d *debounce) observeBad(s model.Sample) []model.Sample {
+	out := d.due(s.TS)
+	d.pending, d.sent = nil, false
+
+	return out
+}
 
 // due emits the waiting value when its deadline is at or before t. A sample
 // at or after the deadline therefore sends the waiting value first, whether

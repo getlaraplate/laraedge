@@ -221,6 +221,24 @@ func TestDeadband(t *testing.T) {
 			},
 		},
 		{
+			// 0.3 - 0.2 is 0.09999999999999998 in float64: an exact step of
+			// the threshold still passes.
+			name: "exact step despite float subtraction", steps: []config.Transform{step("deadband", "0.1")}, in: model.KindFloat,
+			events: []event{
+				apply(0, f64(0.2), good(0, f64(0.2))),
+				apply(time.Second, f64(0.29)),
+				apply(2*time.Second, f64(0.3), good(2*time.Second, f64(0.3))),
+				apply(3*time.Second, f64(0.2), good(3*time.Second, f64(0.2))),
+			},
+		},
+		{
+			name: "exact percent step despite float subtraction", steps: []config.Transform{step("deadband", `"50%"`)}, in: model.KindFloat,
+			events: []event{
+				apply(0, f64(0.2), good(0, f64(0.2))),
+				apply(time.Second, f64(0.3), good(time.Second, f64(0.3))),
+			},
+		},
+		{
 			name: "zero threshold sends every change", steps: []config.Transform{step("deadband", "0")}, in: model.KindFloat,
 			events: []event{
 				apply(0, f64(1), good(0, f64(1))),
@@ -364,6 +382,9 @@ func TestDerivative(t *testing.T) {
 				apply(15*time.Second, f64(70)),
 				apply(20*time.Second, f64(80), good(20*time.Second, f64(2.0))),
 				apply(30*time.Second, f64(80), good(30*time.Second, f64(0))),
+				// A timestamp before the previous one: nothing, new baseline.
+				apply(25*time.Second, f64(90)),
+				apply(30*time.Second, f64(100), good(30*time.Second, f64(2.0))),
 			},
 		},
 		{
@@ -555,7 +576,7 @@ func TestEdgeCounterAsksTheFactoryForItsStore(t *testing.T) {
 	}
 }
 
-func TestBadInputDoesNotTouchStatefulTransforms(t *testing.T) {
+func TestBadInputThroughStatefulTransforms(t *testing.T) {
 	bad := func(at time.Duration, v model.Value, kind model.ValueKind) event {
 		zero := model.Value{Kind: kind}
 		if v.Kind == kind {
@@ -567,29 +588,67 @@ func TestBadInputDoesNotTouchStatefulTransforms(t *testing.T) {
 
 	runStateful(t, []statefulCase{
 		{
-			// The deadline stays where the last good sample set it.
-			name: "heartbeat", steps: []config.Transform{step("heartbeat", `"10s"`)}, in: model.KindFloat,
+			// R9: a bad sample leaving the step is the last value; the
+			// heartbeat resends it bad, with the clock time.
+			name: "heartbeat resends a bad sample", steps: []config.Transform{step("heartbeat", `"10s"`)}, in: model.KindFloat,
 			events: []event{
 				apply(0, f64(5), good(0, f64(5))),
-				bad(5*time.Second, f64(7), model.KindFloat).expectDeadline(deadlineAt(10 * time.Second)),
-				fire(10*time.Second, good(10*time.Second, f64(5))),
+				bad(5*time.Second, f64(7), model.KindFloat).expectDeadline(deadlineAt(15 * time.Second)),
+				fire(10 * time.Second),
+				fire(15*time.Second, out{15 * time.Second, f64(7), model.Bad}),
+				apply(17*time.Second, f64(6), good(17*time.Second, f64(6))).expectDeadline(deadlineAt(27 * time.Second)),
+				fire(27*time.Second, good(27*time.Second, f64(6))),
 			},
 		},
 		{
-			name: "min_interval", steps: []config.Transform{step("min_interval", `"1s"`)}, in: model.KindFloat,
+			// R10: a bad sample passes at once and drops the held sample.
+			name: "min_interval drops the held sample", steps: []config.Transform{step("min_interval", `"1s"`)}, in: model.KindFloat,
 			events: []event{
 				apply(0, f64(1), good(0, f64(1))),
-				bad(500*ms, f64(2), model.KindFloat).expectDeadline(noDeadline),
-				apply(700*ms, f64(3)).expectDeadline(deadlineAt(time.Second)),
-				fire(time.Second, good(700*ms, f64(3))),
+				apply(500*ms, f64(2)).expectDeadline(deadlineAt(time.Second)),
+				bad(700*ms, f64(9), model.KindFloat).expectDeadline(noDeadline),
+				fire(time.Second),
+				// The window held nothing and closed: 3 passes at once.
+				apply(1500*ms, f64(3), good(1500*ms, f64(3))),
 			},
 		},
 		{
-			name: "debounce", steps: []config.Transform{step("debounce", `"2s"`)}, in: model.KindFloat,
+			// A held sample whose window ended before the bad sample leaves
+			// first, whether or not Fire ran in time.
+			name: "min_interval window ended before the bad sample", steps: []config.Transform{step("min_interval", `"1s"`)}, in: model.KindFloat,
+			events: []event{
+				apply(0, f64(1), good(0, f64(1))),
+				apply(500*ms, f64(2)),
+				apply(1200*ms, f64(9), good(500*ms, f64(2)), out{1200 * ms, f64(9), model.Bad}).withQuality(model.Bad).expectDeadline(noDeadline),
+			},
+		},
+		{
+			// R10: a bad sample cancels the waiting value, which was not seen
+			// unchanged for the delay.
+			name: "debounce cancels the waiting value", steps: []config.Transform{step("debounce", `"2s"`)}, in: model.KindFloat,
 			events: []event{
 				apply(0, f64(1)),
-				bad(time.Second, f64(2), model.KindFloat).expectDeadline(deadlineAt(2 * time.Second)),
+				bad(time.Second, f64(2), model.KindFloat).expectDeadline(noDeadline),
+				fire(2 * time.Second),
+			},
+		},
+		{
+			name: "debounce deadline reached before the bad sample", steps: []config.Transform{step("debounce", `"2s"`)}, in: model.KindFloat,
+			events: []event{
+				apply(0, f64(1)),
+				apply(2500*ms, f64(2), good(0, f64(1)), out{2500 * ms, f64(2), model.Bad}).withQuality(model.Bad).expectDeadline(noDeadline),
+			},
+		},
+		{
+			// After a bad sample the last value that left is bad, so the
+			// value sent before it is sent again once it stays.
+			name: "debounce resends after bad", steps: []config.Transform{step("debounce", `"2s"`)}, in: model.KindFloat,
+			events: []event{
+				apply(0, f64(1)),
 				fire(2*time.Second, good(0, f64(1))),
+				bad(3*time.Second, f64(0), model.KindFloat),
+				apply(4*time.Second, f64(1)).expectDeadline(deadlineAt(6 * time.Second)),
+				fire(6*time.Second, good(4*time.Second, f64(1))),
 			},
 		},
 		{
@@ -683,6 +742,20 @@ func TestTimeDrivenStepFeedsTheNextStep(t *testing.T) {
 			fire(2*time.Second, good(0, i64(0))),
 			apply(3*time.Second, boolean(true)),
 			fire(5*time.Second, good(3*time.Second, i64(1))),
+		},
+	})
+}
+
+// TestHeartbeatAfterAHoldBackStep checks that a sample a hold-back step emits
+// on Fire, with an old ts, arms the heartbeat from the clock time instead of
+// being resent at once.
+func TestHeartbeatAfterAHoldBackStep(t *testing.T) {
+	runEvents(t, statefulCase{
+		steps: []config.Transform{step("debounce", `"2s"`), step("heartbeat", `"1s"`)}, in: model.KindInt,
+		events: []event{
+			apply(0, i64(1)),
+			fire(2*time.Second, good(0, i64(1))).expectDeadline(deadlineAt(3 * time.Second)),
+			fire(3*time.Second, good(3*time.Second, i64(1))).expectDeadline(deadlineAt(4 * time.Second)),
 		},
 	})
 }

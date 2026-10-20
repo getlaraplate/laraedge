@@ -97,9 +97,18 @@ func (e *StepError) Error() string {
 func (e *StepError) Unwrap() error { return e.Err }
 
 // badObserver is implemented by a step that must know a bad sample passed
-// through it uncomputed (deadband: a quality change is a reason to send).
+// through it uncomputed: deadband (a quality change is a reason to send),
+// heartbeat (the bad sample is the last value), debounce and min_interval
+// (the bad sample cancels what they hold). It returns what was due at the
+// bad sample's ts, which leaves the step before it.
 type badObserver interface {
-	observeBad(s model.Sample)
+	observeBad(s model.Sample) []model.Sample
+}
+
+// clockObserver is implemented by a step that must know the clock time of a
+// Fire before samples emitted by earlier steps in that Fire reach it.
+type clockObserver interface {
+	observeNow(now time.Time)
 }
 
 type stage struct {
@@ -158,12 +167,19 @@ func (c *Chain) Deadline() (time.Time, bool) {
 }
 
 // Fire lets every step emit what is due at now; what a step emits flows
-// through the steps after it.
+// through the steps after it. Every step learns now before any sample of
+// this Fire reaches it.
 func (c *Chain) Fire(now time.Time) ([]model.Sample, []error) {
 	var (
 		out  []model.Sample
 		errs []error
 	)
+
+	for _, st := range c.stages {
+		if o, ok := st.step.(clockObserver); ok {
+			o.observeNow(now)
+		}
+	}
 
 	for i, st := range c.stages {
 		if emitted := st.step.Fire(now); len(emitted) > 0 {
@@ -217,7 +233,7 @@ func (c *Chain) run(from int, in []model.Sample, errs *[]error) []model.Sample {
 		for _, s := range cur {
 			if s.Quality == model.Bad {
 				if o, ok := st.step.(badObserver); ok {
-					o.observeBad(s)
+					next = append(next, o.observeBad(s)...)
 				}
 
 				next = append(next, s)
