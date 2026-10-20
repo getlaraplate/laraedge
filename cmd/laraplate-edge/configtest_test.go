@@ -352,6 +352,12 @@ func TestReplayHeartbeat(t *testing.T) {
 			want:  "00.000=1,01.000=1,02.000=1,03.000=1,03.500=2,04.500=2",
 		},
 		{
+			name:  "a deadline equal to a sample's ts comes after the sample, as in the live processor",
+			chain: `[{heartbeat: 1s}]`,
+			in:    []string{"00.000=1", "01.000=2"},
+			want:  "00.000=1,01.000=2,02.000=2",
+		},
+		{
 			name:  "the longest period of the document sets the horizon",
 			chain: `[{heartbeat: 1s}, {min_interval: 2500ms}]`,
 			in:    []string{"00.000=1"},

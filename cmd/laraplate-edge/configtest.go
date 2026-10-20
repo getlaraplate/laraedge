@@ -138,9 +138,11 @@ type replayer struct {
 // of the steps (each also visible as a bad sample).
 //
 // The clock starts at the first sample's ts. Before a sample later than the
-// clock, every deadline up to its ts fires in time order, the clock moving to
-// each deadline (ruling R12: a heartbeat repeats across a gap; chains due at
-// the same instant fire in document order). A sample earlier than the clock
+// clock, every deadline strictly before its ts fires in time order, the clock
+// moving to each deadline (ruling R12: a heartbeat repeats across a gap;
+// chains due at the same instant fire in document order); a deadline equal to
+// the sample's ts is handled after the sample is applied, as the live
+// processor does (a heartbeat the sample re-arms resends nothing). A sample earlier than the clock
 // is applied at the current time, the clock never moves back (R4). After the
 // last sample the deadlines fire up to a horizon: the later of the last
 // sample's ts and the clock, plus the longest duration among the heartbeat,
@@ -174,7 +176,7 @@ func replay(doc config.Document, samples []model.Sample, maxFires int) ([]model.
 	}
 
 	for _, s := range samples {
-		if err := r.advanceTo(s.TS); err != nil {
+		if err := r.advanceTo(s.TS, false); err != nil {
 			return nil, 0, err
 		}
 
@@ -195,7 +197,7 @@ func replay(doc config.Document, samples []model.Sample, maxFires int) ([]model.
 		horizon = now
 	}
 
-	if err := r.advanceTo(horizon.Add(longestPeriod(doc))); err != nil {
+	if err := r.advanceTo(horizon.Add(longestPeriod(doc)), true); err != nil {
 		return nil, 0, err
 	}
 
@@ -233,11 +235,12 @@ func longestPeriod(doc config.Document) time.Duration {
 }
 
 // advanceTo moves the virtual clock to t, firing on the way every deadline
-// up to t in time order. It never moves the clock back.
-func (r *replayer) advanceTo(t time.Time) error {
+// before t in time order, and a deadline at t too when inclusive. It never
+// moves the clock back.
+func (r *replayer) advanceTo(t time.Time, inclusive bool) error {
 	for {
 		earliest, pending := r.earliest()
-		if !pending || earliest.After(t) {
+		if !pending || earliest.After(t) || (!inclusive && earliest.Equal(t)) {
 			break
 		}
 
