@@ -62,6 +62,8 @@ type Step interface {
 	OutKind() model.ValueKind
 	// Apply transforms one sample. A stateless step returns zero or one
 	// sample; a step that holds samples back returns none and emits later.
+	// A time-driven step whose deadline the sample's ts reached first returns
+	// what was due, so it may return more than one sample.
 	// An error is a runtime error of the step: the chain turns it into a bad
 	// sample. The error text must not contain the sample value.
 	Apply(s model.Sample) (out []model.Sample, err error)
@@ -93,6 +95,12 @@ func (e *StepError) Error() string {
 
 // Unwrap returns the cause.
 func (e *StepError) Unwrap() error { return e.Err }
+
+// badObserver is implemented by a step that must know a bad sample passed
+// through it uncomputed (deadband: a quality change is a reason to send).
+type badObserver interface {
+	observeBad(s model.Sample)
+}
 
 type stage struct {
 	name string
@@ -208,6 +216,10 @@ func (c *Chain) run(from int, in []model.Sample, errs *[]error) []model.Sample {
 
 		for _, s := range cur {
 			if s.Quality == model.Bad {
+				if o, ok := st.step.(badObserver); ok {
+					o.observeBad(s)
+				}
+
 				next = append(next, s)
 
 				continue

@@ -73,9 +73,9 @@ created_on: 2026-10-19
 - Consumes: Task 1's `Step`, `Compile`, `StateFactory`.
 - Produces: the steps registered in the catalogue so `Compile` builds them; `edge_counter` keeps its count in memory when the factory is nil.
 
-- [ ] **Step 1: Failing tests** (fake clock where time matters). `deadband: 0.5`: 10.0, 10.3 (dropped), 10.6 (sent), quality change at 10.6 (sent); `deadband: "5%"`: after 100, 104 dropped, 106 sent; after a sent 0, 0.001 sent (P5). `heartbeat: 10s`: one sample then nothing → the same value resent at +10s with the clock time; a new sample resets the deadline. `min_interval: 1s`: three samples in one window → only the last, at the window end, with its own ts. `debounce: 2s`: 1, 0 (+0.5s), 1 (+1s) → nothing until 1 stays for 2s → 1 with the ts of its change. `derivative`: 100 at t, 110 at t+5s → 2.0; first sample → nothing; 50 after 110 (reset) → nothing. `edge_counter: rising`: false, true, false, true → 1, 2; `both` → 1, 2, 3; starts from the store's value; `Save` called on every increment.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run** `go test -race ./internal/transform`; commit.
+- [x] **Step 1: Failing tests** (fake clock where time matters). `deadband: 0.5`: 10.0, 10.3 (dropped), 10.6 (sent), quality change at 10.6 (sent); `deadband: "5%"`: after 100, 104 dropped, 106 sent; after a sent 0, 0.001 sent (P5). `heartbeat: 10s`: one sample then nothing → the same value resent at +10s with the clock time; a new sample resets the deadline. `min_interval: 1s`: three samples in one window → only the last, at the window end, with its own ts. `debounce: 2s`: 1, 0 (+0.5s), 1 (+1s) → nothing until 1 stays for 2s → 1 with the ts of its change. `derivative`: 100 at t, 110 at t+5s → 2.0; first sample → nothing; 50 after 110 (reset) → nothing. `edge_counter: rising`: false, true, false, true → 1, 2; `both` → 1, 2, 3; starts from the store's value; `Save` called on every increment.
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run** `go test -race ./internal/transform`; commit.
 
 ### Task 3: Processor
 
