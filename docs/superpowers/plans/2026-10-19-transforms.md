@@ -1,12 +1,12 @@
 ---
-status: open
+status: closed
 created_on: 2026-10-19
 ---
 # Level-1 transforms. Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block.
 
-**Status:** In progress (subagent-driven execution, branch develop).
+**Status:** Closed (2026-10-20): delivered on branch develop, see "Delivery status" at the end.
 
 **Goal:** the agent applies the whole level-1 transform catalogue to every point, type-checked when a document is applied, with `probe` and `config test` for technicians.
 
@@ -131,6 +131,123 @@ created_on: 2026-10-19
 
 **Files:** modify `internal/e2e/e2e_test.go` (a run with transforms), `examples/simulated/config.yaml` (a commented transform example), `docs/CONFIGURATION.md` (transforms section: catalogue table, kinds, birth data type, runtime errors, state file; remove "transforms not available in this build"), `docs/USAGE.md` (`probe`, `config test`, the new metric, the state file in the data_dir layout), this plan, `docs/superpowers/plans/INDEX.md`, `docs/superpowers/specs/INDEX.md`.
 
-- [ ] **Step 1: End to end.** The built binary with the simulated example plus `map` on `state` (to an integer code), `scale` and `deadband` on a measurement: the fake backend receives the mapped and scaled values, every envelope validates against the backend schema, births carry the chain's data types.
-- [ ] **Step 2: Docs.**
-- [ ] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, both indexes; commit.
+- [x] **Step 1: End to end.** The built binary with the simulated example plus `map` on `state` (to an integer code), `scale` and `deadband` on a measurement: the fake backend receives the mapped and scaled values, every envelope validates against the backend schema, births carry the chain's data types.
+- [x] **Step 2: Docs.**
+- [x] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, both indexes; commit.
+
+## Delivery status (2026-10-20): shipped
+
+All seven tasks are built on branch `develop`, each reviewed, after a Task 0 the plan did not have. The
+agent applies the whole level-1 catalogue of spec section 4 to the points of every input: a processor
+per input instance wraps the input's emit, applies the chains, serves the time-driven steps with one
+goroutine on the injected clock and persists the `edge_counter` counts in
+`data_dir/inputs/{id}/transform-state.json`. Chains are type-checked by `config validate` and before
+every apply (a refused chain rejects the document), births announce the data type of the chain's output,
+runtime errors send the sample `bad` and are counted in `laraplate_edge_transform_errors_total{input}` and
+`/status` `transform_errors`, and `probe` and `config test` let a technician try a chain offline. The
+end-to-end test runs the built binary with `map` on `state` and `scale` plus `deadband` on `press_force`
+and checks every transformed sample against a companion point without a chain on the same address.
+Commits from `7ecb149` to `fe5b7bb`, and the closing commit. The divergences from the plan text, each with its
+reason (the rulings are in "Controller rulings" below):
+
+- **Task 0 added (R1).** The three CI failures of master were fixed first: `govulncheck` v1.9.0 instead
+  of v1.1.4, whose `x/tools` panicked on Go 1.27 syntax; `atomicfile.SyncDir` of a missing directory is
+  an error on Windows too; the flaky supervisor test counts a resent unconfirmed batch once (the resend
+  during an output restart is the legitimate at-least-once behaviour, not a defect).
+- **Module path (R0).** `github.com/getlaraplate/laraplate-edge`, not the `swolley` path of the Global
+  Constraints.
+- **Chain exit (R5, Task 1).** Every sample leaving a chain has the chain's output kind: a `bad` sample of
+  another kind leaves with the zero value of that kind (its original value is lost), a good integer
+  leaving a float chain becomes a float. The plan said only that a bad sample passes unchanged.
+- **`map` numbers (R6, Task 1).** Integers and floats in one table unify to float; the plan's "mixed
+  value kinds refused" now means booleans, numbers and strings mixed. The spec section 4 note was added.
+  `round` decides ties on the decimal digits as written (`1.005` to `1.01`), and a float `-0` result is
+  normalised to `0`.
+- **`min_interval` (R7, Task 2).** The first sample of a quiet period passes at once; then at most one
+  sample per interval, the latest of the window at its end. The plan's Task 2 test ("three samples in one
+  window: only the last") and the spec's wording describe the window without the immediate first sample.
+- **`edge_counter` (R8, Task 2).** The first sample after a start emits the current count as a baseline
+  (`false, true, false, true` with `rising` gives 0, 1, 2, where the plan's Task 2 test says 1, 2).
+- **`heartbeat` (R9, Task 2).** A `bad` sample that left the step is the last value and is resent `bad`;
+  the wait counts from the later of the last sample's ts and the last Fire time, so a sample released
+  late by a hold-back step is not resent at once.
+- **`debounce` and `min_interval` with `bad` samples (R10, Task 2).** A `bad` sample cancels the value
+  `debounce` waits on and makes it forget its last sent value (so the value coming back is sent again);
+  in `min_interval` it passes at once and drops the held sample, and a good sample after it, in the still
+  open window, waits for the window's end.
+- **Step hooks (Task 2).** Two unexported optional interfaces the plan's `Step` interface does not name:
+  `badObserver` (the steps that must see a `bad` sample passing uncomputed) and `clockObserver` (the
+  steps that must know the time of a `Fire` before samples of earlier steps reach them). `deadband`
+  compares with a relative tolerance of 1e-9, so a change of exactly the threshold passes.
+- **Lock order (R2, Task 3).** Task 3 step 2 says the processor is inside the instance mutex; it is
+  before it: processor, input instance, router, buffer. The processor holds its lock while it calls the
+  downstream emit.
+- **Pruning (R11, Task 3).** `NewProcessor` drops the counts no current chain requests and `Start` writes
+  the pruned file, so a reverted step restarts at 0 instead of resuming an old, higher count. A negative
+  count makes the file corrupt (P3). `NewProcessor` with an empty `dataDir` keeps no state (unit tests;
+  the supervisor always passes its data directory). Runtime errors are logged with a rate limit per
+  device, signal and step, in episodes ended by a quiet minute.
+- **Supervisor (Task 5).** The error count of an input survives its restarts (closed processors' counts
+  are kept); an abandoned start closes its processor at once, so two live processors never share a state
+  file.
+- **`config test` (R4, R12, Task 6).** Samples are applied in file order; a sample earlier than the
+  virtual clock is applied at the clock's time. Between samples every deadline up to the next sample's
+  ts fires in time order (a heartbeat repeats across a gap); after the last sample deadlines fire up to a
+  horizon of the later of the last ts and the clock plus the longest time-driven duration of the
+  document, replacing P7's "flushes pending time-driven steps at the end". A replay above 1,000,000
+  firings exits 1. The runtime error count goes to stderr with exit 0. `probe` takes `--config` over
+  `--bootstrap` when both are given and prints tab-separated lines.
+- **Task 7.** The end-to-end test adds companion points without a chain (`state_text`,
+  `press_force_kn`) to check each transformed value exactly; the simulated example carries the chain
+  commented (the running demo keeps sending the raw values), checked by hand with `config validate`,
+  `probe --record` and `config test`, and its unit test now also runs `CheckDocument`; `README.md` was
+  updated besides the planned files.
+
+Deferred minors, left as they are (from the reviews):
+
+- fake backend: deduplicates by `message_id` only, answers `202` to a resend (the real one `200
+  duplicate`); an assertion right after a birth count cannot see a later duplicate (Task 0);
+- `valid_range` compares integers as floats, exact to 2^53 (documented as a known limit); parameter
+  parsing accepts `3.0` as an integer; the `Chain.Apply` doc comment and a test comment predate R5; `-0`
+  is still reachable through `regex_extract` with `as: float` and a `map` float literal (Task 1);
+- `heartbeat` keeps the latest clock time seen only forward: a backward step of the agent's clock
+  delays it by the step (documented as a known limit) (Task 2);
+- a fake-clock window between `Now` and `NewTimer` (test only); the "Close while due" test takes one of
+  two correct paths; a dead `downstream == nil` branch in `fire`; a failed write of the pruned file
+  leaves stale counts on disk until the next count (logged, and in the troubleshooting table) (Task 3);
+- `OutputDataType` compiles the chain on every call (router events); names that do not have the key
+  shape, such as `press-07`, are shown as `*` (documented: the path locates the chain); no
+  `CheckDocument` assertion on the spec 5.3 fixture; no exponent or out-of-range cases in
+  `TestSchemaAndCompileAgree`; `map` table keys of the key shape appear in schema error paths
+  (documented) (Task 4);
+- an unreachable `NewProcessor` failure would leak the built input and show unfiltered names; a timeout
+  subtest calls `t.Fatal` off the test goroutine; the metric's HELP wording; the series of a removed
+  input disappears (documented) (Task 5);
+- `ReadSamples` matches keys case-insensitively and has no total size cap; `parseArgs` re-reads flags
+  after `--` (Task 6);
+- the schema's `min_interval` description and spec section 4 still word `min_interval`, `heartbeat` and
+  `edge_counter` as before R7 to R9; the documentation describes the delivered behaviour.
+
+Open, awaiting the user: `golang.org/x/text` v0.14.0 (indirect) has two vulnerabilities the code does not
+call; upgrading it changes `go.mod` and needs approval (Task 0).
+
+**Documented in:** `docs/CONFIGURATION.md`, `docs/USAGE.md` (and `README.md`).
+
+## Controller rulings (subagent-driven execution, 2026-10-20)
+
+Every ruling the controller took while executing this plan, copied verbatim from its execution ledger,
+with what each costs if wrong. The Delivery status above cites them by number.
+
+- R0 Ruling: module path is github.com/getlaraplate/laraplate-edge (user commit 302db2a); the plan's constraint naming swolley is outdated — cost: none.
+- R1 Ruling: fix the three CI causes first, as Task 0 on develop, before the plan's Task 1 — red CI is the user's pain point and each later task's CI evidence depends on it — cost: one extra small task.
+- R2 Ruling: lock order is processor -> input instance -> router -> buffer. The processor holds its own lock while it calls the downstream emit, so samples of one signal keep their order across the input's goroutines and the deadline goroutine (parent 6.2); nothing downstream calls back into the processor. Task 3 step 2's "inside the instance mutex" is wrong and is corrected in the dispatch — cost: emits of one input serialize on the processor lock (they already serialize on the instance mutex).
+- R3 Ruling: package transform imports config, model, clock, atomicfile only; input imports transform (for OutputDataType) — never the reverse — cost: none.
+- R4 Ruling: config test processes samples in file order; a sample whose ts is earlier than the virtual clock does not move the clock back (it is applied at the current virtual time); documented — cost: time-driven steps on unordered files behave as if late.
+- R5 Ruling: chain-exit invariant — every sample leaving Chain.Apply/Fire has Value.Kind == Chain.OutKind(): a bad sample of another kind gets the zero value of OutKind (other fields kept); a good integer leaving a float chain is converted to float — consumers (Task 3, encoder, births) can rely on it — cost: a bad sample's original value is lost when its kind differs.
+- R6 Ruling: map values (and default) of the numeric family unify: any float -> float kind with integers promoted; all integers -> integer kind; spec section 4 gets the note "integers and floats unify to float" in Task 7 — cost: none.
+- R7 Ruling: min_interval passes the first sample of a quiet period at once and emits the latest held sample at the window end (plan's "only the last" test adjusted) — lower latency, still at most one emission per interval after the first — cost: plan wording diverges, record in delivery status.
+- R8 Ruling: edge_counter emits its current count as a baseline on the first sample after start, then the new count on each counted edge — backend baseline semantics (first cumulative sample = delta 0) — cost: one extra sample per start.
+- R9 Ruling: heartbeat observes bad samples: a bad sample leaving the step becomes `last` and re-arms the deadline (ts + D), so heartbeat resends what actually went out (bad stays bad) — spec "resends the last value" and context rule 3 — cost: none.
+- R10 Ruling: a bad sample passing debounce cancels the pending value (it was not seen unchanged for D); in min_interval a bad sample passes at once and drops the held older sample — a bad source never looks good after the fact — cost: a good value held just before a bad one is not sent.
+- R11 Ruling: NewProcessor prunes in memory every counter key not requested by the current document's chains and persists the pruned map at Start — pruning only errs toward a reset, which the backend handles — cost: a step removed and re-added starts from 0.
+- R12 Ruling (amends task-6-context item 3): between samples, fire every deadline <= the next sample's ts in time order, advancing the virtual clock to each (heartbeats repeat across gaps); at the end, fire deadlines in time order up to last sample ts + the longest duration parameter of the document's time-driven steps, then stop (terminates with heartbeats; flushes debounce/min_interval) — cost: heartbeat output after the last sample is bounded by that horizon.

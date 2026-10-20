@@ -1,7 +1,7 @@
 # Transforms, Modbus and OPC UA drivers: design
 
-**Status:** Approved (2026-10-19), section by section. Not built. Three implementation plans follow, in order:
-transforms, `modbus`, `opcua` (section 7).
+**Status:** Approved (2026-10-19), section by section. Transforms delivered (2026-10-20) by the plan
+`../plans/2026-10-19-transforms.md`; the `modbus` and `opcua` plans follow, in that order (section 7).
 
 **Date:** 2026-10-19
 
@@ -80,7 +80,10 @@ JSON Schema gains the exact parameters of every transform, so `config validate` 
 | `regex_extract` | `{pattern, group?, as?}` | string → string, integer or float | RE2 (linear time); `group` defaults to 1; `as` (`string`, `integer`, `float`) converts the capture; no match or a failed conversion is a runtime error |
 
 `as` in `regex_extract` and the missing-key rule of `map` are additions to the parent: without `as` a reading
-taken from a serial gauge would stay text. The catalogue only grows: an existing transform never changes
+taken from a serial gauge would stay text.
+
+Integers and floats in a `map` unify to float: a table (with its default) holding any float produces floats,
+the integers promoted; only integers produce an integer (ruling R6 of the transforms plan). The catalogue only grows: an existing transform never changes
 behaviour; a variant takes a new name (parent 7.2).
 
 ## 5. Modbus driver

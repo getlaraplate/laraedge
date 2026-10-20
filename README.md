@@ -6,14 +6,15 @@ measurement files, and delivers their samples to Laraplate over the `laraplate-m
 
 The agent core is built: the `simulated` input driver, the `laraplate-http` output, a durable disk
 buffer per output with loss markers, versioned configuration from a local file or from Laraplate, a
-local status endpoint with Prometheus metrics, JSON logs and the systemd watchdog. Real drivers,
-transforms, the MQTT output, plugins and packages come with later plans. The design lives in the
+local status endpoint with Prometheus metrics, JSON logs and the systemd watchdog. The level-1
+transforms of points are built too, with `probe` and `config test` to try them offline. Real drivers,
+derived signals, the MQTT output, plugins and packages come with later plans. The design lives in the
 Laraplate stack: `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
-- [docs/USAGE.md](docs/USAGE.md): build, run, bootstrap file, signals, status endpoint and metrics,
-  logs, systemd, troubleshooting.
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md): the configuration document, the buffer and the known
-  limits of this build.
+- [docs/USAGE.md](docs/USAGE.md): build, run, bootstrap file, signals, `probe` and `config test`, status
+  endpoint and metrics, logs, systemd, troubleshooting.
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md): the configuration document, the transforms, the buffer
+  and the known limits of this build.
 
 ## Build and run
 
@@ -25,7 +26,8 @@ go build -o laraplate-edge ./cmd/laraplate-edge
 cd examples/simulated && LARAPLATE_EDGE_TOKEN=... ../../laraplate-edge run --bootstrap bootstrap.yaml
 ```
 
-Commands: `run --bootstrap <path>`, `config validate <file>`, `status [--listen addr]`, `version`.
+Commands: `run --bootstrap <path>`, `config validate <file>`, `config test <file> --input <samples.jsonl>`,
+`probe <input>`, `status [--listen addr]`, `version`.
 
 Tests:
 
