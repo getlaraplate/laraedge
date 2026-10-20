@@ -90,9 +90,9 @@ created_on: 2026-10-19
   - `(*Processor).Errors() uint64` (runtime errors, for the metric).
   - The state file: `data_dir/inputs/{input_id}/transform-state.json`, `{"version": 1, "counters": {"<device>/<signal>/<position>/<sha256 of canonical step>": <int64>}}`.
 
-- [ ] **Step 1: Failing tests.** A chain applied through `Wrap`; a runtime error → `bad` sample with the zero value of the output kind and `Errors()` incremented; heartbeat fires through the goroutine on `clk.Advance`; Review Focus: `Close` while a deadline is due → nothing emitted after `Close` returns; `edge_counter` survives `Close` and a new `NewProcessor` on the same dir; a truncated state file → renamed `.corrupt-<unix>`, ERROR logged with the input id, counter from 0 (P3); a document changing one point's chain → other points keep their counter, the changed step starts at 0 (P2). Run with `-race`.
-- [ ] **Step 2: Implement.** One goroutine waits on the earliest deadline of all chains (clock timer, re-armed after each `Apply`); emits under the same lock order as the supervisor's input instance (the processor is inside the instance mutex; it never calls back into the supervisor).
-- [ ] **Step 3: Run** `go test -race ./internal/transform`; commit.
+- [x] **Step 1: Failing tests.** A chain applied through `Wrap`; a runtime error → `bad` sample with the zero value of the output kind and `Errors()` incremented; heartbeat fires through the goroutine on `clk.Advance`; Review Focus: `Close` while a deadline is due → nothing emitted after `Close` returns; `edge_counter` survives `Close` and a new `NewProcessor` on the same dir; a truncated state file → renamed `.corrupt-<unix>`, ERROR logged with the input id, counter from 0 (P3); a document changing one point's chain → other points keep their counter, the changed step starts at 0 (P2). Run with `-race`.
+- [x] **Step 2: Implement.** One goroutine waits on the earliest deadline of all chains (clock timer, re-armed after each `Apply`); emits under the same lock order as the supervisor's input instance (the processor is inside the instance mutex; it never calls back into the supervisor).
+- [x] **Step 3: Run** `go test -race ./internal/transform`; commit.
 
 ### Task 4: Configuration, birth data type, document check
 
