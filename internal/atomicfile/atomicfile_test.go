@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
+	"github.com/getlaraplate/laraedge/internal/atomicfile"
 )
 
 func TestWrite(t *testing.T) {

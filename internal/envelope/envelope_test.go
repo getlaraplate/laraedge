@@ -11,8 +11,8 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/getlaraplate/laraplate-edge/internal/envelope"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/envelope"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 const schemaPath = "testdata/laraplate-machine-1.schema.json"

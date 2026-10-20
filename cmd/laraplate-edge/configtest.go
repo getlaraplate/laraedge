@@ -9,10 +9,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
-	"github.com/getlaraplate/laraplate-edge/internal/transform"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
 // maxReplayFires is the defensive bound on the fires of one replay. The replay

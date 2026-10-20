@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/buffer"
+	"github.com/getlaraplate/laraedge/internal/buffer"
 )
 
 // Status is a snapshot of the supervisor (spec 6.8, 10.3).

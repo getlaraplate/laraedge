@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/clock"
 )
 
 // maxUsec is the largest WATCHDOG_USEC a time.Duration holds.

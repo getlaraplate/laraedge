@@ -17,15 +17,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/buffer"
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/envelope"
-	"github.com/getlaraplate/laraplate-edge/internal/input"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
-	"github.com/getlaraplate/laraplate-edge/internal/output"
-	"github.com/getlaraplate/laraplate-edge/internal/pipeline"
-	"github.com/getlaraplate/laraplate-edge/internal/transform"
+	"github.com/getlaraplate/laraedge/internal/buffer"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/envelope"
+	"github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/output"
+	"github.com/getlaraplate/laraedge/internal/pipeline"
+	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
 // DefaultStartTimeout bounds the start of one input (ruling R10).

@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/input"
-	"github.com/getlaraplate/laraplate-edge/internal/secrets"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/secrets"
 )
 
 var start = time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // Fixed runtime messages. None of them carries a sample value.

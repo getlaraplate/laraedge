@@ -154,7 +154,7 @@ reason (the rulings are in "Controller rulings" below):
   of v1.1.4, whose `x/tools` panicked on Go 1.27 syntax; `atomicfile.SyncDir` of a missing directory is
   an error on Windows too; the flaky supervisor test counts a resent unconfirmed batch once (the resend
   during an output restart is the legitimate at-least-once behaviour, not a defect).
-- **Module path (R0).** `github.com/getlaraplate/laraplate-edge`, not the `swolley` path of the Global
+- **Module path (R0).** `github.com/getlaraplate/laraedge`, not the `swolley` path of the Global
   Constraints.
 - **Chain exit (R5, Task 1).** Every sample leaving a chain has the chain's output kind: a `bad` sample of
   another kind leaves with the zero value of that kind (its original value is lost), a good integer
@@ -284,7 +284,7 @@ stays closed:
 Every ruling the controller took while executing this plan, copied verbatim from its execution ledger,
 with what each costs if wrong. The Delivery status above cites them by number.
 
-- R0 Ruling: module path is github.com/getlaraplate/laraplate-edge (user commit 302db2a); the plan's constraint naming swolley is outdated — cost: none.
+- R0 Ruling: module path is github.com/getlaraplate/laraedge (user commit 302db2a); the plan's constraint naming swolley is outdated — cost: none.
 - R1 Ruling: fix the three CI causes first, as Task 0 on develop, before the plan's Task 1 — red CI is the user's pain point and each later task's CI evidence depends on it — cost: one extra small task.
 - R2 Ruling: lock order is processor -> input instance -> router -> buffer. The processor holds its own lock while it calls the downstream emit, so samples of one signal keep their order across the input's goroutines and the deadline goroutine (parent 6.2); nothing downstream calls back into the processor. Task 3 step 2's "inside the instance mutex" is wrong and is corrected in the dispatch — cost: emits of one input serialize on the processor lock (they already serialize on the instance mutex).
 - R3 Ruling: package transform imports config, model, clock, atomicfile only; input imports transform (for OutputDataType) — never the reverse — cost: none.

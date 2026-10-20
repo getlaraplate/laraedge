@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // CheckDocument type-checks every point chain of doc, the check config cannot

@@ -19,8 +19,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // KindOf returns the value kind a point with the given decoding type

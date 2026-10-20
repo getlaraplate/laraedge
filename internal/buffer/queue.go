@@ -13,8 +13,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/atomicfile"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // queue is the segmented log of one priority class. The last segment is the

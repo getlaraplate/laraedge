@@ -19,11 +19,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/provider"
-	"github.com/getlaraplate/laraplate-edge/internal/secrets"
-	"github.com/getlaraplate/laraplate-edge/internal/supervisor"
-	"github.com/getlaraplate/laraplate-edge/internal/version"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/provider"
+	"github.com/getlaraplate/laraedge/internal/secrets"
+	"github.com/getlaraplate/laraedge/internal/supervisor"
+	"github.com/getlaraplate/laraedge/internal/version"
 )
 
 const (

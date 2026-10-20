@@ -22,7 +22,7 @@ go build -o laraplate-edge ./cmd/laraplate-edge
 Set the reported version at link time:
 
 ```bash
-go build -ldflags "-X github.com/getlaraplate/laraplate-edge/internal/version.version=1.2.3" \
+go build -ldflags "-X github.com/getlaraplate/laraedge/internal/version.version=1.2.3" \
   -o laraplate-edge ./cmd/laraplate-edge
 ```
 

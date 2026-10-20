@@ -11,10 +11,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/logging"
-	"github.com/getlaraplate/laraplate-edge/internal/transform"
-	"github.com/getlaraplate/laraplate-edge/internal/version"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/logging"
+	"github.com/getlaraplate/laraedge/internal/transform"
+	"github.com/getlaraplate/laraedge/internal/version"
 )
 
 const (

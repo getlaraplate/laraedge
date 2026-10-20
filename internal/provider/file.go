@@ -9,8 +9,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/config"
 )
 
 // DefaultFileInterval is how often the file provider looks at the file.

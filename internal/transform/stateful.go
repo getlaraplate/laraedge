@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // Steps that keep state or emit on a deadline. A step has no clock: its

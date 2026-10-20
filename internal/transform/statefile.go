@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/atomicfile"
+	"github.com/getlaraplate/laraedge/internal/clock"
 )
 
 // stateFileName is the file of an input's persisted step state, in

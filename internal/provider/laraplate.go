@@ -17,15 +17,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
-	"github.com/getlaraplate/laraplate-edge/internal/bootstrap"
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/docrules"
-	"github.com/getlaraplate/laraplate-edge/internal/output"
-	"github.com/getlaraplate/laraplate-edge/internal/secrets"
-	"github.com/getlaraplate/laraplate-edge/internal/supervisor"
-	"github.com/getlaraplate/laraplate-edge/internal/version"
+	"github.com/getlaraplate/laraedge/internal/atomicfile"
+	"github.com/getlaraplate/laraedge/internal/bootstrap"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/docrules"
+	"github.com/getlaraplate/laraedge/internal/output"
+	"github.com/getlaraplate/laraedge/internal/secrets"
+	"github.com/getlaraplate/laraedge/internal/supervisor"
+	"github.com/getlaraplate/laraedge/internal/version"
 )
 
 // Backend limits of a configuration report (MachineAgentConfigService).
