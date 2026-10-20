@@ -6,7 +6,7 @@ created_on: 2026-10-19
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block.
 
-**Status:** Open. No task started.
+**Status:** In progress (subagent-driven execution, branch develop).
 
 **Goal:** the agent applies the whole level-1 transform catalogue to every point, type-checked when a document is applied, with `probe` and `config test` for technicians.
 
@@ -61,9 +61,9 @@ created_on: 2026-10-19
   - `transform.Store` interface: `Load() (int64, bool)`, `Save(int64) error` (persisted step state; Task 2's `edge_counter` uses it, Task 3 implements it).
   - `transform.StateFactory` is `func(position int, canonical json.RawMessage) Store`; a nil factory means no persistence (unit tests, `config test`).
 
-- [ ] **Step 1: Failing tests.** Type check: `bit` after `float32` refused with "step 1 (bit): accepts integer, got float"; `scale` then `bit` refused; `map` with mixed value kinds refused. One table per transform with spec section 4 values: `scale: 0.1` on int 123 → float 12.3; `round: 1` on 12.345 → 12.3 and on -12.35 → -12.4; `bit: 3` on 8 → true; `bcd` on 0x1234 → 1234 and on 0x1A → runtime error; `map` with `{table: {"1": "run"}}` on 1 → "run", on 2 → runtime error, with `default: "idle"` → "idle"; `valid_range: {max: 100}` on 150 → quality bad, value 150; `trim`; `regex_extract: {pattern: "W=([0-9.]+)", as: "float"}` on "W=12.5g" → 12.5, no match → runtime error. A `bad` input sample passes through unchanged. Review Focus: `scale: 1e308` on 1e308 → runtime error (P6).
-- [ ] **Step 2: Implement** `transform.go` and `stateless.go`. Parameter parsing rejects unknown keys and wrong types with fixed messages (no echo).
-- [ ] **Step 3: Run** `go test -race ./internal/transform`; commit.
+- [x] **Step 1: Failing tests.** Type check: `bit` after `float32` refused with "step 1 (bit): accepts integer, got float"; `scale` then `bit` refused; `map` with mixed value kinds refused. One table per transform with spec section 4 values: `scale: 0.1` on int 123 → float 12.3; `round: 1` on 12.345 → 12.3 and on -12.35 → -12.4; `bit: 3` on 8 → true; `bcd` on 0x1234 → 1234 and on 0x1A → runtime error; `map` with `{table: {"1": "run"}}` on 1 → "run", on 2 → runtime error, with `default: "idle"` → "idle"; `valid_range: {max: 100}` on 150 → quality bad, value 150; `trim`; `regex_extract: {pattern: "W=([0-9.]+)", as: "float"}` on "W=12.5g" → 12.5, no match → runtime error. A `bad` input sample passes through unchanged. Review Focus: `scale: 1e308` on 1e308 → runtime error (P6).
+- [x] **Step 2: Implement** `transform.go` and `stateless.go`. Parameter parsing rejects unknown keys and wrong types with fixed messages (no echo).
+- [x] **Step 3: Run** `go test -race ./internal/transform`; commit.
 
 ### Task 2: Stateful and time-driven transforms
 
