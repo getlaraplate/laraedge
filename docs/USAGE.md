@@ -136,7 +136,7 @@ data_dir/
   format                        layout version of data_dir (1); an agent refuses a newer one
   config/last-valid.json        the last applied document, canonical JSON
   config/laraplate-state.json   laraplate provider: last attempted version and undelivered reports
-  inputs/{input id}/
+  inputs/{input id}/            removed when the applied document has no input of that id
     transform-state.json        the edge_counter counts of the input's transform chains
   outputs/{output id}/
     critical/  bulk/            the two queues: segment files and segment_size
@@ -202,8 +202,9 @@ laraplate-edge config test config.yaml --input samples.jsonl
 
 - The document is checked with every validation layer first (exit 1 with its messages).
 - The samples are applied in file order on a virtual clock that starts at the first sample's `ts`.
-  Before a sample, every pending deadline up to its `ts` fires in time order, the clock moving to each,
-  so a `heartbeat` repeats across a gap. A sample whose `ts` is earlier than the clock does not move the
+  Before a sample, every pending deadline before its `ts` fires in time order, the clock moving to each,
+  so a `heartbeat` repeats across a gap; a deadline equal to the sample's `ts` comes after the sample, as
+  in the running agent (a `heartbeat` the sample re-arms resends nothing). A sample whose `ts` is earlier than the clock does not move the
   clock back: it is applied as it comes, with its own `ts`, so time-driven steps may treat it as late;
   keep the file in time order. After the last sample the deadlines fire up to a horizon: the later of
   the last sample's `ts` and the clock, plus the longest `heartbeat`, `min_interval` or `debounce`
@@ -289,7 +290,8 @@ service manager to collect and rotate. `--log-level` takes `debug`, `info` (defa
   episode ("transform: runtime error, the sample is sent bad", with `input`, `device`, `signal`, `step`,
   `transform` and `error`, never the value); later ones are only counted, in at most one summary a
   minute ("transform: runtime errors repeated since the last report", with `suppressed` and
-  `window_seconds`). A minute without errors ends the episode. The count is in
+  `window_seconds`). A minute without errors ends the episode: the summary of the errors only counted
+  is logged then, without waiting for another error. The count is in
   `laraplate_edge_transform_errors_total` and `/status`.
 
 ## Running under systemd
@@ -351,6 +353,7 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `WARN` "transform: runtime error, the sample is sent bad", `transform_errors` grows | a step of the logged device, signal and `step` cannot compute a sample; `error` says why: `no mapping for the value` (`map`), `no match` or `capture cannot be converted` (`regex_extract`), `invalid BCD digit` or `negative value is not BCD` (`bcd`), `result is not finite` (`scale`, `offset`), `count cannot be saved` (`edge_counter`) | the samples go on, sent `bad`. Record what the machine sends with `probe --record`, fix the chain (a missing `map` key or a `default`, the pattern) and check it with `config test` before publishing it. |
 | `ERROR` "transform: the state file cannot be read and was renamed aside; edge counters start from 0" | `inputs/{id}/transform-state.json` was truncated, corrupt or of another version | nothing for the agent: the input runs, its `edge_counter` counts restart from 0 (the backend reads a counter reset). Keep the `transform-state.json.corrupt-<unix seconds>` file named in the log for the report and check the disk. |
 | `ERROR` "transform: the state file cannot be written; dropped counters stay in it until the next count" | the state file could not be rewritten at start without the counts no chain uses any more | check the permissions and the free space of `data_dir/inputs/{id}`; the next count writes the file again. Until then, a restart with the old chain back could resume its old count. |
+| `WARN` "supervisor: cannot remove the transform state of an input not in the configuration" | the directory `data_dir/inputs/{id}` of an input the applied document does not have could not be removed (`error` names it) | check the permissions of `data_dir/inputs`; the next applied document, or the next start, tries again. Until then, an input of that id added back would resume its old counts. |
 
 **A corrupt state file.** The small state files of `data_dir` are written atomically, so a crash never
 leaves one half written; a disk fault or a hand edit can. An input's `transform-state.json` is moved

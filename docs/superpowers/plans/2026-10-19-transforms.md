@@ -233,6 +233,32 @@ Deferred minors, left as they are (from the reviews):
 Open, awaiting the user: `golang.org/x/text` v0.14.0 (indirect) has two vulnerabilities the code does not
 call; upgrading it changes `go.mod` and needs approval (Task 0).
 
+**Final review (2026-10-20).** The whole-branch review asked for one more fix wave, delivered on
+develop with the plan staying closed:
+
+- **Death reaches the chains (R14).** A device's `death` now tells the time-driven steps of that
+  device's chains before it is forwarded, through a third unexported step hook, `deviceObserver`:
+  `heartbeat` disarms until the next sample leaves it (it no longer resends fresh good values over an
+  unreachable device), `min_interval` sends its held sample before the `death` and closes its window,
+  `debounce` drops its waiting value.
+- **Counts never resume from an old input directory (R15).** The supervisor removes
+  `data_dir/inputs/{id}/` of every input id the applied document does not have: after an applied
+  document, after a rolled-back one (against the document still applied, so an input a failed document
+  added cannot keep what it counted), and on the first document of a run before any input starts.
+  A renamed-back or re-added input counts from 0.
+- **`config test` ties.** Before a sample only the deadlines strictly before its ts fire; a deadline
+  equal to it comes after the sample, as in the live processor.
+- **Error log summary on time.** The processor's deadline goroutine also wakes when an error episode
+  ends (a quiet `errorLogWindow` after the last error), so the closing summary no longer waits for the
+  next error or `Close`.
+- **`NewProcessor` failure.** It closes the built input and returns a fixed-text error; the path stays
+  unreachable (commented, no seam).
+- **Docs.** `CONFIGURATION.md`: no backend `rollover_max` on an `edge_counter` signal; the per-edge
+  state-file sync under the processor lock as a known limit; death and the time-driven steps; the input
+  directory removal. `USAGE.md`: `config test` ties, the summary timing, the data directory and a
+  troubleshooting row. The `Chain.Apply` doc comment now states R5, and the two deferred minors about it
+  and about the `NewProcessor` failure are closed.
+
 **Documented in:** `docs/CONFIGURATION.md`, `docs/USAGE.md` (and `README.md`).
 
 ## Controller rulings (subagent-driven execution, 2026-10-20)
@@ -254,3 +280,5 @@ with what each costs if wrong. The Delivery status above cites them by number.
 - R11 Ruling: NewProcessor prunes in memory every counter key not requested by the current document's chains and persists the pruned map at Start — pruning only errs toward a reset, which the backend handles — cost: a step removed and re-added starts from 0.
 - R12 Ruling (amends task-6-context item 3): between samples, fire every deadline <= the next sample's ts in time order, advancing the virtual clock to each (heartbeats repeat across gaps); at the end, fire deadlines in time order up to last sample ts + the longest duration parameter of the document's time-driven steps, then stop (terminates with heartbeats; flushes debounce/min_interval) — cost: heartbeat output after the last sample is bounded by that horizon.
 - R13 Ruling: amend the spec (sections 3 State and Quality, section 4 min_interval/edge_counter/heartbeat/debounce rows) and the schema descriptions to the shipped behaviour, with an "Amended 2026-10-20 after delivery" note in the spec status line — the spec is the design record readers trust and it claims to win over the parent — cost: none (description-only).
+- R14 Ruling: a Death event reaching the processor notifies the device's chains before it is forwarded: heartbeat disarms until the next sample leaves the step; min_interval releases its held sample before the death; debounce cancels its pending value — spec D6 makes death the unreachable signal — cost: none.
+- R15 Ruling: after a successfully applied document, and at agent start before inputs start, the supervisor removes data_dir/inputs/{id}/ of every input id not in the applied document; a rollback restarting such an input starts its counters at 0 (errs toward reset, as R11) — the backend keys counters by device/signal, not by input — cost: a removed input's counters cannot be recovered by re-adding it.

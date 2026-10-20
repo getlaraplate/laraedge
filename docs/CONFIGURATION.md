@@ -223,7 +223,15 @@ timestamps and served on the agent's clock, so a device clock far from the agent
   out.
 - **`edge_counter`.** The first sample after a start sends the current count as a baseline (0, or the
   saved count) and sets the level; each counted edge then adds one, saves the count and sends it; other
-  samples send nothing.
+  samples send nothing. The count only grows, and goes back to 0 when it restarts (see "State"), which
+  the backend reads as a counter reset: do not set the backend's `rollover_max` on the signal of an
+  `edge_counter`, or a baseline of 0 after a reset would read as a rollover, that is a huge count of parts.
+
+When a device's `death` reaches the chains of its points (the driver lost the machine), the time-driven
+steps of those chains learn of it before the `death` is sent: `heartbeat` resends nothing until a new
+sample leaves the step, so the backend sees the device unreachable instead of fresh values;
+`min_interval` sends its held sample before the `death` and closes its window, so the first sample after
+it passes at once; `debounce` drops its waiting value, which was not seen unchanged for the duration.
 
 ### State
 
@@ -241,6 +249,12 @@ written atomically (directory mode `0700`, file `0600`) on every count:
 - When the input starts, the counts no current chain uses are dropped from the file. A step removed, or
   changed and then changed back, restarts at 0 and never resumes an older count, which the backend would
   read as parts produced.
+- The backend keys a count by device and signal, not by input, so the directory of an input id the
+  applied document does not have is removed: once a document is applied, after a rolled-back document
+  (against the document still applied), and when the agent starts, before any input starts (against
+  its first document). An input renamed and then renamed back, or removed and added again, therefore
+  counts from 0 instead of resuming the count of its old directory; a rollback that restarts such an
+  input starts it from 0 too.
 - A file that cannot be read (truncated, corrupt, of another version, with a negative count) is renamed
   `transform-state.json.corrupt-<unix seconds>` and logged at `ERROR` with the input id; the counts start
   from 0 and the input starts normally.
@@ -377,6 +391,9 @@ is exact, but its `ts` range can span records that are still in the buffer.
   served on the agent's clock: a device clock far from the agent's shifts them, and a backward step of
   the agent's clock delays a `heartbeat` by the size of the step.
 - `valid_range` compares integers as floats, exactly up to 2^53 in magnitude.
+- Every counted edge of an `edge_counter` writes and syncs the input's state file while the input's
+  transform processor holds its lock: the other signals of that input wait for the write, tens of
+  milliseconds on an SD card. A fast pulse train on a slow disk delays the input's samples accordingly.
 - The state of the time-driven transforms (a held `min_interval` or `debounce` sample, the `heartbeat`
   timer) is lost when the input restarts; only the `edge_counter` counts are kept.
 - A `death` from one input marks the device dead for every input that reads it.
