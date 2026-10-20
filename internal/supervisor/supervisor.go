@@ -354,7 +354,7 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	j, errs := s.execute(ctx, doc, p, built)
 	closeInputs(built)
 	if len(errs) > 0 {
-		errs = append(errs, s.rollback(j)...)
+		errs = append(errs, s.rollback(j, inputIDs(doc))...)
 		if applied {
 			// An input this document added and the rollback stopped must not
 			// keep what it counted (ruling R15).
@@ -414,6 +414,19 @@ func (s *Supervisor) pruneInputStates(keep map[string]bool) {
 	}
 	if err != nil {
 		s.log.Warn("supervisor: cannot remove the transform state of an input not in the configuration", "error", err)
+	}
+}
+
+// removeInputState removes the transform state, DataDir/inputs/{id}, of the
+// input id, which does not run (ruling R17). A failure is logged; the input
+// then starts from its saved count.
+func (s *Supervisor) removeInputState(id string) {
+	removed, err := transform.RemoveStaleInputStates(s.dataDir, func(other string) bool { return other != id })
+	if len(removed) > 0 {
+		s.log.Info("supervisor: removed the transform state of an input restarted by a rollback", "input", id)
+	}
+	if err != nil {
+		s.log.Warn("supervisor: cannot remove the transform state of an input restarted by a rollback", "input", id, "error", err)
 	}
 }
 
@@ -573,8 +586,11 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 // the failed document added is stopped like a removed one: its directory is
 // kept. A previous component that does not start again is reported failed in
 // Status, its error is returned and, for an output, the router keeps holding
-// its records (ruling R48).
-func (s *Supervisor) rollback(j journal) []string {
+// its records (ruling R48). A stopped input whose id the failed document
+// does not have starts again from a count of 0 (ruling R17): the failed
+// document may have renamed it, and the new id counted the same device and
+// signal, so its old count would read as parts produced.
+func (s *Supervisor) rollback(j journal, failedInputs map[string]bool) []string {
 	for _, id := range slices.Backward(j.startedInputs) {
 		s.stopInput(id)
 		if f, ok := j.failedIn[id]; ok {
@@ -608,6 +624,9 @@ func (s *Supervisor) rollback(j journal) []string {
 		}
 	}
 	for _, cfg := range j.stoppedInputs {
+		if !failedInputs[cfg.ID] {
+			s.removeInputState(cfg.ID)
+		}
 		err := s.restartInput(cfg)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("rollback: input %s: %v", cfg.ID, err))

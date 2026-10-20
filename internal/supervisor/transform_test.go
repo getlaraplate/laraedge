@@ -459,7 +459,8 @@ func TestInputRemovedAndAddedAgainStartsFromZero(t *testing.T) {
 // TestRollbackDoesNotResurrectARemovedCount: input a was removed by the
 // applied document; a document adding it back is rolled back after a counted
 // in it. The rollback leaves no state of a, so a later document with a
-// counts from 0, not from the failed attempt's count.
+// counts from 0, not from the failed attempt's count; b, which the failed
+// document did not have, restarts from 0 (ruling R17).
 func TestRollbackDoesNotResurrectARemovedCount(t *testing.T) {
 	f := newFixture(t)
 
@@ -501,14 +502,63 @@ func TestRollbackDoesNotResurrectARemovedCount(t *testing.T) {
 	if f.stateDirExists("a") {
 		t.Fatal("the rollback left the state of a, which the restored document does not have")
 	}
-	if !f.stateDirExists("b") {
-		t.Fatal("the rollback removed the state of b, which the restored document has")
+	// The failed document renamed b back to a: the rollback restarts b from
+	// 0, since a counted the same device and signal during the attempt
+	// (ruling R17).
+	if f.stateDirExists("b") {
+		t.Fatal("the rollback restarted b on its old count, after a counted the same signal")
+	}
+	countDoor(f.emitOfRunning("b"), 1)
+	if got := f.countersOf("b"); !reflect.DeepEqual(got, []int64{1}) {
+		t.Fatalf("counters of b after the rollback = %v, want [1]", got)
 	}
 
 	f.mustApply(f.transformDocumentFor("a", 4, 0, door))
 	countDoor(f.emitOfRunning("a"), 1)
 	if got := f.countersOf("a"); !reflect.DeepEqual(got, []int64{1}) {
 		t.Fatalf("counters of a = %v, want [1]: neither the old 5 nor the attempt's 3", got)
+	}
+}
+
+// TestRolledBackRenameStartsTheRestoredInputFromZero is ruling R17: input a
+// counts 5; a document renaming it b is rolled back after b counted 3 on the
+// same device and signal. The backend saw 3 after 5 (a reset): a restarted on
+// its old 5 would read as 2 parts produced, so the rollback restarts a from 0.
+func TestRolledBackRenameStartsTheRestoredInputFromZero(t *testing.T) {
+	f := newFixture(t)
+
+	f.mustApply(f.transformDocumentFor("a", 1, 0, door))
+	countDoor(f.emitOfRunning("a"), 5)
+
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(f.drv.blockRelease) }) })
+	f.drv.blockNth["c"] = 1
+
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- f.apply(f.transformDocumentFor("b", 2, 0, door, inSpec{id: "c", devices: []string{"c1"}}))
+	}()
+	select {
+	case <-f.drv.blockStarted:
+	case <-time.After(guard):
+		t.Fatal("input c did not start")
+	}
+
+	countDoor(f.emitOfRunning("b"), 3)
+
+	f.clk.Advance(DefaultStartTimeout)
+	select {
+	case out := <-done:
+		if out.Result != ResultRolledBack {
+			t.Fatalf("Apply() = %+v, want rolled_back", out)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return after the start timeout")
+	}
+
+	countDoor(f.emitOfRunning("a"), 1)
+	if got := f.countersOf("a"); !reflect.DeepEqual(got, []int64{1}) {
+		t.Fatalf("counters of a after the rolled-back rename = %v, want [1]: counted from 0, not from the old 5", got)
 	}
 }
 
