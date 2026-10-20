@@ -123,9 +123,9 @@ created_on: 2026-10-19
 **Interfaces:**
 - Produces: `transform.WriteSamples(w io.Writer, s []model.Sample) error`, `transform.ReadSamples(r io.Reader, kindOf func(device, signal string) (model.ValueKind, bool)) ([]model.Sample, error)` (an unknown device/signal is an error naming the line number, never the value).
 
-- [ ] **Step 1: Failing tests.** `probe` against the simulated example (`examples/simulated/config.yaml` via `--config`) prints one line per point and exit 0; `--record` writes valid JSON Lines; an unknown input id exits 1 with a message. `config test` with a document whose chain is `scale` + `deadband` and a recorded file prints the expected samples deterministically (two runs equal); time-driven steps flush at the end; a malformed line exits 1 naming the line. `config validate` reports a chain type error. Exit codes 0/1/2 as the other subcommands.
-- [ ] **Step 2: Implement** (P7, P8).
-- [ ] **Step 3: Run** `go test -race ./cmd/... ./internal/transform`; commit.
+- [x] **Step 1: Failing tests.** `probe` against the simulated example (`examples/simulated/config.yaml` via `--config`) prints one line per point and exit 0; `--record` writes valid JSON Lines; an unknown input id exits 1 with a message. `config test` with a document whose chain is `scale` + `deadband` and a recorded file prints the expected samples deterministically (two runs equal); time-driven steps flush at the end; a malformed line exits 1 naming the line. `config validate` reports a chain type error. Exit codes 0/1/2 as the other subcommands.
+- [x] **Step 2: Implement** (P7, P8).
+- [x] **Step 3: Run** `go test -race ./cmd/... ./internal/transform`; commit.
 
 ### Task 7: End to end, documentation, closing
 
