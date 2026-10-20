@@ -48,7 +48,13 @@ var defMessages = map[string]string{
 	"httpURL":    "must be an http or https URL",
 	"deviceName": "must not contain /",
 	"signalName": "must not contain /",
+	// transformDeadband holds the percentage pattern of a deadband.
+	"transformDeadband": "must be a non-negative number or a percentage such as 5%",
 }
+
+// mapKindsMessage reports a map table whose values (with the default) are not
+// all of one kind: the anyOf of $defs/transformMap.
+const mapKindsMessage = "table values and default must all be booleans, all numbers or all strings"
 
 const secretMessage = "must be a secret:// reference (secret://env/NAME, secret://file/PATH or secret://keystore/NAME), not a plain value"
 
@@ -106,6 +112,18 @@ func collectSchemaMessages(e *jsonschema.ValidationError, parent path, msgs *[]s
 		}
 		add(text)
 		return
+	case *kind.AnyOf:
+		if strings.HasSuffix(e.SchemaURL, "#/$defs/transformMap") {
+			// A value that is not a scalar fails every branch too; the
+			// table's own type rule reports it.
+			if scalarKindMix(e) {
+				add(mapKindsMessage)
+			}
+			return
+		}
+		if len(e.Causes) == 0 {
+			add("is invalid")
+		}
 	case *kind.Type:
 		add("must be " + strings.Join(k.Want, " or ") + " (got " + k.Got + ")")
 	case *kind.Enum:
@@ -144,6 +162,22 @@ func collectSchemaMessages(e *jsonschema.ValidationError, parent path, msgs *[]s
 	for _, cause := range e.Causes {
 		collectSchemaMessages(cause, p, msgs)
 	}
+}
+
+// scalarKindMix reports whether every leaf under e is a type error on a
+// boolean, number or string: the anyOf of a map failed because the scalar
+// values mix kinds, not because one of them is not a scalar.
+func scalarKindMix(e *jsonschema.ValidationError) bool {
+	if len(e.Causes) == 0 {
+		k, ok := e.ErrorKind.(*kind.Type)
+		return ok && slices.Contains([]string{"boolean", "number", "integer", "string"}, k.Got)
+	}
+	for _, cause := range e.Causes {
+		if !scalarKindMix(cause) {
+			return false
+		}
+	}
+	return true
 }
 
 // describePattern names what the pattern at schemaURL accepts.

@@ -141,7 +141,6 @@ func TestCheckBuildRefusesExactlyTheSpecExampleNonBuildParts(t *testing.T) {
 	want := []string{
 		"inputs.0.driver: not available in this build",
 		"inputs.0.connection.auth.password: not available in this build",
-		"inputs.0.devices.0.points.2.transforms: not available in this build",
 		"inputs.0.devices.0.derived: not available in this build",
 		"outputs.0.token: not available in this build",
 		"plugins.0: not available in this build",
@@ -339,6 +338,7 @@ func TestParseRefusals(t *testing.T) {
 		{"plain client_secret in a list", edit(t, base, "scenario: s.json", "scenario: s.json\n      oauth: [{client_secret: plain}]"), []string{"inputs.0.connection.oauth.0.client_secret: must be a secret:// reference"}},
 		{"plain api_key", edit(t, base, "scenario: s.json", "scenario: s.json\n      api_key: plain"), []string{"inputs.0.connection.api_key: must be a secret:// reference"}},
 		{"plain upper-case API_KEY deep", edit(t, base, "scenario: s.json", "scenario: s.json\n      a: {b: {API_KEY: plain}}"), []string{"inputs.0.connection.a.b.*: must be a secret:// reference"}},
+		{"plain password next to transforms", edit(t, base, "read: subscribe", "read: subscribe\n            transforms: [{scale: 2}]", "scenario: s.json", "scenario: s.json\n      password: plain"), []string{"inputs.0.connection.password: must be a secret:// reference"}},
 		{"derived transform unknown", edit(t, base, "            read: subscribe\n", "            read: subscribe\n        derived: [{signal: d, type: int, expr: '1', transforms: [{explode: 1}]}]\n"), []string{"inputs.0.devices.0.derived.0.transforms.0: unknown transform explode"}},
 		{"too large", base + "# " + strings.Repeat("x", config.MaxDocumentSize) + "\n", []string{"document: larger than 4 MiB"}},
 	}
@@ -359,6 +359,109 @@ func TestParseRefusals(t *testing.T) {
 				if !slices.ContainsFunc(msgs, func(m string) bool { return strings.Contains(m, want) }) {
 					t.Errorf("messages %q, want one containing %q", msgs, want)
 				}
+			}
+		})
+	}
+}
+
+// transformChain returns base with chain (flow YAML) as the transforms of
+// its point.
+func transformChain(t *testing.T, chain string) string {
+	t.Helper()
+
+	return edit(t, base, "read: subscribe", "read: subscribe\n            transforms: "+chain)
+}
+
+// TestParseAcceptsEveryTransformParameterShape covers every parameter shape of
+// spec section 4.
+func TestParseAcceptsEveryTransformParameterShape(t *testing.T) {
+	chains := []string{
+		"[{scale: 0.1}]", "[{scale: -2}]", "[{offset: 273.15}]", "[{offset: -40}]",
+		"[{round: 0}]", "[{round: 10}]", "[{round: 2.0}]",
+		"[{bit: 0}]", "[{bit: 63}]", "[{bcd: true}]",
+		"[{map: {table: {'0': idle, '1': running}}}]",
+		"[{map: {table: {'1': 1, '2': 2.5}, default: 0}}]",
+		"[{map: {table: {'true': 'on'}, default: 'off'}}]",
+		"[{map: {table: {}, default: true}}]",
+		"[{map: {table: {a: false}}}]",
+		"[{valid_range: {min: 0}}]", "[{valid_range: {max: 100.5}}]", "[{valid_range: {min: -1, max: 1}}]",
+		"[{deadband: 0}]", "[{deadband: 0.5}]", "[{deadband: '5%'}]", "[{deadband: '0.5%'}]",
+		"[{heartbeat: 1m}]", "[{min_interval: 500ms}]", "[{debounce: 1m30s}]",
+		"[{edge_counter: rising}]", "[{edge_counter: falling}]", "[{edge_counter: both}]",
+		"[{derivative: true}]", "[{trim: true}]",
+		"[{regex_extract: {pattern: '(\\d+)'}}]",
+		"[{regex_extract: {pattern: 'v=(\\d+)', group: 1, as: integer}}]",
+		"[{regex_extract: {pattern: '[0-9.]+', group: 0, as: float}}]",
+		"[{regex_extract: {pattern: '(a)(b)', group: 2, as: string}}]",
+		"[{scale: 0.1}, {offset: 2}, {round: 1}, {deadband: '1%'}, {heartbeat: 30s}]",
+	}
+
+	for _, chain := range chains {
+		t.Run(chain, func(t *testing.T) {
+			if _, msgs, err := config.Parse([]byte(transformChain(t, chain))); err != nil || len(msgs) != 0 {
+				t.Errorf("Parse = %q, %v", msgs, err)
+			}
+		})
+	}
+}
+
+// TestParseRefusesTransformParameters checks the exact, fixed messages of the
+// parameters the schema refuses.
+func TestParseRefusesTransformParameters(t *testing.T) {
+	const p = "inputs.0.devices.0.points.0.transforms.0."
+
+	tests := []struct {
+		name  string
+		chain string
+		want  []string
+	}{
+		{"round above 10", "[{round: 11}]", []string{p + "round: must be at most 10"}},
+		{"round fractional", "[{round: 1.5}]", []string{p + "round: must be integer (got number)"}},
+		{"bit above 63", "[{bit: 64}]", []string{p + "bit: must be at most 63"}},
+		{"bit negative", "[{bit: -1}]", []string{p + "bit: must be at least 0"}},
+		{"scale as text", "[{scale: '2'}]", []string{p + "scale: must be number (got string)"}},
+		{"offset missing", "[{offset: null}]", []string{p + "offset: must be number (got null)"}},
+		{"bcd false", "[{bcd: false}]", []string{p + "bcd: must be true"}},
+		{"trim as number", "[{trim: 1}]", []string{p + "trim: must be true"}},
+		{"derivative as text", "[{derivative: 'yes'}]", []string{p + "derivative: must be true"}},
+		{"deadband percent without sign", "[{deadband: '5'}]", []string{p + "deadband: must be a non-negative number or a percentage such as 5%"}},
+		{"deadband negative", "[{deadband: -1}]", []string{p + "deadband: must be at least 0"}},
+		{"deadband negative percent", "[{deadband: '-5%'}]", []string{p + "deadband: must be a non-negative number or a percentage such as 5%"}},
+		{"heartbeat without unit", "[{heartbeat: 30}]", []string{p + "heartbeat: must be string (got number)"}},
+		{"min_interval format", "[{min_interval: soon}]", []string{p + "min_interval: must be a duration such as 500ms, 2s or 1m30s"}},
+		{"debounce format", "[{debounce: 1d}]", []string{p + "debounce: must be a duration such as 500ms, 2s or 1m30s"}},
+		{"edge_counter mode", "[{edge_counter: up}]", []string{p + "edge_counter: must be one of rising, falling, both"}},
+		{"valid_range empty", "[{valid_range: {}}]", []string{p + "valid_range: must have at least 1 keys"}},
+		{"valid_range text bound", "[{valid_range: {min: 'a'}}]", []string{p + "valid_range.min: must be number (got string)"}},
+		{"valid_range unknown bound", "[{valid_range: {low: 1}}]", []string{p + "valid_range.low: unknown key"}},
+		{"valid_range as number", "[{valid_range: 5}]", []string{p + "valid_range: must be object (got number)"}},
+		{"regex_extract empty", "[{regex_extract: {}}]", []string{p + "regex_extract.pattern: is required"}},
+		{"regex_extract pattern as number", "[{regex_extract: {pattern: 5}}]", []string{p + "regex_extract.pattern: must be string (got number)"}},
+		{"regex_extract group negative", "[{regex_extract: {pattern: x, group: -1}}]", []string{p + "regex_extract.group: must be at least 0"}},
+		{"regex_extract unknown as", "[{regex_extract: {pattern: x, as: date}}]", []string{p + "regex_extract.as: must be one of string, integer, float"}},
+		{"regex_extract unknown key", "[{regex_extract: {pattern: x, flags: i}}]", []string{p + "regex_extract.flags: unknown key"}},
+		{"map empty", "[{map: {}}]", []string{p + "map.table: is required"}},
+		{"map empty table without default", "[{map: {table: {}}}]", []string{p + "map.table: must have at least 1 keys"}},
+		{"map mixed table", "[{map: {table: {a: 1, b: x}}}]", []string{p + "map: table values and default must all be booleans, all numbers or all strings"}},
+		{"map default of another kind", "[{map: {table: {a: true}, default: x}}]", []string{p + "map: table values and default must all be booleans, all numbers or all strings"}},
+		{"map null value", "[{map: {table: {a: null}}}]", []string{p + "map.table.a: must be boolean or number or string (got null)"}},
+		{"map object value", "[{map: {table: {a: {b: 1}}}}]", []string{p + "map.table.a: must be boolean or number or string (got object)"}},
+		{"map unknown key", "[{map: {table: {a: 1}, fallback: 2}}]", []string{p + "map.fallback: unknown key"}},
+		{"map table as list", "[{map: {table: [1]}}]", []string{p + "map.table: must be object (got array)"}},
+		{"second step refused", "[{scale: 2}, {round: 11}]", []string{"inputs.0.devices.0.points.0.transforms.1.round: must be at most 10"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc, msgs, err := config.Parse([]byte(transformChain(t, tt.chain)))
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if !reflect.DeepEqual(doc, config.Document{}) {
+				t.Errorf("document not zero with messages: %+v", doc)
+			}
+			if !slices.Equal(msgs, tt.want) {
+				t.Errorf("messages =\n%s\nwant\n%s", strings.Join(msgs, "\n"), strings.Join(tt.want, "\n"))
 			}
 		})
 	}
@@ -406,6 +509,16 @@ func TestParseNeverEchoesValues(t *testing.T) {
 			"json syntax":            `{"schema": ` + secret + `}`,
 			"json type":              `{"schema": "laraplate-edge-config/1", "inputs": "` + secret + `", "outputs": []}`,
 			"json trailing":          `{"schema": "x"} ` + secret,
+			"transform number":       transformChain(t, "[{round: "+secret+"}]"),
+			"transform true":         transformChain(t, "[{bcd: "+secret+"}]"),
+			"transform deadband":     transformChain(t, "[{deadband: "+secret+"}]"),
+			"transform duration":     transformChain(t, "[{heartbeat: "+secret+"}]"),
+			"transform edge mode":    transformChain(t, "[{edge_counter: "+secret+"}]"),
+			"transform map kinds":    transformChain(t, "[{map: {table: {a: 1, b: "+secret+"}}}]"),
+			"transform map default":  transformChain(t, "[{map: {table: {a: true}, default: "+secret+"}}]"),
+			"transform regex as":     transformChain(t, "[{regex_extract: {pattern: x, as: "+secret+"}}]"),
+			"transform regex group":  transformChain(t, "[{regex_extract: {pattern: x, group: "+secret+"}}]"),
+			"transform range bound":  transformChain(t, "[{valid_range: {min: "+secret+"}}]"),
 		}
 	}
 	keyDocs := map[string]string{
@@ -415,6 +528,9 @@ func TestParseNeverEchoesValues(t *testing.T) {
 		"yaml duplicate key": edit(t, base, "scenario: s.json", oddShape+": 1\n      "+oddShape+": 2"),
 		"json duplicate key": `{"` + oddShape + `": 1, "` + oddShape + `": 2}`,
 		"connection key":     edit(t, base, "scenario: s.json", "scenario: s.json\n      "+oddShape+": {password: plain}"),
+		"map table key":      transformChain(t, "[{map: {table: {"+oddShape+": {x: 1}}}}]"),
+		"range key":          transformChain(t, "[{valid_range: {"+oddShape+": 1}}]"),
+		"regex key":          transformChain(t, "[{regex_extract: {pattern: x, "+oddShape+": 1}}]"),
 	}
 
 	cases := map[string]string{}
@@ -460,7 +576,7 @@ func TestCheckBuild(t *testing.T) {
 		{"keystore token", edit(t, base, "secret://env/TOKEN", "secret://keystore/main"), []string{"outputs.0.token: not available in this build"}},
 		{"keystore in a connection list", edit(t, base, "scenario: s.json", "scenario: s.json\n      peers: [{a: {secret: 'secret://keystore/x'}}]"), []string{"inputs.0.connection.peers.0.a.secret: not available in this build"}},
 		{"keystore under an odd key", edit(t, base, "scenario: s.json", "scenario: s.json\n      Odd-Key: {token: 'secret://keystore/x'}"), []string{"inputs.0.connection.*.token: not available in this build"}},
-		{"transforms", edit(t, base, "read: subscribe", "read: subscribe\n            transforms: [{scale: 2}]"), []string{"inputs.0.devices.0.points.0.transforms: not available in this build"}},
+		{"point transforms", edit(t, base, "read: subscribe", "read: subscribe\n            transforms: [{scale: 2}, {deadband: '5%'}, {heartbeat: 1m}]"), nil},
 		{"empty transforms", edit(t, base, "read: subscribe", "read: subscribe\n            transforms: []"), nil},
 		{"keystore under a suffixed key", edit(t, base, "scenario: s.json", "scenario: s.json\n      Client_Secret: 'secret://keystore/x'\n      api_key: 'secret://keystore/y'"), []string{"inputs.0.connection.*: not available in this build", "inputs.0.connection.api_key: not available in this build"}},
 		{"derived with transforms", edit(t, base, "            read: subscribe\n", "            read: subscribe\n        derived: [{signal: d, type: int, expr: '1', transforms: [{deadband: 1}]}]\n"), []string{"inputs.0.devices.0.derived: not available in this build", "inputs.0.devices.0.derived.0.transforms: not available in this build"}},

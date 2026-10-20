@@ -10,6 +10,7 @@ import (
 	"github.com/getlaraplate/laraplate-edge/internal/clock"
 	"github.com/getlaraplate/laraplate-edge/internal/config"
 	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/transform"
 )
 
 // Input is one running input instance (ruling R33).
@@ -44,11 +45,12 @@ type Input interface {
 type Factory func(cfg config.Input, clk clock.Clock) (Input, error)
 
 // Signals returns the birth signals of d: one per point, with the data type
-// derived from the point type (ruling R3 revised) and the unit.
+// of what the point's transform chain produces (the point type's own without a
+// chain, ruling R3 revised; see transform.OutputDataType) and the unit.
 func Signals(d config.Device) []model.SignalInfo {
 	out := make([]model.SignalInfo, 0, len(d.Points))
 	for _, p := range d.Points {
-		out = append(out, model.SignalInfo{Signal: p.Signal, DataType: p.DataType(), Unit: p.Unit})
+		out = append(out, model.SignalInfo{Signal: p.Signal, DataType: transform.OutputDataType(p), Unit: p.Unit})
 	}
 
 	return out

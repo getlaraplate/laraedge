@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -57,7 +58,16 @@ func newFixture(t *testing.T, opts ...fixtureOption) *fixture {
 		Drivers:  map[string]input.Factory{config.DriverSimulated: f.drv.factory},
 		Resolver: secrets.NewResolver(secrets.WithLookupEnv(f.env.lookup)),
 		Clock:    f.clk,
-		Logger:   slog.New(slog.NewJSONHandler(f.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Logger: slog.New(slog.NewJSONHandler(f.logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+			// The time field is a long digit run that could contain the sample value.
+			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey {
+					return slog.Attr{}
+				}
+				return a
+			},
+		})),
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -90,12 +100,36 @@ func newFixture(t *testing.T, opts ...fixtureOption) *fixture {
 		if strings.Contains(f.logs.String(), testToken) {
 			t.Errorf("the logs contain the token")
 		}
-		if strings.Contains(f.logs.String(), "918273") {
+		if sampleValuePattern.MatchString(f.logs.String()) {
 			t.Errorf("the logs contain a sample value")
 		}
 	})
 
 	return f
+}
+
+// sampleValuePattern matches the sample value as a number of its own: digit
+// runs (timestamps, temp-dir suffixes) and decimal fractions (jitter
+// durations) that merely contain it are ignored.
+var sampleValuePattern = regexp.MustCompile(`(^|[^0-9.])918273([^0-9.]|$)`)
+
+func TestSampleValuePattern(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{`"value":918273`, true},
+		{`"918273"`, true},
+		{`.200918273`, false},
+		{`"748.918273ms"`, false},
+		{`/tmp/x4918273/`, false},
+	} {
+		if got := sampleValuePattern.MatchString(tc.in); got != tc.want {
+			t.Errorf("match(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
 }
 
 type inSpec struct {
@@ -280,7 +314,11 @@ func TestApplyByDifference(t *testing.T) {
 	f.be.waitUntil(t, "gone refused once", func() bool { return f.be.requests("gone") == 1 })
 
 	keepBuf, changeBuf := f.output("keep").buf, f.output("change").buf
-	before := map[string]int{"keep": len(f.be.got("keep")), "change": len(f.be.got("change"))}
+	// The counts are of what each output delivered: a changed output can be
+	// stopped after the backend accepted its last batch and before it read
+	// the answer, and its replacement then resends that batch identical,
+	// which the backend keeps once.
+	before := map[string]int{"keep": len(f.be.gotOnce("keep")), "change": len(f.be.gotOnce("change"))}
 
 	doc2 := f.document(2,
 		[]inSpec{{id: "a", variant: 1, devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}},
@@ -320,14 +358,15 @@ func TestApplyByDifference(t *testing.T) {
 		"new":    {birthB1, birthA1, "b1/state"},
 	}
 	for out, items := range want {
-		got := f.be.waitItem(t, out, "b1/state")[before[out]:]
+		f.be.waitItem(t, out, "b1/state")
+		got := f.be.gotOnce(out)[before[out]:]
 		if !reflect.DeepEqual(got, items) {
-			t.Errorf("%s received %q after the change, want %q", out, got, items)
+			t.Errorf("%s delivered %q after the change (received %q), want %q", out, got, f.be.got(out), items)
 		}
 	}
 
 	for _, out := range []string{"keep", "change"} {
-		seqs := f.be.seqsOf(out)
+		seqs := f.be.seqsOnce(out)
 		for i := 1; i < len(seqs); i++ {
 			if seqs[i] != seqs[i-1]+1 {
 				t.Errorf("%s source_seq %v, want consecutive across the change", out, seqs)
@@ -454,14 +493,15 @@ func TestApplyRefuses(t *testing.T) {
 					"schema": config.SchemaName, "version": 2, "outputs": []any{},
 					"inputs": []any{map[string]any{
 						"id": "a", "driver": config.DriverSimulated,
-						"devices": []any{map[string]any{"device": "a1", "points": []any{map[string]any{
-							"signal": "temp", "address": "t", "read": "subscribe",
-							"transforms": []any{map[string]any{"scale": 0.1}},
-						}}}},
+						"devices": []any{map[string]any{
+							"device":  "a1",
+							"points":  []any{map[string]any{"signal": "temp", "address": "t", "read": "subscribe"}},
+							"derived": []any{map[string]any{"signal": "d", "type": "int", "expr": "1"}},
+						}},
 					}},
 				})
 			},
-			want: []string{"inputs.0.devices.0.points.0.transforms: not available in this build"},
+			want: []string{"inputs.0.devices.0.derived: not available in this build"},
 		},
 		{
 			name: "an input the driver cannot build",
@@ -645,9 +685,13 @@ func TestChangedOutputKeepsRecordsEmittedWhileItRestarts(t *testing.T) {
 	}
 	f.mustApply(f.document(2, []inSpec{{id: "b", devices: []string{"b1"}}}, []outSpec{{id: "change", variant: 1}}))
 
-	got := f.be.waitItem(t, "change", "b1/count")
-	if want := []string{birthB1, birthB1, "b1/count"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("change received %q, want the restart birth then the held sample %q", got, want)
+	// The previous output can be stopped after the backend accepted its
+	// birth batch and before it read the answer: the new one then resends
+	// that batch identical, which the backend keeps once.
+	f.be.waitItem(t, "change", "b1/count")
+	if got, want := f.be.gotOnce("change"), []string{birthB1, birthB1, "b1/count"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("change delivered %q (received %q, seqs %v), want the restart birth then the held sample %q",
+			got, f.be.got("change"), f.be.seqsOf("change"), want)
 	}
 }
 

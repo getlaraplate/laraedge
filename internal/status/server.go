@@ -294,10 +294,11 @@ type statusDoc struct {
 }
 
 type inputDoc struct {
-	ID        string `json:"id"`
-	Driver    string `json:"driver"`
-	State     string `json:"state"`
-	LastError string `json:"last_error,omitempty"`
+	ID              string `json:"id"`
+	Driver          string `json:"driver"`
+	State           string `json:"state"`
+	LastError       string `json:"last_error,omitempty"`
+	TransformErrors uint64 `json:"transform_errors"`
 }
 
 type outputDoc struct {
@@ -338,7 +339,10 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		Outputs:       make([]outputDoc, 0, len(st.Outputs)),
 	}
 	for _, in := range st.Inputs {
-		doc.Inputs = append(doc.Inputs, inputDoc{ID: in.ID, Driver: in.Driver, State: in.State, LastError: in.LastError})
+		doc.Inputs = append(doc.Inputs, inputDoc{
+			ID: in.ID, Driver: in.Driver, State: in.State, LastError: in.LastError,
+			TransformErrors: in.TransformErrors,
+		})
 	}
 	for _, out := range st.Outputs {
 		dropped := make(map[string]uint64, len(out.Buffer.Dropped))

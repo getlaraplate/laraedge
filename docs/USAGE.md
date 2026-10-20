@@ -4,10 +4,11 @@ This guide is for whoever builds, installs and runs the agent. The configuration
 outputs, buffer) is described in [CONFIGURATION.md](CONFIGURATION.md). The design is in the stack:
 `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
-What this build provides: the `simulated` input driver, the `laraplate-http` output, the disk buffer
-with loss markers, the `file` and `laraplate` configuration providers, the status endpoint, JSON logs
-and the systemd watchdog. Real drivers, transforms, the MQTT output, plugins, the OS keystore and
-packages come with later plans (see "What this build refuses" in CONFIGURATION.md).
+What this build provides: the `simulated` input driver, the level-1 transforms of points, the
+`laraplate-http` output, the disk buffer with loss markers, the `file` and `laraplate` configuration
+providers, the `probe` and `config test` commands, the status endpoint, JSON logs and the systemd
+watchdog. Real drivers, derived signals (CEL), the MQTT output, plugins, the OS keystore and packages
+come with later plans (see "What this build refuses" in CONFIGURATION.md).
 
 ## Build
 
@@ -33,7 +34,9 @@ the `User-Agent` header.
 | Command | What it does | Exit code |
 |---|---|---|
 | `run --bootstrap <path> [--log-level debug\|info\|warn\|error]` | runs the agent until SIGTERM or SIGINT; logs at `info` by default | 0 after a clean stop, 1 when it cannot start, 2 on a usage error |
-| `config validate <file>` | checks a configuration document with both validation layers (schema and rules, then what this build provides); applies nothing | 0 and `<file>: valid` on stdout, or 1 and one `<file>: <path>: <problem>` line per problem on stderr |
+| `config validate <file>` | checks a configuration document with both validation layers (schema and rules, then what this build provides and the type check of every transform chain); applies nothing | 0 and `<file>: valid` on stdout, or 1 and one `<file>: <path>: <problem>` line per problem on stderr |
+| `config test <file> --input <samples.jsonl>` | replays recorded samples through the transform chains of a document and writes the resulting samples to stdout; applies nothing (see "Trying transforms") | 0; 1 when the document is invalid, the sample file is unreadable or has a bad line; 2 on a usage error |
+| `probe <input> (--config <file> \| --bootstrap <path>) [--record <file>]` | reads every point of one input once and prints the raw samples, before transforms; never starts the input or an output (see "Trying transforms") | 0; 1 when the document is invalid, the input is unknown or the read fails; 2 on a usage error |
 | `status [--listen addr]` | prints the `/status` answer of a running agent, indented; `--listen` defaults to `127.0.0.1:9180`; the bearer token, when the endpoint has one, is read from `LARAPLATE_EDGE_STATUS_TOKEN` | 0, or 1 when the agent does not answer |
 | `version` | prints the version | 0 |
 
@@ -133,6 +136,8 @@ data_dir/
   format                        layout version of data_dir (1); an agent refuses a newer one
   config/last-valid.json        the last applied document, canonical JSON
   config/laraplate-state.json   laraplate provider: last attempted version and undelivered reports
+  inputs/{input id}/            removed when the applied document has no input of that id
+    transform-state.json        the edge_counter counts of the input's transform chains
   outputs/{output id}/
     critical/  bulk/            the two queues: segment files and segment_size
     acked                       confirmed position of each queue
@@ -157,6 +162,76 @@ when it still holds unsent records; delete it by hand once it is no longer neede
   `data_dir` and sent again at every poll, also after a restart, until the backend records it. A
   rejected or rolled back version is reported once and not attempted again; publish a new version.
 
+## Trying transforms: probe and config test
+
+Two commands let a technician see what a machine sends and what a transform chain makes of it, without
+running the agent or sending anything.
+
+**`probe <input> (--config <file> | --bootstrap <path>) [--record <file>]`** reads every point of one
+input once and prints the raw samples, before any transform:
+
+```bash
+laraplate-edge probe press-line --config config.yaml --record samples.jsonl
+```
+
+```
+press-07	state	"idle"	string	good
+press-07	good_count	0	integer	good
+press-07	press_force	182	float	good
+...
+response time: 3µs
+```
+
+- The document is the `--config` file, checked like `config validate` (its problems are printed and the
+  exit code is 1); relative paths in its `connection` resolve against the file's directory. Without
+  `--config`, it is the last valid document kept in the `data_dir` of the `--bootstrap` file. With both,
+  `--config` wins.
+- The input is built through the same drivers as `run`, read once (at most 30 seconds) and closed. One
+  line per sample, tab-separated: device, signal, value (a string quoted), kind (`boolean`, `integer`,
+  `float`, `string`), quality; then the total response time. `probe` never starts the input, an output or
+  the status endpoint. It opens its own connection to the machine, beside a running agent's.
+- `--record <file>` also writes the samples, as a sample file (below), atomically.
+- An input id the document does not have exits 1 with the ids it has.
+
+**`config test <file> --input <samples.jsonl>`** replays recorded samples through the transform chains
+of a document and writes what comes out to stdout, as a sample file:
+
+```bash
+laraplate-edge config test config.yaml --input samples.jsonl
+```
+
+- The document is checked with every validation layer first (exit 1 with its messages).
+- The samples are applied in file order on a virtual clock that starts at the first sample's `ts`.
+  Before a sample, every pending deadline before its `ts` fires in time order, the clock moving to each,
+  so a `heartbeat` repeats across a gap; a deadline equal to the sample's `ts` comes after the sample, as
+  in the running agent (a `heartbeat` the sample re-arms resends nothing). A sample whose `ts` is earlier than the clock does not move the
+  clock back: it is applied as it comes, with its own `ts`, so time-driven steps may treat it as late;
+  keep the file in time order. After the last sample the deadlines fire up to a horizon: the later of
+  the last sample's `ts` and the clock, plus the longest `heartbeat`, `min_interval` or `debounce`
+  duration of the document, so held samples come out and a `heartbeat` stops. The output is in emission
+  order; a sample of a point without transforms passes through.
+- Nothing else is read or written: the same files always give the same output. No state file is used,
+  so `edge_counter` counts start from 0.
+- Runtime errors appear as `bad` samples, and their count goes to stderr (`laraplate-edge config test:
+  transform errors: N (the samples are marked bad)`); the exit code stays 0.
+- Exit 1 for a document or sample file that cannot be used, and for a replay that would need more than
+  1,000,000 firings (a very short period over a long gap); 2 on a usage error, such as a missing
+  `--input`.
+
+**Sample files** are JSON Lines, one object per sample with the keys `device`, `signal`, `ts`, `value`
+and `quality`, all required (no other key is accepted; key names are matched without regard to case):
+
+```
+{"device":"press-07","signal":"press_force","ts":"2026-10-19T08:00:01.250Z","value":182.5,"quality":"good"}
+```
+
+- `ts` is RFC 3339; it is written in UTC with milliseconds, and read with any offset or precision.
+- `value` has the kind the point's `type` gives (CONFIGURATION.md, "Kinds and the type check"): `true`
+  or `false`, an integral number for an integer point, a finite number for a float point, a JSON string.
+- `quality` is `good`, `uncertain` or `bad`. Blank lines are skipped; a line holds at most 1 MiB.
+- The device and signal must be a point of the document. The first bad line stops the command with
+  `<file>: line N: <reason>`, never quoting the line.
+
 ## Status endpoint
 
 Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
@@ -165,7 +240,7 @@ Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
 |---|---|
 | `/healthz` | `200 ok` while the process serves; never needs the token |
 | `/readyz` | `200 {"ready":true}` once a configuration is applied and every input runs; otherwise `503 {"ready":false,"reason":"..."}` |
-| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds`, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
+| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds`, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
 | `/metrics` | Prometheus text format 0.0.4, below |
 
 With `status_token` set, every path but `/healthz` needs `Authorization: Bearer <token>`. The endpoint
@@ -181,6 +256,7 @@ Every name starts with `laraplate_edge_`.
 |---|---|---|---|
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
+| `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_buffer_records` | gauge | `output`, `priority` | records not yet confirmed |
 | `laraplate_edge_buffer_bytes` | gauge | `output`, `priority` | bytes of the queue on disk |
 | `laraplate_edge_buffer_oldest_unconfirmed_seconds` | gauge | `output`, `priority` | age of the oldest unconfirmed record: agent clock minus the record's device `ts`, 0 when none |
@@ -210,6 +286,13 @@ service manager to collect and rotate. `--log-level` takes `debug`, `info` (defa
   since the last report`, with `suppressed` and a count per `<queue>.<kind>`); after a quiet minute the
   next failure is logged in full again. The router still logs each record the buffer refuses at
   `WARN` ("router: cannot buffer a record", with the output, device and signal).
+- A transform runtime error is logged at `WARN` the first time for each device, signal and step of an
+  episode ("transform: runtime error, the sample is sent bad", with `input`, `device`, `signal`, `step`,
+  `transform` and `error`, never the value); later ones are only counted, in at most one summary a
+  minute ("transform: runtime errors repeated since the last report", with `suppressed` and
+  `window_seconds`). A minute without errors ends the episode: the summary of the errors only counted
+  is logged then, without waiting for another error. The count is in
+  `laraplate_edge_transform_errors_total` and `/status`.
 
 ## Running under systemd
 
@@ -267,10 +350,16 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | start fails with `data_dir ... has format N, newer than this agent supports` | the data directory was written by a newer agent | run the newer agent; an older one never rewrites a newer layout |
 | `ERROR` "buffer: corrupt record inside a segment, dropped the rest of the segment" (or "... inside an evicted segment ..."), `corrupt_records` grows | a record of the output buffer failed its checksum or could not be read back: a disk fault, bit rot, a file changed by hand. It is found at start or while the agent runs. | nothing for the agent: it drops the rest of that segment (at most 16 MiB of that queue), counts it and keeps sending; the log line names the queue, the segment and the offset, never a value. The gap has no loss marker (the protocol has no reason for it), so the backend does not see it: check the disk (kernel log, SMART, file system). |
 | `WARN` "a device death was dropped; the backend will not see it" | a `death` was lost with a full buffer or a refused batch; a `birth` or `death` is not a sample, so no loss marker counts it | nothing: the next `death` or `birth` of the device sets its state again. Look at the drop that caused it. |
+| `WARN` "transform: runtime error, the sample is sent bad", `transform_errors` grows | a step of the logged device, signal and `step` cannot compute a sample; `error` says why: `no mapping for the value` (`map`), `no match` or `capture cannot be converted` (`regex_extract`), `invalid BCD digit` or `negative value is not BCD` (`bcd`), `result is not finite` (`scale`, `offset`), `count cannot be saved` (`edge_counter`) | the samples go on, sent `bad`. Record what the machine sends with `probe --record`, fix the chain (a missing `map` key or a `default`, the pattern) and check it with `config test` before publishing it. |
+| `ERROR` "transform: the state file cannot be read and was renamed aside; edge counters start from 0" | `inputs/{id}/transform-state.json` was truncated, corrupt or of another version | nothing for the agent: the input runs, its `edge_counter` counts restart from 0 (the backend reads a counter reset). Keep the `transform-state.json.corrupt-<unix seconds>` file named in the log for the report and check the disk. |
+| `ERROR` "transform: the state file cannot be written; dropped counters stay in it until the next count" | the state file could not be rewritten at start without the counts no chain uses any more | check the permissions and the free space of `data_dir/inputs/{id}`; the next count writes the file again. Until then, a restart with the old chain back could resume its old count. |
+| `WARN` "supervisor: cannot remove the transform state of an input not in the configuration" | the directory `data_dir/inputs/{id}` of an input the applied document does not have could not be removed (`error` names it) | check the permissions of `data_dir/inputs`; the next applied document, or the next start, tries again. Until then, an input of that id added back would resume its old counts. |
+| `WARN` "supervisor: cannot remove the transform state of an input restarted by a rollback" | a rollback restarted an input the failed document did not have (a rename rolled back), and its directory `data_dir/inputs/{id}` could not be removed (`error` names it) | check the permissions of `data_dir/inputs`; the input then resumes its old counts, which the backend may read as parts produced after the failed attempt counted the same signal under the new id |
 
 **A corrupt state file.** The small state files of `data_dir` are written atomically, so a crash never
-leaves one half written; a disk fault or a hand edit can. An output whose state file does not load does
-not start: the document that starts it is `rolled_back` (at start nothing runs and `/readyz` answers
+leaves one half written; a disk fault or a hand edit can. An input's `transform-state.json` is moved
+aside by the agent itself (see the table above). An output whose state file does not load does not
+start: the document that starts it is `rolled_back` (at start nothing runs and `/readyz` answers
 `503`), with an error naming the output and the file. Stop the agent, move the file aside (keep it for
 the report), start again:
 
@@ -294,11 +383,13 @@ go test -tags e2e -race ./internal/e2e
 
 It covers a network cut (`503`, then dropped connections, across several backoff steps), two `kill -9`
 with restarts on the same `data_dir` (a batch held unanswered, and a batch accepted whose answer never
-left), and the `laraplate` provider applying version 1, then version 2, reporting both and polling with
-`304` afterwards. It checks that `source_seq` has no gap and is never reused, that every resend is
-byte-identical, that the simulated counters arrive as 0, 1, 2, ... with nothing lost or repeated, and
-that the four status endpoints answer. It is not part of `go test ./...`; CI runs it in its own job on
-Linux amd64.
+left), the `laraplate` provider applying version 1, then version 2, reporting both and polling with
+`304` afterwards, and a run with transform chains (`map` on `state`, `scale` and `deadband` on
+`press_force`), whose samples are checked against companion points without a chain and whose births
+announce the chains' data types. It checks that `source_seq` has no gap and is never reused, that every
+resend is byte-identical, that the simulated counters arrive as 0, 1, 2, ... with nothing lost or
+repeated, and that the four status endpoints answer. It is not part of `go test ./...`; CI runs it in
+its own job on Linux amd64.
 
 ## Running against a local Laraplate
 

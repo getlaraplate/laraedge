@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -224,6 +225,7 @@ func TestMetrics(t *testing.T) {
 	types := map[string]string{
 		"laraplate_edge_config_version":                      "gauge",
 		"laraplate_edge_input_up":                            "gauge",
+		"laraplate_edge_transform_errors_total":              "counter",
 		"laraplate_edge_buffer_records":                      "gauge",
 		"laraplate_edge_buffer_bytes":                        "gauge",
 		"laraplate_edge_buffer_oldest_unconfirmed_seconds":   "gauge",
@@ -250,8 +252,9 @@ func TestMetrics(t *testing.T) {
 	}
 
 	want := map[string]map[string]float64{
-		"laraplate_edge_config_version": {"{}": 7},
-		"laraplate_edge_input_up":       {`{input="line"}`: 1, `{input="probe"}`: 0},
+		"laraplate_edge_config_version":         {"{}": 7},
+		"laraplate_edge_input_up":               {`{input="line"}`: 1, `{input="probe"}`: 0},
+		"laraplate_edge_transform_errors_total": {`{input="line"}`: 3, `{input="probe"}`: 0},
 		"laraplate_edge_buffer_records": {
 			`{output="main",priority="critical"}`: 3,
 			`{output="main",priority="bulk"}`:     5,
@@ -308,6 +311,26 @@ func TestMetrics(t *testing.T) {
 				t.Errorf("%s%s = %v, want %v", name, labels, got, v)
 			}
 		}
+	}
+}
+
+// TestMetricsTransformErrorsFollowInputUp: the transform error counter comes
+// right after input_up, in the family order of spec 6.8.
+func TestMetricsTransformErrorsFollowInputUp(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+
+	var order []string
+	for line := range strings.Lines(body) {
+		if name, ok := strings.CutPrefix(line, "# HELP "); ok {
+			name, _, _ = strings.Cut(name, " ")
+			order = append(order, name)
+		}
+	}
+	i := slices.Index(order, "laraplate_edge_input_up")
+	if i < 0 || i+1 >= len(order) || order[i+1] != "laraplate_edge_transform_errors_total" {
+		t.Fatalf("families %q, want laraplate_edge_transform_errors_total right after laraplate_edge_input_up", order)
 	}
 }
 

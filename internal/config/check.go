@@ -14,8 +14,10 @@ const keystorePrefix = "secret://keystore/"
 // CheckBuild is the second validation layer: it refuses, with "<path>: not
 // available in this build", the parts of a valid document this build does not
 // provide: drivers other than simulated (plugin drivers included), output
-// types other than laraplate-http, secret://keystore/ references, transforms
-// (of points and of derived signals), derived signals and plugins. It returns nil when the build can apply doc.
+// types other than laraplate-http, secret://keystore/ references, derived
+// signals with their transforms, and plugins. Point transforms are provided;
+// their chains are type-checked by transform.CheckDocument, which config
+// cannot call (import cycle). It returns nil when the build can apply doc.
 func CheckBuild(doc Document) []string {
 	var msgs []string
 	add := func(p path) { msgs = append(msgs, p.msg(notInBuild)) }
@@ -35,11 +37,6 @@ func CheckBuild(doc Document) []string {
 		}
 		for d, dev := range in.Devices {
 			dp := p.key("devices").index(d)
-			for k, pt := range dev.Points {
-				if len(pt.Transforms) > 0 {
-					add(dp.key("points").index(k).key("transforms"))
-				}
-			}
 			if len(dev.Derived) > 0 {
 				add(dp.key("derived"))
 			}

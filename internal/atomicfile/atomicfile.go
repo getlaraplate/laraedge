@@ -50,9 +50,20 @@ func Write(dir, name string, data []byte) error {
 }
 
 // SyncDir makes the directory entries of dir durable. Windows has no
-// directory sync, and some filesystems refuse it; both count as done.
+// directory sync, and some filesystems refuse it; both count as done. A
+// missing dir is an error on every system.
 func SyncDir(dir string) error {
-	if runtime.GOOS == "windows" {
+	return syncDir(dir, runtime.GOOS)
+}
+
+// syncDir is SyncDir on the operating system goos, so that every branch is
+// tested on every system.
+func syncDir(dir, goos string) error {
+	if goos == "windows" {
+		if _, err := os.Stat(dir); err != nil {
+			return fmt.Errorf("sync directory: %w", err)
+		}
+
 		return nil
 	}
 

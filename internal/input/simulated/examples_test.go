@@ -10,6 +10,7 @@ import (
 	"github.com/getlaraplate/laraplate-edge/internal/clock"
 	"github.com/getlaraplate/laraplate-edge/internal/config"
 	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraplate-edge/internal/transform"
 )
 
 const examplesDir = "../../../examples/simulated"
@@ -26,6 +27,9 @@ func TestExampleConfigurationIsValidForThisBuild(t *testing.T) {
 	}
 	if msgs := config.CheckBuild(doc); len(msgs) > 0 {
 		t.Fatalf("CheckBuild: %v", msgs)
+	}
+	if msgs := transform.CheckDocument(doc); len(msgs) > 0 {
+		t.Fatalf("CheckDocument: %v", msgs)
 	}
 	if doc.Version != 1 || len(doc.Inputs) != 1 || len(doc.Inputs[0].Devices) != 2 || len(doc.Outputs) != 1 {
 		t.Fatalf("unexpected shape: version %d, %d inputs, %d outputs", doc.Version, len(doc.Inputs), len(doc.Outputs))

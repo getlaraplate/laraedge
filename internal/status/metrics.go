@@ -63,6 +63,11 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		w.sample("input_up", boolValue(in.State == supervisor.InputRunning), "input", in.ID)
 	}
 
+	w.family("transform_errors_total", "counter", "Runtime errors of the input's transform chains since the agent started; each sent its sample bad.")
+	for _, in := range st.Inputs {
+		w.sample("transform_errors_total", float64(in.TransformErrors), "input", in.ID)
+	}
+
 	queues := func(name, help string, value func(buffer.QueueStats) float64) {
 		w.family(name, "gauge", help)
 		for _, out := range running {

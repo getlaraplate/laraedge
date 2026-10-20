@@ -20,6 +20,19 @@ inputs:
           - {signal: scrap_count, address: scrap_count, type: uint32, unit: pcs, read: subscribe, priority: critical}
           - {signal: press_force, address: press_force, type: float64, unit: kN, read: subscribe, priority: bulk}
           - {signal: die_temperature, address: die_temperature, type: float64, unit: C, read: subscribe, priority: bulk}
+          # A point may carry a transform chain, applied in order before the
+          # value is sent (docs/CONFIGURATION.md, "Transforms"). Remove the "# "
+          # of the next four lines to also send the state as an integer code,
+          # and the force in N, only when it moves by at least 2000 N, and at
+          # least every 5 minutes:
+          # - {signal: state_code, address: state, type: string, read: subscribe, priority: critical,
+          #   transforms: [{map: {table: {idle: 0, running: 1, setup: 2, fault: 3}}}]}
+          # - {signal: press_force_n, address: press_force, type: float64, unit: N, read: subscribe, priority: bulk,
+          #   transforms: [{scale: 1000}, {deadband: 2000}, {heartbeat: 5m}]}
+          #
+          # Try a chain offline on recorded samples:
+          #   laraplate-edge probe press-line --config config.yaml --record samples.jsonl
+          #   laraplate-edge config test config.yaml --input samples.jsonl
       - device: press-08
         points: *press_points
 

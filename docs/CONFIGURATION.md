@@ -19,8 +19,8 @@ laraplate-edge config validate config.yaml
   below it). At most 4 MiB.
 - Validation has two layers, run by `config validate` and before every apply: the schema plus the rules
   a schema cannot express (unique ids, durations and sizes in range, the URL rule), then what this build
-  provides. Every problem is reported with its path (`outputs.0.batch.max_samples: must be at most
-  5000`), never with its value.
+  provides, with the type check of every transform chain (see "Transforms"). Every problem is reported
+  with its path (`outputs.0.batch.max_samples: must be at most 5000`), never with its value.
 - An unknown key is an error everywhere but inside `connection`.
 - Durations are positive, written as `500ms`, `2s`, `1m`, `1h30m`. Sizes are positive, written as
   `512KiB`, `16MiB`, `1GiB` (or `B`).
@@ -58,10 +58,10 @@ A **point** is one signal read from the machine:
 | `address` | yes | | driver-specific address of the value |
 | `read` | yes | | `subscribe`, `event`, or `{poll: <duration>}` |
 | `priority` | no | `critical` | buffer class: `critical` or `bulk` (see "Buffer") |
-| `type` | no | | decoding type: `bool`, `int16`, `uint16`, `int32`, `uint32`, `int64`, `uint64`, `float32`, `float64`, `string`. It sets the data type announced in the device's `birth`: `bool` is `boolean`, `string` is `string`, any other type (or none) is `number`. |
+| `type` | no | | decoding type: `bool`, `int16`, `uint16`, `int32`, `uint32`, `int64`, `uint64`, `float32`, `float64`, `string`. It sets the kind of the values the driver produces (see "Transforms") and, for a point without transforms, the data type announced in the device's `birth`: `bool` is `boolean`, `string` is `string`, any other type (or none) is `number`. A point with transforms announces the data type of what its chain produces. |
 | `byte_order` | no | | `ABCD`, `CDAB`, `BADC`, `DCBA` (drivers that decode registers) |
 | `unit` | no | | engineering unit, at most 16 characters, announced in the `birth` |
-| `transforms` | no | | refused by this build |
+| `transforms` | no | | the transform chain, applied in order to every sample of the point (see "Transforms") |
 
 ### The `simulated` driver
 
@@ -90,6 +90,183 @@ The scenario (at most 1 MiB, unknown keys refused; see `examples/simulated/scena
 | `cycle_time` | | `{mean, stddev}`, durations; `mean` is required when a state produces, from the tick to 24 h. A part completes when its drawn cycle time has elapsed, at most one per tick. |
 | `scrap_rate` | `0` | probability, 0 to 1, that a part is scrap (`scrap_count`), else good (`good_count`) |
 | `measurements` | | `{signal, mean, stddev, unit}` drawn once per completed part; the name is not `state`, `good_count` or `scrap_count`; `unit` is informative (the point's `unit` is reported) |
+
+## Transforms
+
+A point's `transforms` is a chain of steps applied, in order, to every sample the driver reads, before
+the sample is routed to the outputs and buffered. A step is an object with one key, the transform, whose
+value is its parameter:
+
+```yaml
+- signal: press_force
+  address: press_force
+  type: float64
+  unit: N
+  read: subscribe
+  transforms:
+    - scale: 1000          # kN to N
+    - deadband: 2000       # send a change of at least 2000 N
+    - heartbeat: 5m        # and the last value at least every 5 minutes
+```
+
+A sample produced by a step goes through the steps after it. A point without `transforms` is sent as the
+driver reads it. Try a chain offline on recorded samples with `probe --record` and `config test`
+([USAGE.md](USAGE.md#trying-transforms-probe-and-config-test)).
+
+### Kinds and the type check
+
+Values have one of four kinds: boolean, integer, float, string; "number" below means integer or float.
+The point's `type` gives the kind the driver produces: `bool` a boolean; `int16`, `uint16`, `int32`,
+`uint32`, `int64`, `uint64` an integer; `float32`, `float64` a float; `string` a string; a point without
+`type` a float. Each transform accepts some kinds and produces one (the catalogue below).
+
+`config validate` and every apply check each chain from the point's kind, step by step. A chain that
+cannot work refuses the document with one message per chain:
+
+```
+inputs.0.devices.0.points.3.transforms: input *, device *, signal press_force, step 2 (bit): accepts integer, got float
+```
+
+The message names the step by its position (from 1) and its transform, never a parameter value. The input
+id, device and signal are named only when they have the shape of a document key (a lowercase letter, then
+up to 31 lowercase letters, digits or `_`); any other name, such as `press-07` or `press-line`, is shown
+as `*`, and the path locates the chain. Parameters are checked by the schema first, with their own path
+(`inputs.0.devices.0.points.3.transforms.1.round: must be at most 10`); a key of a `map` table appears
+in such a path under the same rule.
+
+### Catalogue
+
+| Transform | Parameter | Accepts → produces | Behaviour |
+|---|---|---|---|
+| `scale` | number | number → float | multiplies |
+| `offset` | number | number → float | adds |
+| `round` | integer 0 to 10 (decimals) | float → float; an integer passes unchanged and stays an integer | rounds half away from zero, on the decimal digits of the value as written (`1.005` with 2 decimals is `1.01`) |
+| `bit` | integer 0 to 63 | integer → boolean | the bit at that index, 0 the least significant |
+| `bcd` | `true` | integer → integer | decodes binary-coded decimal (`0x1234` is `1234`); a nibble above 9 or a negative value is a runtime error |
+| `map` | `{table: {key: value}, default?}` | any → the kind of the table values | see "map" below |
+| `valid_range` | `{min?, max?}`, at least one, `min` not above `max` | number → the same kind | a value outside `[min, max]` keeps its value and gets quality `bad` (not a runtime error) |
+| `deadband` | number of at least 0 (absolute), or `"N%"` (of the last sent value) | number → the same kind | sends a sample when it moved from the last sent value by at least the threshold, or when its quality changed; the first value always passes |
+| `heartbeat` | duration | any → the same kind | resends the last value with the current time when nothing left the step for the duration |
+| `min_interval` | duration | any → the same kind | at most one sample per interval after the first |
+| `debounce` | duration | any → the same kind | sends a value only after it stayed unchanged for the duration, with the timestamp of its change |
+| `edge_counter` | `rising`, `falling` or `both` | boolean → integer | cumulative count of the counted edges, persisted (see "State") |
+| `derivative` | `true` | number → float | change per second between two samples, over their timestamps |
+| `trim` | `true` | string → string | removes the white space around the string |
+| `regex_extract` | `{pattern, group?, as?}` | string → string, integer or float | the capture `group` (default 1; 0 is the whole match) of an RE2 `pattern` (linear time), converted as `as` says: `string` (default), `integer` (decimal) or `float`; no match or a failed conversion is a runtime error |
+
+The catalogue only grows: an existing transform never changes behaviour, a variant takes a new name.
+
+**`map`.** The sample's value, rendered as text, is the key: a boolean as `true` or `false`, an integer
+in decimal (`-3`, `42`), a float in its shortest form (`12.5`, `100`, `1e+21`), a string as it is. The
+table values and the `default` are booleans, numbers or strings, all of one kind, which is the kind the
+step produces; integers and floats unify to float (a number written with a `.` or an exponent is a
+float, and then every value is a float), and only integers give an integer. A value with no key in the
+table takes the `default`; without a `default` it is a runtime error. The table may be empty only with a
+`default`.
+
+```yaml
+transforms:
+  - map: {table: {idle: 0, running: 1, setup: 2, fault: 3}}      # string -> integer
+```
+
+### Birth data type
+
+The `birth` of a device announces each signal with the data type of what its chain produces: a boolean
+is `boolean`, a string is `string`, an integer or a float is `number`. An `int16` point with `bit: 0` is
+announced `boolean`; a `string` point mapped to integers, or with `regex_extract` and `as: integer`, is
+`number`. A point without transforms is announced from its `type`, as before.
+
+### Bad samples and runtime errors
+
+- A sample of quality `bad`, from the driver or from `valid_range`, is not computed: it passes through
+  the following steps unchanged. `deadband`, `heartbeat`, `min_interval` and `debounce` take note of it
+  (below); `derivative` and `edge_counter` ignore it. A sample of quality `uncertain` is computed.
+- A runtime error of a step (a non-finite `scale` or `offset` result, an invalid BCD digit, a
+  value missing from a `map` without a `default`, a regex with no match or a failed conversion, an
+  `edge_counter` count that cannot be saved) turns the sample into a `bad` sample with the zero value of
+  the step's output kind (`0`, `false` or `""`), which passes through the following steps. It is counted
+  in `laraplate_edge_transform_errors_total{input}` and `transform_errors` of `/status`, and logged at
+  `WARN` with a rate limit, never with the value ([USAGE.md](USAGE.md#logs)). It never stalls the input
+  or refuses a record.
+- Every sample leaves the chain with the chain's output kind. A `bad` sample of another kind, for example
+  a `bad` integer that passed a `scale` uncomputed, leaves with the zero value of the output kind and its
+  original value is lost; a good integer leaving a chain that produces floats becomes a float.
+
+### Time-driven and stateful transforms
+
+All the state of a chain lives in memory, per device, signal and step, and starts clean when the agent
+or the input restarts; only the `edge_counter` counts persist. Deadlines are computed from the samples'
+timestamps and served on the agent's clock, so a device clock far from the agent's shifts them.
+
+- **`deadband`.** The threshold is absolute, or a percentage of the magnitude of the last sent value; with
+  a last sent value of 0 any change passes. A change of exactly the threshold passes (the comparison has
+  a relative tolerance of 1e-9 for float rounding: 0.2 to 0.3 passes a deadband of 0.1); an unchanged
+  value never passes, so `deadband: 0` drops only repeats. A `bad` sample passes, and the next good
+  sample passes as a quality change.
+- **`heartbeat`.** Every sample passes. When nothing left the step for the duration, it resends the last
+  sample that left, with its quality and the agent's clock time as timestamp, and again every duration
+  while nothing new comes. A `bad` sample that left is the last value: a bad source is resent bad. The
+  wait counts from the later of the last sample's timestamp and the last time the chain's deadlines
+  fired, so a sample held back by an earlier step and released late is not resent at once.
+- **`min_interval`.** The first sample of a quiet period passes at once and opens a window of the
+  interval; samples inside the window are held, only the latest kept; at the window's end the held
+  sample leaves with its own timestamp and the next window opens; a window that held nothing closes. A
+  `bad` sample passes at once and drops the held one, which is older; a good sample after it, in the
+  window still open, waits for the window's end.
+- **`debounce`.** Compares values only: a change of quality alone is not a change. A different value
+  restarts the wait; a return to the last sent value cancels it; the last sent value is not sent again.
+  A `bad` sample passes at once, cancels the waiting value and forgets the last sent one, so the value
+  that comes back after it is sent again once it stays for the duration.
+- **`derivative`.** The first sample, a sample not later than the previous one, and any decrease produce
+  nothing and become the new baseline: a decrease is read as a totaliser reset. It suits monotonic
+  totalisers (energy, flow, part counters); on a value that goes up and down only the rising slopes come
+  out.
+- **`edge_counter`.** The first sample after a start sends the current count as a baseline (0, or the
+  saved count) and sets the level; each counted edge then adds one, saves the count and sends it; other
+  samples send nothing. The count only grows, and goes back to 0 when it restarts (see "State"), which
+  the backend reads as a counter reset: do not set the backend's `rollover_max` on the signal of an
+  `edge_counter`, or a baseline of 0 after a reset would read as a rollover, that is a huge count of parts.
+
+When a device's `death` reaches the chains of its points (the driver lost the machine), the steps of
+those chains that keep state learn of it before the `death` is sent: `heartbeat` resends nothing until a
+new sample leaves the step, so the backend sees the device unreachable instead of fresh values;
+`min_interval` sends its held sample before the `death` and closes its window, so the first sample after
+it passes at once; `debounce` drops its waiting value, which was not seen unchanged for the duration.
+`deadband` and `debounce` also forget their last sent value, so the first value after the `death` is sent
+even when it is unchanged (by `debounce` once it stays for the duration) and a later `heartbeat` re-arms:
+the backend shows the device offline after a `death`, and a value equal to the one it had before would
+not bring it back.
+
+### State
+
+The `edge_counter` counts of an input are saved in `data_dir/inputs/{input id}/transform-state.json`,
+written atomically (directory mode `0700`, file `0600`) on every count:
+
+```json
+{"version": 1, "counters": {"<device>/<signal>/<position>/<sha256 of the step>": 42}}
+```
+
+- A count belongs to its device, signal, position in the chain and exact step (`{edge_counter: rising}`):
+  a step whose mode, position, device or signal changes starts at 0, and so does every count of an input
+  whose id changes (another directory), while the other points of the input keep their counts. The
+  backend reads a lower cumulative value as a counter reset.
+- When the input starts, the counts no current chain uses are dropped from the file. A step removed, or
+  changed and then changed back, restarts at 0 and never resumes an older count, which the backend would
+  read as parts produced.
+- The backend keys a count by device and signal, not by input, so the directory of an input id the
+  applied document does not have is removed: once a document is applied, after a rolled-back document
+  (against the document still applied), and when the agent starts, before any input starts (against
+  its first document). An input renamed and then renamed back, or removed and added again, therefore
+  counts from 0 instead of resuming the count of its old directory. A rollback that restarts an input
+  the failed document does not have (for example a rename rolled back) removes its directory first and starts it
+  from 0: the failed attempt may have counted the same device and signal under the new id.
+- A file that cannot be read (truncated, corrupt, of another version, with a negative count) is renamed
+  `transform-state.json.corrupt-<unix seconds>` and logged at `ERROR` with the input id; the counts start
+  from 0 and the input starts normally.
+- When the file cannot be written, the sample of that count is sent `bad` (a runtime error) and the count
+  stays in memory; the next successful write saves it.
+
+`config test` keeps no state file: its counts start from 0.
 
 ## Outputs
 
@@ -125,14 +302,15 @@ them for a credential.
 
 A document is applied by difference: each input and output is compared with the running one by its
 content. Unchanged components keep running untouched (an unchanged output keeps its buffer and its
-`source_seq`); changed ones restart; removed ones stop (an output's directory is kept); added ones
-start. While a changed output restarts, the records routed to it wait in memory (at most 10,000; beyond
-that they become a `buffer_full` loss marker).
+`source_seq`, an unchanged input the state of its transform chains); changed ones restart (a restarted
+input starts its transforms clean, except the `edge_counter` counts, see "Transforms"); removed ones
+stop (an output's directory is kept); added ones start. While a changed output restarts, the records
+routed to it wait in memory (at most 10,000; beyond that they become a `buffer_full` loss marker).
 
 Outcomes, as reported to Laraplate:
 
-- `rejected`: the document is invalid, older than the applied one, or asks for something this build
-  does not provide. Nothing changed.
+- `rejected`: the document is invalid, older than the applied one, has a transform chain that does not
+  type-check, or asks for something this build does not provide. Nothing changed.
 - `rolled_back`: a component did not start (an input has 30 seconds). What the apply started is stopped
   and what it stopped is started again.
 - `applied`: the document runs and is kept as `data_dir/config/last-valid.json`, from which the agent
@@ -148,7 +326,7 @@ Outcomes, as reported to Laraplate:
 | drivers other than `simulated` | the driver plans, in the design's order: `opcua` and `modbus`, then `mqtt`, `serial` and `file` |
 | output types other than `laraplate-http` | the MQTT output plan (`laraplate-mqtt`) and the plugin plan (`plugin:<id>`) |
 | `plugins`, `plugin:<id>` drivers and outputs | the plugin plan (design section 8) |
-| `transforms` of points and of derived signals, `derived` signals | the transforms and CEL expressions plan (design section 7) |
+| `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references | a later plan with the OS keystore |
 
 ## Buffer
@@ -214,6 +392,15 @@ is exact, but its `ts` range can span records that are still in the buffer.
   marker if the agent crashes before the reopened buffer takes them, for instance during a slow reopen
   of a large buffer.
 - YAML flow style at the top level of a document is read as JSON and refused; use block style.
+- Transform deadlines (`heartbeat`, `min_interval`, `debounce`) come from sample timestamps and are
+  served on the agent's clock: a device clock far from the agent's shifts them, and a backward step of
+  the agent's clock delays a `heartbeat` by the size of the step.
+- `valid_range` compares integers as floats, exactly up to 2^53 in magnitude.
+- Every counted edge of an `edge_counter` writes and syncs the input's state file while the input's
+  transform processor holds its lock: the other signals of that input wait for the write, tens of
+  milliseconds on an SD card. A fast pulse train on a slow disk delays the input's samples accordingly.
+- The state of the time-driven transforms (a held `min_interval` or `debounce` sample, the `heartbeat`
+  timer) is lost when the input restarts; only the `edge_counter` counts are kept.
 - A `death` from one input marks the device dead for every input that reads it.
 - Connection keys spelled `apikey`, `api-key` or `apiKey` are not treated as secrets.
 - A corrupt record of the buffer, found when it opens (inside an older segment) or while it runs
