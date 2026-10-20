@@ -227,11 +227,15 @@ timestamps and served on the agent's clock, so a device clock far from the agent
   the backend reads as a counter reset: do not set the backend's `rollover_max` on the signal of an
   `edge_counter`, or a baseline of 0 after a reset would read as a rollover, that is a huge count of parts.
 
-When a device's `death` reaches the chains of its points (the driver lost the machine), the time-driven
-steps of those chains learn of it before the `death` is sent: `heartbeat` resends nothing until a new
-sample leaves the step, so the backend sees the device unreachable instead of fresh values;
+When a device's `death` reaches the chains of its points (the driver lost the machine), the steps of
+those chains that keep state learn of it before the `death` is sent: `heartbeat` resends nothing until a
+new sample leaves the step, so the backend sees the device unreachable instead of fresh values;
 `min_interval` sends its held sample before the `death` and closes its window, so the first sample after
 it passes at once; `debounce` drops its waiting value, which was not seen unchanged for the duration.
+`deadband` and `debounce` also forget their last sent value, so the first value after the `death` is sent
+even when it is unchanged (by `debounce` once it stays for the duration) and a later `heartbeat` re-arms:
+the backend shows the device offline after a `death`, and a value equal to the one it had before would
+not bring it back.
 
 ### State
 

@@ -17,8 +17,8 @@ import (
 // Chain.Fire calls every step. A bad sample never reaches Apply (the chain
 // passes it through); deadband, heartbeat, debounce and min_interval see it
 // through observeBad (rulings R9, R10), derivative and edge_counter ignore it.
-// heartbeat, min_interval and debounce also learn of their device's death
-// through deviceDown (ruling R14).
+// deadband, heartbeat, min_interval and debounce also learn of their
+// device's death through deviceDown (rulings R14, R16).
 
 func init() {
 	register("deadband", definition{accepts: acceptNumber, build: buildDeadband})
@@ -75,7 +75,8 @@ var errDeadband = errors.New(`parameter must be a non-negative number or a perce
 // deadband sends a sample when its value moved from the last sent value by
 // at least the threshold, or when its quality differs from the last sent
 // quality (a bad sample passing through counts as sent). The first value
-// always passes. The threshold is absolute, or a fraction of the magnitude of
+// always passes, and so does the first value after the device's death
+// (ruling R16). The threshold is absolute, or a fraction of the magnitude of
 // the last sent value; with a last sent value of 0 any change passes (P5).
 type deadband struct {
 	untimed
@@ -128,6 +129,15 @@ func (d *deadband) observeBad(model.Sample) []model.Sample {
 	if d.sent {
 		d.lastQual = model.Bad
 	}
+
+	return nil
+}
+
+// deviceDown forgets the last sent value (ruling R16): the backend shows the
+// device Offline after its death, so the first value after it must be sent
+// even when unchanged.
+func (d *deadband) deviceDown() []model.Sample {
+	d.sent = false
 
 	return nil
 }
@@ -342,7 +352,8 @@ func buildMinInterval(c buildContext) (Step, error) {
 // cancels the waiting value, which was not seen unchanged for the delay
 // (ruling R10), and becomes the last that left, so the value sent before it
 // is sent again once it stays. The death of the device cancels the waiting
-// value too (ruling R14).
+// value too (ruling R14) and forgets the last sent value, so the value after
+// the death is sent once it stays, even when unchanged (ruling R16).
 type debounce struct {
 	kind  model.ValueKind
 	delay time.Duration
@@ -386,7 +397,7 @@ func (d *debounce) observeBad(s model.Sample) []model.Sample {
 }
 
 func (d *debounce) deviceDown() []model.Sample {
-	d.pending = nil
+	d.pending, d.sent = nil, false
 
 	return nil
 }

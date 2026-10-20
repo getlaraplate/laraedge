@@ -113,8 +113,9 @@ type clockObserver interface {
 
 // deviceObserver is implemented by a step that must know its device died
 // (ruling R14): heartbeat stops resending, min_interval releases its held
-// sample, debounce drops its waiting value. It returns what leaves the step
-// before the death.
+// sample, debounce drops its waiting value; deadband and debounce forget their
+// last sent value (ruling R16). It returns what leaves the step before the
+// death.
 type deviceObserver interface {
 	deviceDown() []model.Sample
 }

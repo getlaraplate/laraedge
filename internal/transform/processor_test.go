@@ -1025,6 +1025,70 @@ func TestProcessorDeviceDeathReleasesAndCancels(t *testing.T) {
 	}
 }
 
+// TestProcessorUnchangedValueIsSentAfterTheDeviceDeath is ruling R16: after
+// a death the backend shows the device Offline, and a state sample equal to
+// the state it had is a no-op there. A deadband or debounce before a
+// heartbeat therefore forgets its last sent value at the death: the first
+// value after it is sent even when unchanged, and the heartbeat re-arms.
+func TestProcessorUnchangedValueIsSentAfterTheDeviceDeath(t *testing.T) {
+	start := func(t *testing.T, first config.Transform) (*transform.Processor, *clock.Fake, *recorder, func(model.Record)) {
+		t.Helper()
+
+		in := inputOf(point{device: "press1", signal: "state", typ: "int16", steps: []config.Transform{first, step("heartbeat", `"10s"`)}})
+		clk := clock.NewFake(t0)
+		p := newProcessor(t, in, t.TempDir(), clk, nil)
+		rec := &recorder{}
+		emit := p.Wrap(rec.emit)
+
+		p.Start(t.Context())
+
+		return p, clk, rec, emit
+	}
+
+	t.Run("deadband sends it at once", func(t *testing.T) {
+		p, clk, rec, emit := start(t, step("deadband", "1"))
+
+		emit(sampleOf("press1", "state", 0, model.IntValue(3)))
+		waitArmed(t, p, t0.Add(10*time.Second))
+
+		emit(deathOf("press1", 3*time.Second))
+		emit(sampleOf("press1", "state", 5*time.Second, model.IntValue(3)))
+
+		// The heartbeat re-armed on the value sent at 5s.
+		waitArmed(t, p, t0.Add(15*time.Second))
+		clk.Advance(15 * time.Second)
+		waitUntil(t, "the heartbeat", func() bool { return rec.count() >= 4 })
+
+		if got, want := describe(rec.all()), "0s=3,death,5s=3,15s=3"; got != want {
+			t.Errorf("emitted %s, want %s", got, want)
+		}
+	})
+
+	t.Run("debounce sends it once stable for the delay", func(t *testing.T) {
+		p, clk, rec, emit := start(t, step("debounce", `"2s"`))
+
+		emit(sampleOf("press1", "state", 0, model.IntValue(3)))
+		waitArmed(t, p, t0.Add(2*time.Second))
+		clk.Advance(2 * time.Second)
+		waitArmed(t, p, t0.Add(12*time.Second))
+
+		emit(deathOf("press1", 3*time.Second))
+		emit(sampleOf("press1", "state", 5*time.Second, model.IntValue(3)))
+
+		// The unchanged value waits for the delay again, then leaves with
+		// the ts of its change; the heartbeat re-arms from the clock time.
+		waitArmed(t, p, t0.Add(7*time.Second))
+		clk.Advance(5 * time.Second)
+		waitArmed(t, p, t0.Add(17*time.Second))
+		clk.Advance(10 * time.Second)
+		waitUntil(t, "the heartbeat", func() bool { return rec.count() >= 4 })
+
+		if got, want := describe(rec.all()), "0s=3,death,5s=3,17s=3"; got != want {
+			t.Errorf("emitted %s, want %s", got, want)
+		}
+	})
+}
+
 // TestProcessorErrorSummaryClosesTheEpisodeOnTheClock: the summary of the
 // errors only counted is logged a quiet errorLogWindow after the last error,
 // by the deadline goroutine, without waiting for another error or Close.
