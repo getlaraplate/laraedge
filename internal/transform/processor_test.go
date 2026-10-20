@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
 	"github.com/getlaraplate/laraplate-edge/internal/clock"
 	"github.com/getlaraplate/laraplate-edge/internal/config"
 	"github.com/getlaraplate/laraplate-edge/internal/model"
@@ -338,7 +339,15 @@ func TestProcessorRuntimeErrorLogIsRateLimited(t *testing.T) {
 		t.Fatalf("log entries after the first errors = %d, want 2 (one per signal):\n%s", n, log.text())
 	}
 
-	clk.Advance(time.Minute)
+	// Errors keep coming: one summary once the minute has passed.
+	clk.Advance(30 * time.Second)
+	bad("code")
+
+	if n := len(log.entries(t)); n != 2 {
+		t.Fatalf("log entries within the minute = %d, want 2:\n%s", n, log.text())
+	}
+
+	clk.Advance(30 * time.Second)
 	bad("code")
 
 	entries := log.entries(t)
@@ -346,19 +355,38 @@ func TestProcessorRuntimeErrorLogIsRateLimited(t *testing.T) {
 		t.Fatalf("log entries after a minute = %d, want 3:\n%s", len(entries), log.text())
 	}
 
-	if s := entries[2]; s["level"] != "WARN" || s["input"] != inputID || s["suppressed"] != float64(2) {
-		t.Errorf("summary %v, want WARN with the input and suppressed 2", s)
+	if s := entries[2]; s["level"] != "WARN" || s["input"] != inputID || s["suppressed"] != float64(3) {
+		t.Errorf("summary %v, want WARN with the input and suppressed 3", s)
 	}
 
+	// Two quiet minutes end the episode: the error counted with the summary
+	// is reported, and the next error is logged in full again.
+	clk.Advance(2 * time.Minute)
+	bad("code")
+
+	entries = log.entries(t)
+	if len(entries) != 5 {
+		t.Fatalf("log entries after a quiet window = %d, want 5:\n%s", len(entries), log.text())
+	}
+
+	if s := entries[3]; s["suppressed"] != float64(1) {
+		t.Errorf("summary %v, want suppressed 1", s)
+	}
+
+	if e := entries[4]; e["step"] != float64(1) || e["signal"] != "code" || e["suppressed"] != nil {
+		t.Errorf("entry %v, want the error logged in full", e)
+	}
+
+	bad("code")
 	p.Close()
 
 	entries = log.entries(t)
-	if len(entries) != 4 || entries[3]["suppressed"] != float64(1) {
+	if len(entries) != 6 || entries[5]["suppressed"] != float64(1) {
 		t.Errorf("log after Close:\n%s\nwant a last summary with suppressed 1", log.text())
 	}
 
-	if p.Errors() != 5 {
-		t.Errorf("Errors() = %d, want 5", p.Errors())
+	if p.Errors() != 8 {
+		t.Errorf("Errors() = %d, want 8", p.Errors())
 	}
 }
 
@@ -507,10 +535,15 @@ func TestProcessorCloseWaitsForAnEmitInProgress(t *testing.T) {
 		close(closed)
 	}()
 
-	select {
-	case <-closed:
-		t.Fatal("Close returned while an emit was in progress")
-	default:
+	// The emit stays blocked until release: Close must not return meanwhile.
+	for range 10000 {
+		select {
+		case <-closed:
+			t.Fatal("Close returned while an emit was in progress")
+		default:
+		}
+
+		runtime.Gosched()
 	}
 
 	close(release)
@@ -654,6 +687,7 @@ func TestProcessorCorruptStateFile(t *testing.T) {
 		{name: "unknown version", content: `{"version":2,"counters":{"` + key + `":4}}`},
 		{name: "no version", content: `{"counters":{"` + key + `":4}}`},
 		{name: "counter not an integer", content: `{"version":1,"counters":{"` + key + `":4.5}}`},
+		{name: "negative counter", content: `{"version":1,"counters":{"` + key + `":-4}}`},
 		{name: "trailing data", content: `{"version":1,"counters":{"` + key + `":4}} {}`},
 	}
 
@@ -731,7 +765,7 @@ func TestProcessorSaveErrorIsARuntimeError(t *testing.T) {
 
 	// A directory where the temporary file of the atomic write goes makes
 	// every Save fail.
-	if err := os.MkdirAll(stateFilePath(dir)+".tmp", 0o700); err != nil {
+	if err := os.MkdirAll(stateFilePath(dir)+atomicfile.TmpSuffix, 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -803,5 +837,70 @@ func TestProcessorConcurrentUse(t *testing.T) {
 
 	if n := rec.count(); n < 4*perWriter {
 		t.Errorf("emitted %d records, want at least %d", n, 4*perWriter)
+	}
+}
+
+// startedProcessor builds and starts a processor, as the supervisor does.
+func startedProcessor(t *testing.T, in config.Input, dir string) *transform.Processor {
+	t.Helper()
+
+	p := newProcessor(t, in, dir, clock.NewFake(t0), nil)
+	p.Start(t.Context())
+
+	return p
+}
+
+// TestProcessorRevertedStepStartsClean is ruling R11: a key no chain asks
+// for is dropped, so a changed then reverted step never resumes an older,
+// higher count.
+func TestProcessorRevertedStepStartsClean(t *testing.T) {
+	tests := []struct {
+		name string
+		// middle is the point list of the intermediate document.
+		middle []point
+		// countInMiddle pulses the intermediate document's door before Close.
+		countInMiddle bool
+	}{
+		{name: "rising, both, rising", middle: []point{edgeCounter("door", "both")}, countInMiddle: true},
+		{name: "rising, both without a count, rising across a restart", middle: []point{edgeCounter("door", "both")}},
+		{name: "point removed and re-added", middle: []point{edgeCounter("gate", "rising")}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			rising := inputOf(edgeCounter("door", "rising"))
+
+			first := startedProcessor(t, rising, dir)
+			if got := pulse(t, first, "door", false, true, false, true, false, true); fmt.Sprint(got) != "[0 1 2 3]" {
+				t.Fatalf("first counts = %v", got)
+			}
+
+			first.Close()
+
+			middle := startedProcessor(t, inputOf(tc.middle...), dir)
+			if tc.countInMiddle {
+				if got := pulse(t, middle, "door", false, true); fmt.Sprint(got) != "[0 1]" {
+					t.Fatalf("changed step counts = %v, want [0 1]", got)
+				}
+			}
+
+			middle.Close()
+
+			last := startedProcessor(t, rising, dir)
+			if got := pulse(t, last, "door", true); fmt.Sprint(got) != "[0]" {
+				t.Errorf("reverted step baseline = %v, want [0]", got)
+			}
+		})
+	}
+}
+
+func TestProcessorStartWritesNothingWithoutPrunedKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	startedProcessor(t, inputOf(edgeCounter("door", "rising")), dir).Close()
+
+	if _, err := os.Stat(stateFilePath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("Start wrote a state file with nothing to prune: %v", err)
 	}
 }

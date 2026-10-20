@@ -29,6 +29,8 @@ type Processor struct {
 	inputID string
 	clk     clock.Clock
 	log     *slog.Logger
+	// state is nil without persistence.
+	state *stateFile
 
 	errors atomic.Uint64
 
@@ -107,6 +109,11 @@ func NewProcessor(cfg config.Input, dataDir string, clk clock.Clock, logger *slo
 		}
 	}
 
+	if state != nil {
+		state.prune()
+		p.state = state
+	}
+
 	return p, nil
 }
 
@@ -158,14 +165,24 @@ func (p *Processor) process(emit func(model.Record), r model.Record) {
 	}
 }
 
-// Start starts the deadline goroutine. It runs until Close, or until ctx is
-// done; a second Start, or a Start after Close, does nothing.
+// Start writes the state file when NewProcessor dropped the counters of
+// steps no chain uses any more (ruling R11), then starts the deadline
+// goroutine. A failed write is logged; the next Save retries it. The
+// goroutine runs until Close, or until ctx is done; a second Start, or a
+// Start after Close, does nothing.
 func (p *Processor) Start(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.started || p.closed {
 		return
+	}
+
+	if p.state != nil {
+		if err := p.state.persistPruned(); err != nil {
+			p.log.Error("transform: the state file cannot be written; dropped counters stay in it until the next count",
+				"input", p.inputID, "error", err)
+		}
 	}
 
 	ctx, p.cancel = context.WithCancel(ctx)
@@ -348,8 +365,9 @@ type errorKey struct {
 // runtime error of each device, signal and step position in an episode is
 // logged in full at WARN; later ones are only counted, and the count is
 // logged in one summary at most once per errorLogWindow, measured on the
-// processor's clock. A window without errors ends the episode: the next
-// error is logged in full again. Nothing logged carries a sample value. The
+// processor's clock. errorLogWindow without any error ends the episode: the
+// errors still counted are summarised and the next error is logged in full
+// again. Nothing logged carries a sample value. The
 // owner holds the processor's mutex around every call. Same shape as the
 // buffer's failure log.
 type errorLog struct {
@@ -357,6 +375,8 @@ type errorLog struct {
 	inputID string
 	// start is when the current window began.
 	start time.Time
+	// last is when the last error was reported.
+	last time.Time
 	// seen holds the keys logged in full in this episode.
 	seen map[errorKey]struct{}
 	// suppressed counts the errors counted and not logged since the last
@@ -366,6 +386,8 @@ type errorLog struct {
 
 func (l *errorLog) report(now time.Time, key pointKey, err error) {
 	l.flush(now)
+
+	l.last = now
 
 	ek := errorKey{device: key.device, signal: key.signal}
 
@@ -398,20 +420,23 @@ func (l *errorLog) report(now time.Time, key pointKey, err error) {
 		"step", stepErr.Position, "transform", stepErr.Name, "error", stepErr.Err.Error())
 }
 
-// flush logs the summary once the window has passed, or ends the episode
-// when nothing was counted in it.
+// flush logs the summary once the window has passed, and ends the episode
+// after a quiet errorLogWindow.
 func (l *errorLog) flush(now time.Time) {
-	if len(l.seen) == 0 || now.Sub(l.start) < errorLogWindow {
+	if len(l.seen) == 0 {
 		return
 	}
 
-	if l.suppressed == 0 {
-		clear(l.seen)
-
+	quiet := now.Sub(l.last) >= errorLogWindow
+	if !quiet && now.Sub(l.start) < errorLogWindow {
 		return
 	}
 
 	l.summary(now)
+
+	if quiet {
+		clear(l.seen)
+	}
 }
 
 // summary logs the count of the errors not logged, if any, and opens a new

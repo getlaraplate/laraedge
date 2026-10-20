@@ -38,6 +38,10 @@ type stateFile struct {
 
 	mu       sync.Mutex
 	counters map[string]int64
+	// requested holds the key of every Store the factory returned.
+	requested map[string]struct{}
+	// pruned is set when prune dropped a loaded key not yet written away.
+	pruned bool
 }
 
 // loadStateFile reads the state file in dir. A file that cannot be read or
@@ -45,7 +49,7 @@ type stateFile struct {
 // transform-state.json.corrupt-<unix seconds>, logged at ERROR with the input
 // id and never its content, and the counters start empty (P3).
 func loadStateFile(dir, inputID string, clk clock.Clock, log *slog.Logger) *stateFile {
-	s := &stateFile{dir: dir, counters: map[string]int64{}}
+	s := &stateFile{dir: dir, counters: map[string]int64{}, requested: map[string]struct{}{}}
 	path := filepath.Join(dir, stateFileName)
 
 	data, err := os.ReadFile(path)
@@ -75,11 +79,18 @@ func loadStateFile(dir, inputID string, clk clock.Clock, log *slog.Logger) *stat
 	return s
 }
 
-// parseState decodes a state file of the current version.
+// parseState decodes a state file of the current version. A negative count
+// cannot have been written and makes the file corrupt.
 func parseState(data []byte) (map[string]int64, bool) {
 	var doc stateDocument
 	if err := json.Unmarshal(data, &doc); err != nil || doc.Version != stateVersion {
 		return nil, false
+	}
+
+	for _, v := range doc.Counters {
+		if v < 0 {
+			return nil, false
+		}
 	}
 
 	if doc.Counters == nil {
@@ -91,16 +102,55 @@ func parseState(data []byte) (map[string]int64, bool) {
 
 // factory returns the StateFactory of one point. Its stores are lazy: a key
 // enters the file only on its first Save, so a chain compiled and then
-// refused, or replaced before it counted, leaves no entry.
+// refused, or replaced before it counted, leaves no entry. Every key handed
+// out is recorded for prune.
 func (s *stateFile) factory(device, signal string) StateFactory {
 	return func(position int, canonical json.RawMessage) Store {
 		sum := sha256.Sum256(canonical)
+		key := fmt.Sprintf("%s/%s/%d/%s", device, signal, position, hex.EncodeToString(sum[:]))
 
-		return &counterStore{
-			file: s,
-			key:  fmt.Sprintf("%s/%s/%d/%s", device, signal, position, hex.EncodeToString(sum[:])),
+		s.mu.Lock()
+		s.requested[key] = struct{}{}
+		s.mu.Unlock()
+
+		return &counterStore{file: s, key: key}
+	}
+}
+
+// prune drops every counter whose key no compiled chain asked for (ruling
+// R11): the count of a changed or removed step must not come back when the
+// document is reverted, because a resumed higher count would read as parts
+// produced. It runs once all chains are compiled, before any Save.
+func (s *stateFile) prune() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key := range s.counters {
+		if _, ok := s.requested[key]; !ok {
+			delete(s.counters, key)
+
+			s.pruned = true
 		}
 	}
+}
+
+// persistPruned writes the file when prune dropped keys, so that a revert
+// after a restart, before any Save, starts clean too.
+func (s *stateFile) persistPruned() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.pruned {
+		return nil
+	}
+
+	if err := s.writeLocked(); err != nil {
+		return err
+	}
+
+	s.pruned = false
+
+	return nil
 }
 
 func (s *stateFile) load(key string) (int64, bool) {
@@ -121,6 +171,17 @@ func (s *stateFile) save(key string, v int64) error {
 
 	s.counters[key] = v
 
+	if err := s.writeLocked(); err != nil {
+		return err
+	}
+
+	s.pruned = false
+
+	return nil
+}
+
+// writeLocked writes the whole file. The caller holds s.mu.
+func (s *stateFile) writeLocked() error {
 	data, err := json.Marshal(stateDocument{Version: stateVersion, Counters: s.counters})
 	if err != nil {
 		return fmt.Errorf("transform: encode state: %w", err)
