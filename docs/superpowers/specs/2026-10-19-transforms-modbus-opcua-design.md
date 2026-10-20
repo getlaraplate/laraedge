@@ -2,6 +2,7 @@
 
 **Status:** Approved (2026-10-19), section by section. Transforms delivered (2026-10-20) by the plan
 `../plans/2026-10-19-transforms.md`; the `modbus` and `opcua` plans follow, in that order (section 7).
+Amended 2026-10-20 after delivery to match the shipped behaviour (rulings R5-R11 of the transforms plan).
 
 **Date:** 2026-10-19
 
@@ -48,12 +49,17 @@ the document with a message naming the input, device, signal and step. "Number" 
 
 **State.** Per device, signal and chain position. All state starts clean after a restart except `edge_counter`,
 written atomically to `data_dir/inputs/{input_id}/transform-state.json` on every increment (pulses are slow and a
-production counter must not lose parts).
+production counter must not lose parts). The key of a count includes the step's content, so a changed, removed
+or reverted step restarts at 0; the counts the document no longer uses are pruned when the input starts, so an
+older, higher count never comes back.
 
 **Quality.** A `bad` sample passes through the chain without being computed (parent 7.2). A runtime error of a
 transform (an invalid BCD digit, a regex with no match, a failed conversion, a missing `map` key with no
 default) produces a `bad` sample of the step's output kind, with the zero value, and increments
-`laraplate_edge_transform_errors_total{input}`. It never stalls the input.
+`laraplate_edge_transform_errors_total{input}`. It never stalls the input. `deadband`, `heartbeat`, `min_interval`
+and `debounce` observe the `bad` samples passing through them (section 4). Every sample leaving a chain has the
+chain's output kind: a `bad` sample of another kind leaves with the zero value of that kind, and a good integer
+leaving a float chain becomes a float.
 
 **Configuration.** Each step is an object with one key naming the transform (`{ scale: 0.1 }`). The published
 JSON Schema gains the exact parameters of every transform, so `config validate` checks them offline.
@@ -71,20 +77,20 @@ JSON Schema gains the exact parameters of every transform, so `config validate` 
 | `map` | `{table: {key: value}, default?}` | any → kind of the table values | the input rendered as text is the key; every value and the default share one kind; a missing key with no default is a runtime error |
 | `valid_range` | `{min?, max?}` (at least one) | number → number | out of range: quality `bad`, value kept |
 | `deadband` | number (absolute) or `"N%"` (of the last sent value) | number → number | sends when the change from the last sent value reaches the threshold or the quality changes; the first value always passes |
-| `heartbeat` | duration | any → same | resends the last value with the current time when nothing left the step for the duration |
-| `min_interval` | duration | any → same | at most one sample per interval: the latest of the window, with its own timestamp, at the window's end |
-| `debounce` | duration | any → same | sends a value only after it stayed unchanged for the duration, with the timestamp of the change |
-| `edge_counter` | `rising` \| `falling` \| `both` | boolean → integer | cumulative count of edges, persisted (section 3) |
+| `heartbeat` | duration | any → same | resends the last value with the current time when nothing left the step for the duration; it resends what last left the step, so after a `bad` sample it resends `bad` |
+| `min_interval` | duration | any → same | the first sample of a quiet period passes at once; then at most one sample per interval: the latest of the window, with its own timestamp, at the window's end; a `bad` sample passes at once and drops the held one |
+| `debounce` | duration | any → same | sends a value only after it stayed unchanged for the duration, with the timestamp of the change; a `bad` sample cancels the pending value and forgets the last sent one |
+| `edge_counter` | `rising` \| `falling` \| `both` | boolean → integer | cumulative count of edges, persisted (section 3); the first sample after a start emits the current count as a baseline |
 | `derivative` | `true` | number → float | change per second over the sample timestamps; the first sample and a backward jump (totaliser reset) produce nothing |
 | `trim` | `true` | string → string | removes surrounding white space |
 | `regex_extract` | `{pattern, group?, as?}` | string → string, integer or float | RE2 (linear time); `group` defaults to 1; `as` (`string`, `integer`, `float`) converts the capture; no match or a failed conversion is a runtime error |
 
 `as` in `regex_extract` and the missing-key rule of `map` are additions to the parent: without `as` a reading
-taken from a serial gauge would stay text.
+taken from a serial gauge would stay text. The catalogue only grows: an existing transform never changes
+behaviour; a variant takes a new name (parent 7.2).
 
 Integers and floats in a `map` unify to float: a table (with its default) holding any float produces floats,
-the integers promoted; only integers produce an integer (ruling R6 of the transforms plan). The catalogue only grows: an existing transform never changes
-behaviour; a variant takes a new name (parent 7.2).
+the integers promoted; only integers produce an integer (ruling R6 of the transforms plan).
 
 ## 5. Modbus driver
 

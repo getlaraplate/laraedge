@@ -205,8 +205,8 @@ laraplate-edge config test config.yaml --input samples.jsonl
   Before a sample, every pending deadline up to its `ts` fires in time order, the clock moving to each,
   so a `heartbeat` repeats across a gap. A sample whose `ts` is earlier than the clock does not move the
   clock back: it is applied as it comes, with its own `ts`, so time-driven steps may treat it as late;
-  keep the file in time order. After the last sample the deadlines fire up to a horizon, the later of
-  the last sample's `ts` and the clock plus the longest `heartbeat`, `min_interval` or `debounce`
+  keep the file in time order. After the last sample the deadlines fire up to a horizon: the later of
+  the last sample's `ts` and the clock, plus the longest `heartbeat`, `min_interval` or `debounce`
   duration of the document, so held samples come out and a `heartbeat` stops. The output is in emission
   order; a sample of a point without transforms passes through.
 - Nothing else is read or written: the same files always give the same output. No state file is used,
@@ -217,8 +217,8 @@ laraplate-edge config test config.yaml --input samples.jsonl
   1,000,000 firings (a very short period over a long gap); 2 on a usage error, such as a missing
   `--input`.
 
-**Sample files** are JSON Lines, one object per sample with exactly the keys `device`, `signal`, `ts`,
-`value` and `quality`:
+**Sample files** are JSON Lines, one object per sample with the keys `device`, `signal`, `ts`, `value`
+and `quality`, all required (no other key is accepted; key names are matched without regard to case):
 
 ```
 {"device":"press-07","signal":"press_force","ts":"2026-10-19T08:00:01.250Z","value":182.5,"quality":"good"}

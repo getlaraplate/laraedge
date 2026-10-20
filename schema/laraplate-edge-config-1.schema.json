@@ -253,19 +253,19 @@
       "else": { "type": "number", "minimum": 0 }
     },
     "transformHeartbeat": {
-      "description": "heartbeat: resends the last value with the current time when nothing left the step for this positive duration.",
+      "description": "heartbeat: resends the last value with the current time when nothing left the step for this positive duration. It resends what last left the step, so after a bad sample it resends bad.",
       "$ref": "#/$defs/duration"
     },
     "transformMinInterval": {
-      "description": "min_interval: at most one sample per positive interval: the latest of the window, with its own timestamp, at the window's end.",
+      "description": "min_interval: the first sample of a quiet period passes at once; then at most one sample per positive interval: the latest of the window, with its own timestamp, at the window's end. A bad sample passes at once and drops the held one.",
       "$ref": "#/$defs/duration"
     },
     "transformDebounce": {
-      "description": "debounce: sends a value only after it stayed unchanged for this positive duration, with the timestamp of the change.",
+      "description": "debounce: sends a value only after it stayed unchanged for this positive duration, with the timestamp of the change. A bad sample cancels the pending value and forgets the last sent one.",
       "$ref": "#/$defs/duration"
     },
     "transformEdgeCounter": {
-      "description": "edge_counter: the cumulative count of the edges of a boolean, persisted across restarts; produces an integer.",
+      "description": "edge_counter: the cumulative count of the edges of a boolean, persisted across restarts; produces an integer. The first sample after a start emits the current count as a baseline.",
       "enum": ["rising", "falling", "both"]
     },
     "transformDerivative": {

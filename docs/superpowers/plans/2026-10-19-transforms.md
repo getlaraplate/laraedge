@@ -197,6 +197,10 @@ reason (the rulings are in "Controller rulings" below):
   document, replacing P7's "flushes pending time-driven steps at the end". A replay above 1,000,000
   firings exits 1. The runtime error count goes to stderr with exit 0. `probe` takes `--config` over
   `--bootstrap` when both are given and prints tab-separated lines.
+- **Design record amended (R13, Task 7 review).** Spec sections 3 (State, Quality) and 4 (`heartbeat`,
+  `min_interval`, `debounce`, `edge_counter`) and the schema descriptions of those four transforms were
+  amended after delivery to the shipped behaviour of R5 to R11; the spec's status line says so. No
+  validation changed.
 - **Task 7.** The end-to-end test adds companion points without a chain (`state_text`,
   `press_force_kn`) to check each transformed value exactly; the simulated example carries the chain
   commented (the running demo keeps sending the raw values), checked by hand with `config validate`,
@@ -224,9 +228,7 @@ Deferred minors, left as they are (from the reviews):
   subtest calls `t.Fatal` off the test goroutine; the metric's HELP wording; the series of a removed
   input disappears (documented) (Task 5);
 - `ReadSamples` matches keys case-insensitively and has no total size cap; `parseArgs` re-reads flags
-  after `--` (Task 6);
-- the schema's `min_interval` description and spec section 4 still word `min_interval`, `heartbeat` and
-  `edge_counter` as before R7 to R9; the documentation describes the delivered behaviour.
+  after `--` (Task 6).
 
 Open, awaiting the user: `golang.org/x/text` v0.14.0 (indirect) has two vulnerabilities the code does not
 call; upgrading it changes `go.mod` and needs approval (Task 0).
@@ -251,3 +253,4 @@ with what each costs if wrong. The Delivery status above cites them by number.
 - R10 Ruling: a bad sample passing debounce cancels the pending value (it was not seen unchanged for D); in min_interval a bad sample passes at once and drops the held older sample — a bad source never looks good after the fact — cost: a good value held just before a bad one is not sent.
 - R11 Ruling: NewProcessor prunes in memory every counter key not requested by the current document's chains and persists the pruned map at Start — pruning only errs toward a reset, which the backend handles — cost: a step removed and re-added starts from 0.
 - R12 Ruling (amends task-6-context item 3): between samples, fire every deadline <= the next sample's ts in time order, advancing the virtual clock to each (heartbeats repeat across gaps); at the end, fire deadlines in time order up to last sample ts + the longest duration parameter of the document's time-driven steps, then stop (terminates with heartbeats; flushes debounce/min_interval) — cost: heartbeat output after the last sample is bounded by that horizon.
+- R13 Ruling: amend the spec (sections 3 State and Quality, section 4 min_interval/edge_counter/heartbeat/debounce rows) and the schema descriptions to the shipped behaviour, with an "Amended 2026-10-20 after delivery" note in the spec status line — the spec is the design record readers trust and it claims to win over the parent — cost: none (description-only).
