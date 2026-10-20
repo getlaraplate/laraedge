@@ -55,12 +55,28 @@ type envelope struct {
 		Device  string `json:"device"`
 		Type    string `json:"type"`
 		Samples []struct {
-			Signal string          `json:"signal"`
-			TS     time.Time       `json:"ts"`
-			Value  json.RawMessage `json:"value"`
+			Signal  string          `json:"signal"`
+			TS      time.Time       `json:"ts"`
+			Value   json.RawMessage `json:"value"`
+			Quality string          `json:"quality"`
 		} `json:"samples"`
+		Signals []birthSignal `json:"signals"`
 	} `json:"devices"`
 	Losses []json.RawMessage `json:"losses"`
+}
+
+// birthSignal is one signal announced by a birth.
+type birthSignal struct {
+	Signal   string  `json:"signal"`
+	DataType string  `json:"data_type"`
+	Unit     *string `json:"unit"`
+}
+
+// receivedSample is one sample of an accepted envelope.
+type receivedSample struct {
+	TS      time.Time
+	Value   json.RawMessage
+	Quality string
 }
 
 type attempt struct {
@@ -443,6 +459,36 @@ func (b *backend) allAccepted(ids []string) bool {
 	}
 
 	return true
+}
+
+// received returns what the backend accepted, in source_seq order: the
+// samples by device and signal, and the births by device. It stops at the
+// first source_seq not accepted (checkDelivery reports the gap).
+func (b *backend) received() (map[string]map[string][]receivedSample, map[string][][]birthSignal) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	samples := map[string]map[string][]receivedSample{}
+	births := map[string][][]birthSignal{}
+	for seq := uint64(0); ; seq++ {
+		env, ok := b.accepted[seq]
+		if !ok {
+			break
+		}
+		for _, dev := range env.Devices {
+			if dev.Type == "birth" {
+				births[dev.Device] = append(births[dev.Device], dev.Signals)
+			}
+			for _, s := range dev.Samples {
+				if samples[dev.Device] == nil {
+					samples[dev.Device] = map[string][]receivedSample{}
+				}
+				samples[dev.Device][s.Signal] = append(samples[dev.Device][s.Signal], receivedSample{TS: s.TS, Value: s.Value, Quality: s.Quality})
+			}
+		}
+	}
+
+	return samples, births
 }
 
 func (b *backend) heldIDs() []string {

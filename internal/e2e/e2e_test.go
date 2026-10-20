@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -97,7 +99,7 @@ func raceEnabled() bool {
 func TestNetworkCut(t *testing.T) {
 	b := newBackend(t)
 	dir := t.TempDir()
-	boot := writeFileSetup(t, dir, b.url())
+	boot := writeFileSetup(t, dir, b.url(), points)
 
 	a := startAgent(t, boot)
 	b.waitFor(t, a, "5 batches accepted", func() bool { return b.acceptedCount() >= 5 })
@@ -131,7 +133,7 @@ func TestNetworkCut(t *testing.T) {
 func TestKillAndRestart(t *testing.T) {
 	b := newBackend(t)
 	dir := t.TempDir()
-	boot := writeFileSetup(t, dir, b.url())
+	boot := writeFileSetup(t, dir, b.url(), points)
 
 	first := startAgent(t, boot)
 	b.waitFor(t, first, "3 batches accepted", func() bool { return b.acceptedCount() >= 3 })
@@ -208,25 +210,65 @@ status_listen: 127.0.0.1:0
 	a.checkOutput(t, false)
 }
 
+// TestTransforms: the presses of examples/simulated with transform chains:
+// state mapped to an integer code, press_force scaled from kN to N and sent
+// only when it moved by the deadband. Companion points without a chain read
+// the same addresses and are configured after the chained ones, so the raw
+// value of every instant reaches the backend after the transformed one and
+// each transformed sample is checked against it. Every envelope validates
+// against the backend schema, the births carry the chain's data types, no
+// runtime error is counted, and the counters stay whole.
+func TestTransforms(t *testing.T) {
+	b := newBackend(t)
+	dir := t.TempDir()
+	boot := writeFileSetup(t, dir, b.url(), transformPoints)
+
+	a := startAgent(t, boot)
+	b.waitFor(t, a, "20 raw press_force samples and a state change", func() bool {
+		samples, _ := b.received()
+		forces, states := 0, 0
+		for _, d := range devices {
+			forces += len(samples[d]["press_force_kn"])
+			states += len(samples[d]["state_text"])
+		}
+
+		return forces >= 20 && states > len(devices)
+	})
+
+	addr := a.statusAddr(t)
+	if code, body := getStatus(t, addr, "/metrics"); code != http.StatusOK ||
+		!strings.Contains(body, `laraplate_edge_transform_errors_total{input="press-line"} 0`+"\n") {
+		t.Errorf("/metrics = %d, want transform_errors_total 0 for press-line:\n%s", code, body)
+	}
+	code, body := getStatus(t, addr, "/status")
+	var st struct {
+		Inputs []struct {
+			ID              string  `json:"id"`
+			TransformErrors *uint64 `json:"transform_errors"`
+		} `json:"inputs"`
+	}
+	if err := json.Unmarshal([]byte(body), &st); code != http.StatusOK || err != nil {
+		t.Fatalf("/status = %d %q (%v), want 200 JSON", code, body, err)
+	}
+	if len(st.Inputs) != 1 || st.Inputs[0].TransformErrors == nil || *st.Inputs[0].TransformErrors != 0 {
+		t.Errorf("/status inputs = %s, want press-line with transform_errors 0", body)
+	}
+
+	a.stop(t)
+
+	b.checkDelivery(t, []*agent{a})
+	checkTransforms(t, b)
+	a.checkOutput(t, false)
+}
+
 // checkStatusEndpoints asks the four status endpoints of a running agent.
 func checkStatusEndpoints(t *testing.T, addr string) {
 	t.Helper()
 
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
-	defer client.CloseIdleConnections()
 	get := func(path string) (int, string) {
 		t.Helper()
-		resp, err := client.Get("http://" + addr + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
 
-		return resp.StatusCode, string(body)
+		return getStatus(t, addr, path)
 	}
 
 	if code, body := get("/healthz"); code != http.StatusOK || body != "ok\n" {
@@ -282,6 +324,26 @@ func checkStatusEndpoints(t *testing.T, addr string) {
 	}
 }
 
+// getStatus asks path of the status endpoint at addr and returns the status
+// code and the body.
+func getStatus(t *testing.T, addr, path string) (int, string) {
+	t.Helper()
+
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("http://" + addr + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+
+	return resp.StatusCode, string(body)
+}
+
 // ---------------------------------------------------------------------------
 // The setup the agent runs.
 
@@ -315,6 +377,153 @@ var points = []map[string]any{
 	{"signal": "scrap_count", "address": "scrap_count", "type": "uint32", "unit": "pcs", "read": "subscribe", "priority": "critical"},
 	{"signal": "press_force", "address": "press_force", "type": "float64", "unit": "kN", "read": "subscribe", "priority": "bulk"},
 	{"signal": "die_temperature", "address": "die_temperature", "type": "float64", "unit": "C", "read": "subscribe", "priority": "bulk"},
+}
+
+// stateCodes is the map table of the state point: every state of the
+// scenario has a code, so no sample is a runtime error.
+var stateCodes = map[string]int64{"running": 1, "idle": 2, "fault": 3}
+
+const (
+	// forceScale turns kN into N.
+	forceScale = 1000.0
+	// forceDeadband is the deadband of the scaled force, in N.
+	forceDeadband = 2000.0
+	// deadbandTolerance is the relative tolerance of the agent's deadband
+	// comparison (transform.thresholdTolerance).
+	deadbandTolerance = 1e-9
+)
+
+// transformPoints are the points of every press in TestTransforms: those of
+// examples/simulated with chains on state and press_force, each followed by
+// a companion point without a chain on the same address.
+var transformPoints = []map[string]any{
+	{"signal": "state", "address": "state", "type": "string", "read": "subscribe", "priority": "critical",
+		"transforms": []any{map[string]any{"map": map[string]any{"table": stateCodes}}}},
+	{"signal": "state_text", "address": "state", "type": "string", "read": "subscribe", "priority": "critical"},
+	{"signal": "good_count", "address": "good_count", "type": "uint32", "unit": "pcs", "read": "subscribe", "priority": "critical"},
+	{"signal": "scrap_count", "address": "scrap_count", "type": "uint32", "unit": "pcs", "read": "subscribe", "priority": "critical"},
+	{"signal": "press_force", "address": "press_force", "type": "float64", "unit": "N", "read": "subscribe", "priority": "bulk",
+		"transforms": []any{map[string]any{"scale": forceScale}, map[string]any{"deadband": forceDeadband}}},
+	{"signal": "press_force_kn", "address": "press_force", "type": "float64", "unit": "kN", "read": "subscribe", "priority": "bulk"},
+	{"signal": "die_temperature", "address": "die_temperature", "type": "float64", "unit": "C", "read": "subscribe", "priority": "bulk"},
+}
+
+// checkTransforms checks what TestTransforms delivered. For each press: every
+// birth announces state as number (the map produces integers), state_text as
+// string and both forces as number; every raw state has a mapped state of
+// the same instant with its code; the force samples are exactly the raw
+// forces scaled and filtered by the deadband, replayed here; every
+// transformed sample is good. A transformed sample after the last raw sample
+// of its point is not checked: its raw companion was still in the buffer at
+// the stop.
+func checkTransforms(t *testing.T, b *backend) {
+	t.Helper()
+
+	samples, births := b.received()
+	wantTypes := map[string]string{"state": "number", "state_text": "string", "press_force": "number", "press_force_kn": "number"}
+	raws, dropped := 0, 0
+	for _, d := range devices {
+		if len(births[d]) == 0 {
+			t.Errorf("%s: no birth", d)
+		}
+		for _, signals := range births[d] {
+			got := map[string]string{}
+			for _, s := range signals {
+				got[s.Signal] = s.DataType
+			}
+			for signal, want := range wantTypes {
+				if got[signal] != want {
+					t.Errorf("%s: birth announces %s as %q, want %q", d, signal, got[signal], want)
+				}
+			}
+		}
+
+		rawStates := samples[d]["state_text"]
+		mapped := within(samples[d]["state"], rawStates)
+		if len(mapped) != len(rawStates) {
+			t.Errorf("%s: %d mapped states for %d raw states", d, len(mapped), len(rawStates))
+		}
+		byTS := map[time.Time]receivedSample{}
+		for _, m := range mapped {
+			byTS[m.TS] = m
+		}
+		for _, r := range rawStates {
+			var name string
+			if err := json.Unmarshal(r.Value, &name); err != nil {
+				t.Errorf("%s: raw state %s is not a string", d, r.Value)
+
+				continue
+			}
+			m, ok := byTS[r.TS]
+			if !ok {
+				t.Errorf("%s: raw state %q at %s has no mapped state", d, name, r.TS)
+
+				continue
+			}
+			if want := strconv.FormatInt(stateCodes[name], 10); string(m.Value) != want || m.Quality != "good" {
+				t.Errorf("%s: state %q at %s mapped to %s (%s), want %s (good)", d, name, r.TS, m.Value, m.Quality, want)
+			}
+		}
+
+		type forceSample struct {
+			ts    time.Time
+			value float64
+		}
+		var want []forceSample
+		sent, last := false, 0.0
+		rawForces := samples[d]["press_force_kn"]
+		raws += len(rawForces)
+		for _, r := range rawForces {
+			v, err := strconv.ParseFloat(string(r.Value), 64)
+			if err != nil {
+				t.Errorf("%s: raw force %s is not a number", d, r.Value)
+
+				continue
+			}
+			scaled := v * forceScale
+			diff := math.Abs(scaled - last)
+			if sent && (diff == 0 || diff < forceDeadband*(1-deadbandTolerance)) {
+				dropped++
+
+				continue
+			}
+			sent, last = true, scaled
+			want = append(want, forceSample{ts: r.TS, value: scaled})
+		}
+		got := within(samples[d]["press_force"], rawForces)
+		if len(got) != len(want) {
+			t.Errorf("%s: %d forces sent, want %d (of %d raw)", d, len(got), len(want), len(rawForces))
+
+			continue
+		}
+		for i, g := range got {
+			v, err := strconv.ParseFloat(string(g.Value), 64)
+			if err != nil || !g.TS.Equal(want[i].ts) || math.Abs(v-want[i].value) > 1e-9*math.Abs(want[i].value) || g.Quality != "good" {
+				t.Errorf("%s: force %d = %s at %s (%s), want %v at %s (good)", d, i, g.Value, g.TS, g.Quality, want[i].value, want[i].ts)
+			}
+		}
+	}
+	if dropped == 0 {
+		t.Errorf("the deadband dropped none of %d raw forces: the check proves nothing", raws)
+	}
+	t.Logf("raw forces %d, dropped by the deadband %d", raws, dropped)
+}
+
+// within returns the samples of chained whose ts is not after the last
+// sample of raw.
+func within(chained, raw []receivedSample) []receivedSample {
+	if len(raw) == 0 {
+		return nil
+	}
+	horizon := raw[len(raw)-1].TS
+	var out []receivedSample
+	for _, s := range chained {
+		if !s.TS.After(horizon) {
+			out = append(out, s)
+		}
+	}
+
+	return out
 }
 
 // configDocument returns the configuration document of examples/simulated
@@ -352,10 +561,11 @@ func deviceList() []any {
 }
 
 // writeFileSetup writes the file provider setup of examples/simulated into
-// dir: the scenario file (JSON, which the agent reads like YAML), resolved
-// against the configuration file's directory, the document as YAML and the
-// bootstrap. It returns the bootstrap path.
-func writeFileSetup(t *testing.T, dir, url string) string {
+// dir, with pts as the points of every press: the scenario file (JSON, which
+// the agent reads like YAML), resolved against the configuration file's
+// directory, the document as YAML and the bootstrap. It returns the bootstrap
+// path.
+func writeFileSetup(t *testing.T, dir, url string, pts []map[string]any) string {
 	t.Helper()
 
 	writeFile(t, filepath.Join(dir, "scenario.json"), string(marshal(t, scenario())))
@@ -364,7 +574,7 @@ func writeFileSetup(t *testing.T, dir, url string) string {
 	fmt.Fprintf(&doc, "schema: laraplate-edge-config/1\nversion: 1\ninputs:\n  - id: press-line\n    driver: simulated\n    connection:\n      scenario_file: scenario.json\n      seed: 42\n    devices:\n")
 	for _, d := range devices {
 		fmt.Fprintf(&doc, "      - device: %s\n        points:\n", d)
-		for _, p := range points {
+		for _, p := range pts {
 			fmt.Fprintf(&doc, "          - %s\n", marshal(t, p))
 		}
 	}
