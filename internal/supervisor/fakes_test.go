@@ -256,23 +256,32 @@ func (in *fakeInput) sendDeath(device string) {
 type backend struct {
 	srv *httptest.Server
 
-	mu      sync.Mutex
-	script  map[string][]int // per output, statuses answered first, then 202
-	items   map[string][]string
-	seqs    map[string][]uint64
-	auth    map[string][]string
-	changed chan struct{}
+	mu     sync.Mutex
+	script map[string][]int // per output, statuses answered first, then 202
+	items  map[string][]string
+	// unique and uniqueSeqs hold, per output, the items and the source_seq
+	// of each message_id once: what the backend keeps when an unconfirmed
+	// batch is resent identical.
+	unique     map[string][]string
+	uniqueSeqs map[string][]uint64
+	seen       map[string]map[string]bool // per output, accepted message_ids
+	seqs       map[string][]uint64
+	auth       map[string][]string
+	changed    chan struct{}
 }
 
 func newBackend(t *testing.T) *backend {
 	t.Helper()
 
 	be := &backend{
-		script:  map[string][]int{},
-		items:   map[string][]string{},
-		seqs:    map[string][]uint64{},
-		auth:    map[string][]string{},
-		changed: make(chan struct{}, 1),
+		script:     map[string][]int{},
+		items:      map[string][]string{},
+		unique:     map[string][]string{},
+		uniqueSeqs: map[string][]uint64{},
+		seen:       map[string]map[string]bool{},
+		seqs:       map[string][]uint64{},
+		auth:       map[string][]string{},
+		changed:    make(chan struct{}, 1),
 	}
 	be.srv = httptest.NewUnstartedServer(http.HandlerFunc(be.serve))
 	be.srv.Config.ErrorLog = log.New(io.Discard, "", 0)
@@ -297,6 +306,7 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 
 	var env struct {
+		MessageID string `json:"message_id"`
 		SourceSeq uint64 `json:"source_seq"`
 		Devices   []struct {
 			Device  string `json:"device"`
@@ -319,6 +329,7 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 	be.auth[out] = append(be.auth[out], r.Header.Get("Authorization"))
 	if status == http.StatusAccepted {
 		be.seqs[out] = append(be.seqs[out], env.SourceSeq)
+		var items []string
 		for _, d := range env.Devices {
 			switch d.Type {
 			case "birth":
@@ -326,14 +337,23 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 				for _, s := range d.Signals {
 					names = append(names, s.Signal)
 				}
-				be.items[out] = append(be.items[out], fmt.Sprintf("birth %s %v", d.Device, names))
+				items = append(items, fmt.Sprintf("birth %s %v", d.Device, names))
 			case "death":
-				be.items[out] = append(be.items[out], "death "+d.Device)
+				items = append(items, "death "+d.Device)
 			default:
 				for _, s := range d.Samples {
-					be.items[out] = append(be.items[out], d.Device+"/"+s.Signal)
+					items = append(items, d.Device+"/"+s.Signal)
 				}
 			}
+		}
+		be.items[out] = append(be.items[out], items...)
+		if be.seen[out] == nil {
+			be.seen[out] = map[string]bool{}
+		}
+		if !be.seen[out][env.MessageID] {
+			be.seen[out][env.MessageID] = true
+			be.unique[out] = append(be.unique[out], items...)
+			be.uniqueSeqs[out] = append(be.uniqueSeqs[out], env.SourceSeq)
 		}
 	}
 	be.mu.Unlock()
@@ -353,6 +373,23 @@ func (be *backend) got(out string) []string {
 	defer be.mu.Unlock()
 
 	return append([]string(nil), be.items[out]...)
+}
+
+// gotOnce returns what output out delivered, a resent batch counted once.
+func (be *backend) gotOnce(out string) []string {
+	be.mu.Lock()
+	defer be.mu.Unlock()
+
+	return append([]string(nil), be.unique[out]...)
+}
+
+// seqsOnce returns the source_seq of what output out delivered, a resent
+// batch counted once.
+func (be *backend) seqsOnce(out string) []uint64 {
+	be.mu.Lock()
+	defer be.mu.Unlock()
+
+	return append([]uint64(nil), be.uniqueSeqs[out]...)
 }
 
 func (be *backend) seqsOf(out string) []uint64 {
