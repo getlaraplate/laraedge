@@ -1,5 +1,7 @@
 # laraplate-edge
 
+> ⚠️ **Caution**: This project is a **work in progress**. **Don't use this in production or use at your own risk**—no guarantees are provided... or better yet, collaborate with me to create the definitive Laravel boilerplate; that's the right place to introduce your ideas. Let me know your ideas...
+
 Shop-floor edge agent for the Laraplate MES. It reads machines, probes, operator terminals and
 measurement files, and delivers their samples to Laraplate over the `laraplate-machine/1` protocol
 (HTTP or MQTT) without losing data across network outages, restarts or power loss.
