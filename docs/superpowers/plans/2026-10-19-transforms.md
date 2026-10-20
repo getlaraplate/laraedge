@@ -231,7 +231,8 @@ Deferred minors, left as they are (from the reviews):
   after `--` (Task 6).
 
 Open, awaiting the user: `golang.org/x/text` v0.14.0 (indirect) has two vulnerabilities the code does not
-call; upgrading it changes `go.mod` and needs approval (Task 0).
+call; upgrading it changes `go.mod` and needs approval (Task 0). Resolved 2026-10-20: the user approved
+the upgrade, delivered in the residual fix round below.
 
 **Final review (2026-10-20).** The whole-branch review asked for one more fix wave, delivered on
 develop with the plan staying closed:
@@ -240,7 +241,10 @@ develop with the plan staying closed:
   device's chains before it is forwarded, through a third unexported step hook, `deviceObserver`:
   `heartbeat` disarms until the next sample leaves it (it no longer resends fresh good values over an
   unreachable device), `min_interval` sends its held sample before the `death` and closes its window,
-  `debounce` drops its waiting value.
+  `debounce` drops its waiting value. R14 says "cost: none", which was not accurate: on its own it left
+  a device Offline in the backend when a `deadband` or `debounce` before a `heartbeat` suppressed the
+  unchanged value after the death, so `deadband` and `debounce` also forget their last sent value at a
+  death (R16, residual fix round below).
 - **Counts never resume from an old input directory (R15).** The supervisor removes
   `data_dir/inputs/{id}/` of every input id the applied document does not have: after an applied
   document, after a rolled-back one (against the document still applied, so an input a failed document
@@ -258,6 +262,20 @@ develop with the plan staying closed:
   directory removal. `USAGE.md`: `config test` ties, the summary timing, the data directory and a
   troubleshooting row. The `Chain.Apply` doc comment now states R5, and the two deferred minors about it
   and about the `NewProcessor` failure are closed.
+
+The re-review of that wave left two load-bearing defects, R16 and R17, fixed afterwards on develop in a
+dedicated round at the user's request, together with the dependency upgrade the user approved; the plan
+stays closed:
+
+- **Death resets deadband and debounce (R16).** At a device's `death`, `deadband` forgets its last sent
+  value and `debounce` forgets its waiting and last sent values, through the `deviceObserver` hook: the
+  first value after the death is sent even when unchanged (by `debounce` once it stays for the delay),
+  and a later `heartbeat` re-arms, so the backend sees the device come back from Offline.
+- **A rolled-back rename restarts from 0 (R17).** Before restarting a stopped input whose id the failed
+  document does not have, the rollback removes `data_dir/inputs/{id}/`: the renamed input counted the
+  same device and signal during the attempt, and the old count resumed after it read as parts produced.
+- **`golang.org/x/text` v0.14.0 -> v0.43.0** (indirect, BSD-3-Clause): `govulncheck` v1.9.0 now reports
+  no vulnerability.
 
 **Documented in:** `docs/CONFIGURATION.md`, `docs/USAGE.md` (and `README.md`).
 
@@ -282,3 +300,5 @@ with what each costs if wrong. The Delivery status above cites them by number.
 - R13 Ruling: amend the spec (sections 3 State and Quality, section 4 min_interval/edge_counter/heartbeat/debounce rows) and the schema descriptions to the shipped behaviour, with an "Amended 2026-10-20 after delivery" note in the spec status line — the spec is the design record readers trust and it claims to win over the parent — cost: none (description-only).
 - R14 Ruling: a Death event reaching the processor notifies the device's chains before it is forwarded: heartbeat disarms until the next sample leaves the step; min_interval releases its held sample before the death; debounce cancels its pending value — spec D6 makes death the unreachable signal — cost: none.
 - R15 Ruling: after a successfully applied document, and at agent start before inputs start, the supervisor removes data_dir/inputs/{id}/ of every input id not in the applied document; a rollback restarting such an input starts its counters at 0 (errs toward reset, as R11) — the backend keys counters by device/signal, not by input — cost: a removed input's counters cannot be recovered by re-adding it.
+- Residual R16 Ruling: load-bearing, not fixed (no second fix wave): deadband and debounce must forget their last sent value at a device death (deadband sent=false via a deviceDown hook; debounce pending=nil, sent=false), with a test (unchanged value across a death is sent afterwards) and a CONFIGURATION line; R14's "cost: none" is inaccurate — surfaced to the user before the merge to master.
+- Residual R17 Ruling: load-bearing, not fixed: in rollback, before restartInput of a stopped input whose id the failed document does not have, remove data_dir/inputs/{id}; fix the existing test's b-directory assertion and CONFIGURATION.md:252-257 — surfaced to the user before the merge to master.
