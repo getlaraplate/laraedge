@@ -258,7 +258,7 @@ written atomically (directory mode `0700`, file `0600`) on every count:
   (against the document still applied), and when the agent starts, before any input starts (against
   its first document). An input renamed and then renamed back, or removed and added again, therefore
   counts from 0 instead of resuming the count of its old directory. A rollback that restarts an input
-  the failed document does not have (a rename rolled back) removes its directory first and starts it
+  the failed document does not have (for example a rename rolled back) removes its directory first and starts it
   from 0: the failed attempt may have counted the same device and signal under the new id.
 - A file that cannot be read (truncated, corrupt, of another version, with a negative count) is renamed
   `transform-state.json.corrupt-<unix seconds>` and logged at `ERROR` with the input id; the counts start

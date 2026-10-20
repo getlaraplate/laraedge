@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -57,7 +58,16 @@ func newFixture(t *testing.T, opts ...fixtureOption) *fixture {
 		Drivers:  map[string]input.Factory{config.DriverSimulated: f.drv.factory},
 		Resolver: secrets.NewResolver(secrets.WithLookupEnv(f.env.lookup)),
 		Clock:    f.clk,
-		Logger:   slog.New(slog.NewJSONHandler(f.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Logger: slog.New(slog.NewJSONHandler(f.logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+			// The time field is a long digit run that could contain the sample value.
+			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey {
+					return slog.Attr{}
+				}
+				return a
+			},
+		})),
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -90,12 +100,36 @@ func newFixture(t *testing.T, opts ...fixtureOption) *fixture {
 		if strings.Contains(f.logs.String(), testToken) {
 			t.Errorf("the logs contain the token")
 		}
-		if strings.Contains(f.logs.String(), "918273") {
+		if sampleValuePattern.MatchString(f.logs.String()) {
 			t.Errorf("the logs contain a sample value")
 		}
 	})
 
 	return f
+}
+
+// sampleValuePattern matches the sample value as a number of its own: digit
+// runs (timestamps, temp-dir suffixes) and decimal fractions (jitter
+// durations) that merely contain it are ignored.
+var sampleValuePattern = regexp.MustCompile(`(^|[^0-9.])918273([^0-9.]|$)`)
+
+func TestSampleValuePattern(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{`"value":918273`, true},
+		{`"918273"`, true},
+		{`.200918273`, false},
+		{`"748.918273ms"`, false},
+		{`/tmp/x4918273/`, false},
+	} {
+		if got := sampleValuePattern.MatchString(tc.in); got != tc.want {
+			t.Errorf("match(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
 }
 
 type inSpec struct {

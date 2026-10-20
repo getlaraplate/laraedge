@@ -2,7 +2,7 @@
 
 **Status:** Approved (2026-10-19), section by section. Transforms delivered (2026-10-20) by the plan
 `../plans/2026-10-19-transforms.md`; the `modbus` and `opcua` plans follow, in that order (section 7).
-Amended 2026-10-20 after delivery to match the shipped behaviour (rulings R5-R11 of the transforms plan).
+Amended 2026-10-20 after delivery to match the shipped behaviour (rulings R5-R17 of the transforms plan).
 
 **Date:** 2026-10-19
 
@@ -60,6 +60,11 @@ default) produces a `bad` sample of the step's output kind, with the zero value,
 and `debounce` observe the `bad` samples passing through them (section 4). Every sample leaving a chain has the
 chain's output kind: a `bad` sample of another kind leaves with the zero value of that kind, and a good integer
 leaving a float chain becomes a float.
+
+**Device death.** When a device dies the chains are told: `heartbeat` stops until a new sample arrives,
+`min_interval` releases its held sample, and `debounce` and `deadband` forget their last sent value. The state
+directory of an input that is not in the applied document is removed, also when a rollback restores an input the
+failed document lacked.
 
 **Configuration.** Each step is an object with one key naming the transform (`{ scale: 0.1 }`). The published
 JSON Schema gains the exact parameters of every transform, so `config validate` checks them offline.
