@@ -36,9 +36,10 @@ commands:
                              samples go to stdout, in the same format
   probe <input> (--config <file> | --bootstrap <path>) [--record <file>]
                              read every point of an input once and print the
-                             samples; the document is the file, else the last
-                             valid one in the bootstrap's data_dir; --record
-                             writes the raw samples as JSON Lines
+                             samples; the document is the --config file (it
+                             wins over --bootstrap), else the last valid one
+                             in the bootstrap's data_dir; --record writes the
+                             raw samples as JSON Lines
   status [--listen addr]     query a running agent (default ` + defaultListen + `);
                              the token, if any, from ` + statusTokenEnv + `
   version                    print the version

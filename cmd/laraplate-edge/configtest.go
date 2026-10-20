@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,13 +15,13 @@ import (
 	"github.com/getlaraplate/laraplate-edge/internal/transform"
 )
 
-// maxFlushFires bounds the fires of the end-of-file flush of config test.
-const maxFlushFires = 1_000_000
+// maxReplayFires is the defensive bound on the fires of one replay. The replay
+// ends by itself (it stops at a horizon); the bound only stops a document
+// whose steps fire at an absurd rate over a long gap.
+const maxReplayFires = 1_000_000
 
-// errFlushBound is returned when the time-driven steps still have a deadline
-// after maxFlushFires fires: a step that resends forever (heartbeat) never
-// settles.
-var errFlushBound = errors.New("the time-driven steps never settle: a step keeps emitting at its deadline (a heartbeat resends forever)")
+// errFlushBound is returned when a replay needs more than its bound of fires.
+var errFlushBound = errors.New("too many time-driven firings: a step with a very short period over a long gap in the samples")
 
 // runConfigTest runs "config test <file> --input <samples.jsonl>" (decision
 // P7): it replays the recorded samples through the transform chains of the
@@ -60,7 +61,7 @@ func runConfigTest(args []string, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 
-	out, _, err := replay(doc, samples, maxFlushFires)
+	out, errs, err := replay(doc, samples, maxReplayFires)
 	if err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge config test: %v\n", err)
 		return exitFailure
@@ -71,7 +72,13 @@ func runConfigTest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "laraplate-edge config test: %v\n", err)
 		return exitFailure
 	}
-	_, _ = stdout.Write(buf.Bytes())
+	if _, err := stdout.Write(buf.Bytes()); err != nil {
+		fmt.Fprintf(stderr, "laraplate-edge config test: write the samples: %v\n", err)
+		return exitFailure
+	}
+	if errs > 0 {
+		fmt.Fprintf(stderr, "laraplate-edge config test: transform errors: %d (the samples are marked bad)\n", errs)
+	}
 
 	return exitOK
 }
@@ -117,30 +124,36 @@ func pointKinds(doc config.Document) func(device, signal string) (model.ValueKin
 
 // replayer holds the chains of a document and the virtual clock.
 type replayer struct {
-	clk    *clock.Fake
-	order  []*transform.Chain
-	chains map[pointKey]*transform.Chain
-	out    []model.Sample
-	errs   int
+	clk      *clock.Fake
+	order    []*transform.Chain
+	chains   map[pointKey]*transform.Chain
+	out      []model.Sample
+	errs     int
+	fires    int
+	maxFires int
 }
 
 // replay runs samples through the chains of doc on a virtual clock and
 // returns what comes out, in emission order, and the number of runtime errors
 // of the steps (each also visible as a bad sample).
 //
-// The clock starts at the first sample's ts. A sample later than the clock
-// moves it there and lets the chains with a due deadline fire, in document
-// order, before the sample is applied; a sample earlier than the clock is
-// applied at the current time, the clock never moves back (R4). After the last
-// sample every remaining deadline fires, in time order, until none is pending;
-// more than maxFires fires are errFlushBound. A sample of a point without a
-// chain passes through. The chains have no persistence.
+// The clock starts at the first sample's ts. Before a sample later than the
+// clock, every deadline up to its ts fires in time order, the clock moving to
+// each deadline (ruling R12: a heartbeat repeats across a gap; chains due at
+// the same instant fire in document order). A sample earlier than the clock
+// is applied at the current time, the clock never moves back (R4). After the
+// last sample the deadlines fire up to a horizon: the later of the last
+// sample's ts and the clock, plus the longest duration among the heartbeat,
+// min_interval and debounce steps of the document; a deadline past it stays
+// pending, so a heartbeat does not resend forever. More than maxFires fires
+// is errFlushBound, a safeguard only. A sample of a point without a chain
+// passes through. The chains have no persistence.
 func replay(doc config.Document, samples []model.Sample, maxFires int) ([]model.Sample, int, error) {
 	if len(samples) == 0 {
 		return nil, 0, nil
 	}
 
-	r := &replayer{clk: clock.NewFake(samples[0].TS), chains: map[pointKey]*transform.Chain{}}
+	r := &replayer{clk: clock.NewFake(samples[0].TS), chains: map[pointKey]*transform.Chain{}, maxFires: maxFires}
 
 	for _, in := range doc.Inputs {
 		for _, d := range in.Devices {
@@ -161,9 +174,8 @@ func replay(doc config.Document, samples []model.Sample, maxFires int) ([]model.
 	}
 
 	for _, s := range samples {
-		if now := r.clk.Now(); s.TS.After(now) {
-			r.clk.Advance(s.TS.Sub(now))
-			r.fireDue()
+		if err := r.advanceTo(s.TS); err != nil {
+			return nil, 0, err
 		}
 
 		chain, ok := r.chains[pointKey{s.Device, s.Signal}]
@@ -178,14 +190,61 @@ func replay(doc config.Document, samples []model.Sample, maxFires int) ([]model.
 		r.errs += len(errs)
 	}
 
-	for fires := 0; ; fires++ {
+	horizon := samples[len(samples)-1].TS
+	if now := r.clk.Now(); now.After(horizon) {
+		horizon = now
+	}
+
+	if err := r.advanceTo(horizon.Add(longestPeriod(doc))); err != nil {
+		return nil, 0, err
+	}
+
+	return r.out, r.errs, nil
+}
+
+// longestPeriod returns the longest duration parameter among the
+// time-driven steps (heartbeat, min_interval, debounce) of doc, 0 when there
+// is none. Parameters were checked by CheckDocument.
+func longestPeriod(doc config.Document) time.Duration {
+	var longest time.Duration
+
+	for _, in := range doc.Inputs {
+		for _, d := range in.Devices {
+			for _, p := range d.Points {
+				for _, t := range p.Transforms {
+					if t.Name != "heartbeat" && t.Name != "min_interval" && t.Name != "debounce" {
+						continue
+					}
+
+					var text string
+					if json.Unmarshal(t.Params, &text) != nil {
+						continue
+					}
+
+					if period, err := time.ParseDuration(text); err == nil {
+						longest = max(longest, period)
+					}
+				}
+			}
+		}
+	}
+
+	return longest
+}
+
+// advanceTo moves the virtual clock to t, firing on the way every deadline
+// up to t in time order. It never moves the clock back.
+func (r *replayer) advanceTo(t time.Time) error {
+	for {
 		earliest, pending := r.earliest()
-		if !pending {
+		if !pending || earliest.After(t) {
 			break
 		}
-		if fires >= maxFires {
-			return nil, 0, errFlushBound
+
+		if r.fires >= r.maxFires {
+			return errFlushBound
 		}
+		r.fires++
 
 		if now := r.clk.Now(); earliest.After(now) {
 			r.clk.Advance(earliest.Sub(now))
@@ -193,7 +252,11 @@ func replay(doc config.Document, samples []model.Sample, maxFires int) ([]model.
 		r.fireDue()
 	}
 
-	return r.out, r.errs, nil
+	if now := r.clk.Now(); t.After(now) {
+		r.clk.Advance(t.Sub(now))
+	}
+
+	return nil
 }
 
 // earliest returns the earliest deadline of the chains.

@@ -300,33 +300,89 @@ func parseChainDoc(t *testing.T, chain string) config.Document {
 	return doc
 }
 
-func TestReplayStopsAtTheFlushBound(t *testing.T) {
-	doc := parseChainDoc(t, `[{heartbeat: 1s}]`)
-	in, err := transform.ReadSamples(strings.NewReader(
-		`{"device":"press-07","signal":"force","ts":"2026-10-19T08:00:00.000Z","value":1,"quality":"good"}`+"\n"), pointKinds(doc))
+// replayTimes replays the sample lines (device press-07, signal force) of
+// "second=value" pairs through chain and returns "second=value" pairs, the
+// second being the offset from 08:00:00 in seconds.
+func replayTimes(t *testing.T, chain string, maxFires int, in ...string) (string, error) {
+	t.Helper()
+
+	doc := parseChainDoc(t, chain)
+
+	var text strings.Builder
+	for _, pair := range in {
+		sec, val, _ := strings.Cut(pair, "=")
+		text.WriteString(`{"device":"press-07","signal":"force","ts":"2026-10-19T08:00:` + sec + `Z","value":` + val + `,"quality":"good"}` + "\n")
+	}
+
+	samples, err := transform.ReadSamples(strings.NewReader(text.String()), pointKinds(doc))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, err = replay(doc, in, 10)
+	out, _, err := replay(doc, samples, maxFires)
+	if err != nil {
+		return "", err
+	}
+
+	var got []string
+	for _, s := range out {
+		got = append(got, s.TS.Format("05.000")+"="+strconv.FormatFloat(s.Value.Float, 'g', -1, 64))
+	}
+
+	return strings.Join(got, ","), nil
+}
+
+func TestReplayHeartbeat(t *testing.T) {
+	tests := []struct {
+		name  string
+		chain string
+		in    []string
+		want  string
+	}{
+		{
+			name:  "the flush stops at the horizon: one period after the last sample",
+			chain: `[{heartbeat: 1s}]`,
+			in:    []string{"00.000=1"},
+			want:  "00.000=1,01.000=1",
+		},
+		{
+			name:  "a heartbeat repeats once per period across a gap, each resend at its deadline",
+			chain: `[{heartbeat: 1s}]`,
+			in:    []string{"00.000=1", "03.500=2"},
+			want:  "00.000=1,01.000=1,02.000=1,03.000=1,03.500=2,04.500=2",
+		},
+		{
+			name:  "the longest period of the document sets the horizon",
+			chain: `[{heartbeat: 1s}, {min_interval: 2500ms}]`,
+			in:    []string{"00.000=1"},
+			want:  "00.000=1,02.000=1", // resends at 1s and 2s are held by min_interval; 3s is past the 2.5s horizon
+		},
+		{
+			name:  "no time-driven step: nothing fires after the last sample",
+			chain: `[{scale: 2}]`,
+			in:    []string{"00.000=1"},
+			want:  "00.000=2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := replayTimes(t, tt.chain, 100, tt.in...)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got != tt.want {
+				t.Errorf("replay = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplayFireBoundIsASafeguard(t *testing.T) {
+	_, err := replayTimes(t, `[{heartbeat: 1s}]`, 5, "00.000=1", "59.000=2")
 	if !errors.Is(err, errFlushBound) {
 		t.Fatalf("err = %v, want errFlushBound", err)
-	}
-
-	// The same chain settles when the bound is large enough for a bounded
-	// chain: min_interval has one pending sample, one fire.
-	bounded := parseChainDoc(t, `[{min_interval: 5s}]`)
-	two := `{"device":"press-07","signal":"force","ts":"2026-10-19T08:00:00.000Z","value":1,"quality":"good"}` + "\n" +
-		`{"device":"press-07","signal":"force","ts":"2026-10-19T08:00:01.000Z","value":2,"quality":"good"}` + "\n"
-
-	samples, err := transform.ReadSamples(strings.NewReader(two), pointKinds(bounded))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	out, _, err := replay(bounded, samples, 1)
-	if err != nil || len(out) != 2 {
-		t.Fatalf("replay = %d samples, %v; want 2, nil", len(out), err)
 	}
 }
 
@@ -357,6 +413,38 @@ func TestReplayAppliesAnEarlierSampleAtTheCurrentTime(t *testing.T) {
 		t.Errorf("replay = %v, want %s", got, want)
 	}
 }
+
+func TestConfigTestReportsTransformErrorsAndWriteFailures(t *testing.T) {
+	dir := t.TempDir()
+	doc := filepath.Join(dir, "config.yaml")
+	samples := filepath.Join(dir, "samples.jsonl")
+	// 1e10 * 1e308 overflows: a runtime error of the step (P6).
+	writeFile(t, doc, chainDoc(`[{scale: 1e308}]`))
+	writeFile(t, samples, `{"device":"press-07","signal":"force","ts":"2026-10-19T08:00:00.000Z","value":1e10,"quality":"good"}`+"\n")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "test", doc, "--input", samples}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("exit code = %d (stderr: %q)", code, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), `"quality":"bad"`) || !strings.Contains(stderr.String(), "transform errors: 1") {
+		t.Errorf("stdout = %q, stderr = %q; want a bad sample and the error count", stdout.String(), stderr.String())
+	}
+
+	stderr.Reset()
+	if code := runConfigTest([]string{doc, "--input", samples}, failingWriter{}, &stderr); code != exitFailure {
+		t.Fatalf("a failing stdout: exit code = %d, want 1", code)
+	}
+
+	if !strings.Contains(stderr.String(), "write the samples") {
+		t.Errorf("stderr = %q, want the write failure", stderr.String())
+	}
+}
+
+// failingWriter fails every write.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
 
 func TestConfigTestDoesNotTouchTheFilesystem(t *testing.T) {
 	dir := t.TempDir()

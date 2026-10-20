@@ -72,7 +72,10 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(&out, "%s\t%s\t%s\t%s\t%s\n", s.Device, s.Signal, formatValue(s.Value), kindName(s.Value.Kind), s.Quality)
 	}
 	fmt.Fprintf(&out, "response time: %s\n", elapsed.Round(time.Microsecond))
-	_, _ = stdout.Write(out.Bytes())
+	if _, err := stdout.Write(out.Bytes()); err != nil {
+		fmt.Fprintf(stderr, "laraplate-edge probe: write the samples: %v\n", err)
+		return exitFailure
+	}
 
 	return exitOK
 }

@@ -164,6 +164,18 @@ func TestProbeFromTheLastValidDocument(t *testing.T) {
 	}
 }
 
+func TestProbeReportsAFailingStdout(t *testing.T) {
+	var stderr bytes.Buffer
+
+	if code := runProbe([]string{"press-line", "--config", simulatedExample}, failingWriter{}, &stderr); code != exitFailure {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+
+	if !strings.Contains(stderr.String(), "write the samples") {
+		t.Errorf("stderr = %q, want the write failure", stderr.String())
+	}
+}
+
 func TestProbeFailures(t *testing.T) {
 	dir := t.TempDir()
 	badChain := filepath.Join(dir, "bad-chain.yaml")
