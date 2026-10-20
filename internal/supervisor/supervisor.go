@@ -119,6 +119,8 @@ type Supervisor struct {
 	outputs   map[string]*runningOutput
 	failedIn  map[string]failure
 	failedOut map[string]failure
+	// appliedInputs holds the input ids of the applied document.
+	appliedInputs map[string]bool
 	// transformErrors holds, by input id, the runtime errors counted by the
 	// closed processors of that input, so the count reported never goes
 	// back when an input restarts.
@@ -339,10 +341,25 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 		return Outcome{Result: ResultRejected, Errors: msgs}, nil
 	}
 
+	s.mu.Lock()
+	applied, appliedInputs := s.applied, s.appliedInputs
+	s.mu.Unlock()
+	if !applied {
+		// The first document of this run: no input runs yet, and the state
+		// left by inputs it does not have goes before any input starts
+		// (ruling R15).
+		s.pruneInputStates(inputIDs(doc))
+	}
+
 	j, errs := s.execute(ctx, doc, p, built)
 	closeInputs(built)
 	if len(errs) > 0 {
 		errs = append(errs, s.rollback(j)...)
+		if applied {
+			// An input this document added and the rollback stopped must not
+			// keep what it counted (ruling R15).
+			s.pruneInputStates(appliedInputs)
+		}
 		if err := ctx.Err(); err != nil {
 			// A shutdown is not an attempt: the document was never given its
 			// chance, so there is no outcome to report (ruling R45).
@@ -356,7 +373,7 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	}
 
 	s.mu.Lock()
-	s.applied, s.version = true, doc.Version
+	s.applied, s.version, s.appliedInputs = true, doc.Version, inputIDs(doc)
 	clear(s.failedIn)
 	failedOut := sortedKeys(s.failedOut)
 	clear(s.failedOut)
@@ -375,11 +392,39 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 		"stopped", len(p.stopInputs)+len(p.stopOutputs),
 		"unchanged", p.kept)
 
+	s.pruneInputStates(inputIDs(doc))
+
 	if err := s.store.SaveValid(doc); err != nil {
 		return Outcome{Result: ResultApplied}, fmt.Errorf("supervisor: %w", err)
 	}
 
 	return Outcome{Result: ResultApplied}, nil
+}
+
+// pruneInputStates removes the transform state, DataDir/inputs/{id}, of
+// every input not in keep (ruling R15): the backend keys a counter by device
+// and signal, not by input, so a count resumed from an input's old directory
+// (renamed back, removed and added again) would read as parts produced. Only
+// inputs that do not run are removed: keep holds every running one. A failure
+// is logged; the directory then stays until the next document.
+func (s *Supervisor) pruneInputStates(keep map[string]bool) {
+	removed, err := transform.RemoveStaleInputStates(s.dataDir, func(id string) bool { return keep[id] })
+	for _, id := range removed {
+		s.log.Info("supervisor: removed the transform state of an input not in the configuration", "input", id)
+	}
+	if err != nil {
+		s.log.Warn("supervisor: cannot remove the transform state of an input not in the configuration", "error", err)
+	}
+}
+
+// inputIDs returns the input ids of doc.
+func inputIDs(doc config.Document) map[string]bool {
+	ids := make(map[string]bool, len(doc.Inputs))
+	for _, in := range doc.Inputs {
+		ids[in.ID] = true
+	}
+
+	return ids
 }
 
 // check returns the reasons to refuse doc before anything is built.
@@ -716,7 +761,16 @@ func (s *Supervisor) stopOutput(id string, how outputStop, holdRoute config.Rout
 func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.Input) error {
 	proc, err := transform.NewProcessor(cfg, s.dataDir, s.clk, s.log)
 	if err != nil {
-		return err
+		// Unreachable: NewProcessor fails only on a chain that does not
+		// compile, which check refused before anything was built, and no seam
+		// injects a failing processor, so no test reaches it. The built input
+		// never started: it is closed here, since the caller no longer owns
+		// it. The error names no device or signal: its text is fixed.
+		if cerr := in.Close(); cerr != nil {
+			s.log.Warn("supervisor: cannot close an input that did not start", "input", cfg.ID, "error", cerr)
+		}
+
+		return errors.New("the transform chains cannot be built")
 	}
 
 	lifeCtx, cancel := context.WithCancel(s.ctx)

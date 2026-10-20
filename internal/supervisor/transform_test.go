@@ -33,6 +33,14 @@ func edgeCounting(mode string) []any { return []any{map[string]any{"edge_counter
 func (f *fixture) transformDocument(version int64, variant int, points []tpoint, extra ...inSpec) config.Document {
 	f.t.Helper()
 
+	return f.transformDocumentFor("a", version, variant, points, extra...)
+}
+
+// transformDocumentFor is transformDocument with the transformed input
+// named id.
+func (f *fixture) transformDocumentFor(id string, version int64, variant int, points []tpoint, extra ...inSpec) config.Document {
+	f.t.Helper()
+
 	var pts []any
 	for _, p := range points {
 		pt := map[string]any{"signal": p.signal, "address": p.signal, "read": "subscribe", "type": p.typ}
@@ -44,12 +52,12 @@ func (f *fixture) transformDocument(version int64, variant int, points []tpoint,
 
 	// The extra inputs and the output come from document; input a replaces
 	// its first input.
-	base := f.document(version, append([]inSpec{{id: "a", devices: []string{"a1"}}}, extra...), []outSpec{{id: "main"}})
+	base := f.document(version, append([]inSpec{{id: id, devices: []string{"a1"}}}, extra...), []outSpec{{id: "main"}})
 
 	tree := map[string]any{"schema": config.SchemaName, "version": version}
 
 	ins := []any{map[string]any{
-		"id": "a", "driver": config.DriverSimulated,
+		"id": id, "driver": config.DriverSimulated,
 		"connection": map[string]any{"variant": variant},
 		"devices":    []any{map[string]any{"device": "a1", "points": pts}},
 	}}
@@ -79,7 +87,14 @@ func (f *fixture) transformDocument(version int64, variant int, points []tpoint,
 func (f *fixture) counters() []int64 {
 	f.t.Helper()
 
-	data, err := os.ReadFile(filepath.Join(f.dataDir, "inputs", "a", "transform-state.json"))
+	return f.countersOf("a")
+}
+
+// countersOf returns the counter values of input id's state file, sorted.
+func (f *fixture) countersOf(id string) []int64 {
+	f.t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(f.dataDir, "inputs", id, "transform-state.json"))
 	if err != nil {
 		f.t.Fatalf("state file: %v", err)
 	}
@@ -342,5 +357,194 @@ func TestTransformErrorsCountedForTheAgentLifetime(t *testing.T) {
 	f.be.waitDetail(t, "main", "a1/temp=0 bad", 2)
 	if n := errorsOfA(); n != 2 {
 		t.Fatalf("TransformErrors = %d, want 2", n)
+	}
+}
+
+// door is the point of device a1 whose rising edges are counted.
+var door = []tpoint{{signal: "door", typ: "bool", steps: edgeCounting("rising")}}
+
+// countDoor sends the door's level false, then n rising edges, through
+// emit; each count is saved before emit returns.
+func countDoor(emit func(model.Record), n int) {
+	send := func(v bool) {
+		emit(model.SampleRecord(model.Sample{
+			Device: "a1", Signal: "door", TS: start, Value: model.BoolValue(v),
+			Quality: model.Good, Priority: model.Critical,
+		}))
+	}
+
+	send(false)
+	for range n {
+		send(true)
+		send(false)
+	}
+}
+
+// emitOfRunning is the emit of the running instance of input id.
+func (f *fixture) emitOfRunning(id string) func(model.Record) {
+	f.t.Helper()
+
+	in := f.drv.instance(f.t, id)
+
+	return func(r model.Record) {
+		f.drv.mu.Lock()
+		emit := in.emit
+		f.drv.mu.Unlock()
+		emit(r)
+	}
+}
+
+// stateDirExists reports whether the transform state directory of input id
+// exists.
+func (f *fixture) stateDirExists(id string) bool {
+	f.t.Helper()
+
+	_, err := os.Stat(filepath.Join(f.dataDir, "inputs", id))
+	if err != nil && !os.IsNotExist(err) {
+		f.t.Fatal(err)
+	}
+
+	return err == nil
+}
+
+// TestInputRenamedBackStartsItsCountsFromZero is ruling R15: input a counts,
+// is renamed b, then renamed back. The backend keys counters by device and
+// signal: a's old count resumed after b's would read as parts produced, so
+// a's directory goes when the document without a is applied.
+func TestInputRenamedBackStartsItsCountsFromZero(t *testing.T) {
+	f := newFixture(t)
+
+	f.mustApply(f.transformDocumentFor("a", 1, 0, door))
+	countDoor(f.emitOfRunning("a"), 5)
+	if got := f.countersOf("a"); !reflect.DeepEqual(got, []int64{5}) {
+		t.Fatalf("counters of a = %v, want [5]", got)
+	}
+
+	f.mustApply(f.transformDocumentFor("b", 2, 0, door))
+	if f.stateDirExists("a") {
+		t.Fatal("the state directory of a outlived the document without a")
+	}
+	countDoor(f.emitOfRunning("b"), 2)
+
+	f.mustApply(f.transformDocumentFor("a", 3, 0, door))
+	if f.stateDirExists("b") {
+		t.Fatal("the state directory of b outlived the document without b")
+	}
+	countDoor(f.emitOfRunning("a"), 1)
+	if got := f.countersOf("a"); !reflect.DeepEqual(got, []int64{1}) {
+		t.Fatalf("counters of a renamed back = %v, want [1]: counted from 0, not from the old 5", got)
+	}
+}
+
+// TestInputRemovedAndAddedAgainStartsFromZero: a document without input a
+// removes its state; the input added back counts from 0.
+func TestInputRemovedAndAddedAgainStartsFromZero(t *testing.T) {
+	f := newFixture(t)
+
+	f.mustApply(f.transformDocument(1, 0, door))
+	countDoor(f.emitOfRunning("a"), 3)
+
+	f.mustApply(f.document(2, []inSpec{{id: "c", devices: []string{"c1"}}}, []outSpec{{id: "main"}}))
+	if f.stateDirExists("a") {
+		t.Fatal("the state directory of the removed input a is still there")
+	}
+
+	f.mustApply(f.transformDocument(3, 0, door))
+	countDoor(f.emitOfRunning("a"), 1)
+	if got := f.countersOf("a"); !reflect.DeepEqual(got, []int64{1}) {
+		t.Fatalf("counters of a added back = %v, want [1]", got)
+	}
+}
+
+// TestRollbackDoesNotResurrectARemovedCount: input a was removed by the
+// applied document; a document adding it back is rolled back after a counted
+// in it. The rollback leaves no state of a, so a later document with a
+// counts from 0, not from the failed attempt's count.
+func TestRollbackDoesNotResurrectARemovedCount(t *testing.T) {
+	f := newFixture(t)
+
+	f.mustApply(f.transformDocumentFor("a", 1, 0, door))
+	countDoor(f.emitOfRunning("a"), 5)
+	f.mustApply(f.transformDocumentFor("b", 2, 0, door))
+	countDoor(f.emitOfRunning("b"), 2)
+
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(f.drv.blockRelease) }) })
+	f.drv.blockNth["c"] = 1
+
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- f.apply(f.transformDocumentFor("a", 3, 0, door, inSpec{id: "c", devices: []string{"c1"}}))
+	}()
+	select {
+	case <-f.drv.blockStarted:
+	case <-time.After(guard):
+		t.Fatal("input c did not start")
+	}
+
+	// Input a started before c and counts while c hangs.
+	countDoor(f.emitOfRunning("a"), 3)
+	if got := f.countersOf("a"); !reflect.DeepEqual(got, []int64{3}) {
+		t.Fatalf("counters of a during the attempt = %v, want [3]", got)
+	}
+
+	f.clk.Advance(DefaultStartTimeout)
+	select {
+	case out := <-done:
+		if out.Result != ResultRolledBack {
+			t.Fatalf("Apply() = %+v, want rolled_back", out)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return after the start timeout")
+	}
+
+	if f.stateDirExists("a") {
+		t.Fatal("the rollback left the state of a, which the restored document does not have")
+	}
+	if !f.stateDirExists("b") {
+		t.Fatal("the rollback removed the state of b, which the restored document has")
+	}
+
+	f.mustApply(f.transformDocumentFor("a", 4, 0, door))
+	countDoor(f.emitOfRunning("a"), 1)
+	if got := f.countersOf("a"); !reflect.DeepEqual(got, []int64{1}) {
+		t.Fatalf("counters of a = %v, want [1]: neither the old 5 nor the attempt's 3", got)
+	}
+}
+
+// TestFirstApplyRemovesStaleInputStateBeforeInputsStart: the first document
+// of the agent's run removes the state of the inputs it does not have before
+// it starts any input, even when it is rolled back; it touches nothing but
+// the directories of data_dir/inputs.
+func TestFirstApplyRemovesStaleInputStateBeforeInputsStart(t *testing.T) {
+	f := newFixture(t)
+
+	inputs := filepath.Join(f.dataDir, "inputs")
+	for _, id := range []string{"a", "old"} {
+		if err := os.MkdirAll(filepath.Join(inputs, id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(inputs, id, "transform-state.json"), []byte(`{"version":1,"counters":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notes := filepath.Join(inputs, "notes.txt")
+	if err := os.WriteFile(notes, []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f.drv.failStart["a"] = errRefused
+	if out := f.apply(f.transformDocument(1, 0, door)); out.Result != ResultRolledBack {
+		t.Fatalf("Apply() = %+v, want rolled_back", out)
+	}
+
+	if f.stateDirExists("old") {
+		t.Error("the state of input old, in no document, is still there")
+	}
+	if !f.stateDirExists("a") {
+		t.Error("the state of input a, in the document, was removed")
+	}
+	if _, err := os.Stat(notes); err != nil {
+		t.Errorf("a file of data_dir/inputs was touched: %v", err)
 	}
 }
