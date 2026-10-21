@@ -46,6 +46,30 @@ var fixtures struct {
 	serverKey *rsa.PrivateKey
 	ownDER    []byte
 	ownKey    *rsa.PrivateKey
+	ownPEM    []byte
+}
+
+// otherServer is a second server certificate, for a server reinstalled with
+// a new certificate (Review Focus); built on first use only.
+var otherServer struct {
+	once sync.Once
+	err  error
+	der  []byte
+	key  *rsa.PrivateKey
+}
+
+func loadOtherServerCertificate(t *testing.T) ([]byte, *rsa.PrivateKey) {
+	t.Helper()
+
+	otherServer.once.Do(func() {
+		otherServer.der, otherServer.key, otherServer.err = serverCertificate("urn:test:server")
+	})
+
+	if otherServer.err != nil {
+		t.Fatalf("second server certificate: %v", otherServer.err)
+	}
+
+	return otherServer.der, otherServer.key
 }
 
 func loadFixtures(t *testing.T) {
@@ -56,7 +80,7 @@ func loadFixtures(t *testing.T) {
 		if fixtures.err != nil {
 			return
 		}
-		fixtures.ownDER, fixtures.ownKey, _, fixtures.err = generateOwn("test-agent", time.Now())
+		fixtures.ownDER, fixtures.ownKey, fixtures.ownPEM, fixtures.err = generateOwn("test-agent", time.Now())
 	})
 
 	if fixtures.err != nil {
@@ -119,18 +143,26 @@ type testServer struct {
 	Cert  []byte
 	Proxy *tcpProxy
 
-	srv    *server.Server
-	ns     *server.NodeNameSpace
-	cancel context.CancelFunc
+	srv       *server.Server
+	ns        *server.NodeNameSpace
+	cancel    context.CancelFunc
+	port      int
+	closeOnce sync.Once
 }
 
-// Nodes of the test namespace. nodeTemp and nodeCount never change; tests
-// that change a value use nodeChanging and never assume its value.
+// Nodes of the test namespace. nodeTemp, nodeCount and nodeMarker never
+// change; tests that change a value use nodeChanging and never assume its
+// value. nodeMarker holds a value no log may contain.
 const (
 	nodeTemp     = "temp"     // float64 20
 	nodeCount    = "count"    // int32 1
 	nodeChanging = "changing" // float64
+	nodeMarker   = "marker"   // float64 markerValue
 )
+
+// markerValue is the value of nodeMarker, distinctive enough to be searched
+// for in logs.
+const markerValue = 4242.125
 
 // shared is the server of the tests that neither drop nor stall its proxy:
 // building a server costs about a second under -race (the nodeset import),
@@ -147,7 +179,7 @@ func sharedTestServer(t *testing.T) *testServer {
 	t.Helper()
 	loadFixtures(t)
 
-	shared.once.Do(func() { shared.srv, shared.err = buildTestServer() })
+	shared.once.Do(func() { shared.srv, shared.err = buildTestServer(serverOptions{}) })
 
 	if shared.err != nil {
 		t.Fatalf("shared test server: %v", shared.err)
@@ -161,7 +193,7 @@ func startTestServer(t *testing.T) *testServer {
 	t.Helper()
 	loadFixtures(t)
 
-	s, err := buildTestServer()
+	s, err := buildTestServer(serverOptions{})
 	if err != nil {
 		t.Fatalf("test server: %v", err)
 	}
@@ -170,20 +202,87 @@ func startTestServer(t *testing.T) *testServer {
 	return s
 }
 
+// serverOptions vary a test server; the zero value is the usual server.
+type serverOptions struct {
+	// proxy is the proxy to put the server behind; nil builds a new one.
+	proxy *tcpProxy
+	// certDER and key replace the fixture server certificate.
+	certDER []byte
+	key     *rsa.PrivateKey
+	// namespacesBefore are registered before testNamespace, which then gets
+	// another index.
+	namespacesBefore []string
+}
+
+// replace starts another server behind the same proxy, as a server
+// restarted or reinstalled at the same address: new connections reach the
+// new server, the live ones are dropped, and the old server is stopped. The
+// new server is stopped at the end of the test.
+func (s *testServer) replace(t *testing.T, opts serverOptions) *testServer {
+	t.Helper()
+
+	opts.proxy = s.Proxy
+
+	next, err := buildTestServer(opts)
+	if err != nil {
+		t.Fatalf("replacement test server: %v", err)
+	}
+	t.Cleanup(next.close)
+
+	s.Proxy.Drop()
+	s.stop()
+
+	return next
+}
+
+// down makes the server unreachable through its proxy: the live connections
+// are dropped and new ones are refused, as a server that stopped.
+func (s *testServer) down(t *testing.T) {
+	t.Helper()
+
+	closed, err := freePort()
+	if err != nil {
+		t.Fatalf("free port: %v", err)
+	}
+
+	s.Proxy.SetTarget("127.0.0.1:" + strconv.Itoa(closed))
+	s.Proxy.Drop()
+}
+
+// up makes the server reachable again after down.
+func (s *testServer) up() {
+	s.Proxy.SetTarget("127.0.0.1:" + strconv.Itoa(s.port))
+}
+
 // buildTestServer starts a server with None, Basic256Sha256 Sign and
 // SignAndEncrypt endpoints, anonymous and user name authentication, and the
 // namespace testNamespace holding the test nodes, behind a proxy.
-func buildTestServer() (*testServer, error) {
-	proxy, err := newTCPProxy()
-	if err != nil {
+func buildTestServer(opts serverOptions) (*testServer, error) {
+	proxy := opts.proxy
+	if proxy == nil {
+		p, err := newTCPProxy()
+		if err != nil {
+			return nil, err
+		}
+		proxy = p
+	}
+
+	certDER, key := fixtures.serverDER, fixtures.serverKey
+	if opts.certDER != nil {
+		certDER, key = opts.certDER, opts.key
+	}
+
+	fail := func(err error) (*testServer, error) {
+		if opts.proxy == nil {
+			proxy.Close()
+		}
+
 		return nil, err
 	}
 
 	port, err := freePort()
 	if err != nil {
-		proxy.Close()
-
-		return nil, err
+		return fail(err)
 	}
 
 	srv := server.New(
@@ -194,22 +293,26 @@ func buildTestServer() (*testServer, error) {
 		server.EnableAuthMode(ua.UserTokenTypeUserName),
 		server.EndPoint("127.0.0.1", port),
 		server.EndPoint("127.0.0.1", proxy.Port()),
-		server.PrivateKey(fixtures.serverKey),
-		server.Certificate(fixtures.serverDER),
+		server.PrivateKey(key),
+		server.Certificate(certDER),
 	)
 
 	root, err := srv.Namespace(0)
 	if err != nil {
-		proxy.Close()
+		return fail(err)
+	}
 
-		return nil, err
+	rootObjects := root.Objects()
+
+	for _, uri := range opts.namespacesBefore {
+		other := server.NewNodeNameSpace(srv, uri)
+		rootObjects.AddRef(other.Objects(), id.HasComponent, true)
 	}
 
 	ns := server.NewNodeNameSpace(srv, testNamespace)
-	rootObjects := root.Objects()
 	rootObjects.AddRef(ns.Objects(), id.HasComponent, true)
 
-	for name, value := range map[string]any{nodeTemp: float64(20), nodeCount: int32(1), nodeChanging: float64(0)} {
+	for name, value := range map[string]any{nodeTemp: float64(20), nodeCount: int32(1), nodeChanging: float64(0), nodeMarker: markerValue} {
 		v := ns.AddNewVariableStringNode(name, value)
 		ns.Objects().AddRef(v, id.HasComponent, true)
 	}
@@ -217,27 +320,35 @@ func buildTestServer() (*testServer, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := srv.Start(ctx); err != nil {
 		cancel()
-		proxy.Close()
 
-		return nil, err
+		return fail(err)
 	}
 
 	proxy.SetTarget("127.0.0.1:" + strconv.Itoa(port))
 
 	return &testServer{
 		URL:    "opc.tcp://127.0.0.1:" + strconv.Itoa(proxy.Port()),
-		Cert:   fixtures.serverDER,
+		Cert:   certDER,
 		Proxy:  proxy,
 		srv:    srv,
 		ns:     ns,
 		cancel: cancel,
+		port:   port,
 	}, nil
 }
 
+// close stops the server and its proxy; it is idempotent.
 func (s *testServer) close() {
 	s.Proxy.Close()
-	_ = s.srv.Close()
-	s.cancel()
+	s.stop()
+}
+
+// stop stops the server, not its proxy; it is idempotent.
+func (s *testServer) stop() {
+	s.closeOnce.Do(func() {
+		_ = s.srv.Close()
+		s.cancel()
+	})
 }
 
 // NodeID is the NodeId of a node of the test namespace, by name.

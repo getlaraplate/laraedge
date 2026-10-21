@@ -37,6 +37,8 @@ const (
 	DriverSimulated = "simulated"
 	// DriverModbus is the Modbus input driver.
 	DriverModbus = "modbus"
+	// DriverOPCUA is the OPC UA input driver.
+	DriverOPCUA = "opcua"
 	// OutputLaraplateHTTP is the HTTP output to the Laraplate ingest route.
 	OutputLaraplateHTTP = "laraplate-http"
 )
