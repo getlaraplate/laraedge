@@ -158,7 +158,30 @@ type Read struct {
 	Mode string
 	// Interval is the polling interval for ReadPoll.
 	Interval time.Duration
+	// Subscribe holds the subscription settings of a ReadSubscribe point; nil
+	// for every other mode.
+	Subscribe *Subscribe
 }
+
+// Subscribe is the subscription settings of a point read by subscribe: the
+// `read: subscribe` string form (every field absent) or the long form
+// `read: {subscribe: {sampling, queue, deadband}}`. Drivers that push changes
+// by subscription use them; the others ignore them.
+type Subscribe struct {
+	// Sampling is how often the source samples the value; SamplingDefault when
+	// the document gives none (the source's own publishing interval).
+	Sampling time.Duration
+	// Queue is the number of values the source queues between two
+	// publications; 0 when the document gives none.
+	Queue uint32
+	// Deadband is the change a value needs to be reported: a non-negative
+	// number (absolute) or "N%" (percent of the range); empty when the
+	// document gives none.
+	Deadband string
+}
+
+// SamplingDefault is Subscribe.Sampling when the document gives none.
+const SamplingDefault time.Duration = -1
 
 // Transform is one step of a point's transform chain.
 type Transform struct {
@@ -628,13 +651,59 @@ func priority(s string) model.Priority {
 func (b *builder) read(p path, raw json.RawMessage) Read {
 	var mode string
 	if err := json.Unmarshal(raw, &mode); err == nil {
-		return Read{Mode: mode}
+		r := Read{Mode: mode}
+		if mode == ReadSubscribe {
+			r.Subscribe = &Subscribe{Sampling: SamplingDefault}
+		}
+		return r
 	}
-	var poll struct {
-		Poll string `json:"poll"`
+	var long struct {
+		Poll      string          `json:"poll"`
+		Subscribe json.RawMessage `json:"subscribe"`
 	}
-	_ = json.Unmarshal(raw, &poll)
-	return Read{Mode: ReadPoll, Interval: b.duration(p.key("poll"), poll.Poll)}
+	_ = json.Unmarshal(raw, &long)
+	if long.Subscribe != nil {
+		return Read{Mode: ReadSubscribe, Subscribe: b.subscribe(p.key("subscribe"), long.Subscribe)}
+	}
+	return Read{Mode: ReadPoll, Interval: b.duration(p.key("poll"), long.Poll)}
+}
+
+// subscribe converts the settings of the long subscribe form. The schema
+// accepted their shape; the percentage cap is checked here.
+func (b *builder) subscribe(p path, raw json.RawMessage) *Subscribe {
+	var wire struct {
+		Sampling *string         `json:"sampling"`
+		Queue    uint32          `json:"queue"`
+		Deadband json.RawMessage `json:"deadband"`
+	}
+	_ = json.Unmarshal(raw, &wire)
+
+	sub := &Subscribe{Sampling: SamplingDefault, Queue: wire.Queue}
+	if wire.Sampling != nil {
+		sub.Sampling = b.duration(p.key("sampling"), *wire.Sampling)
+	}
+	if len(wire.Deadband) != 0 {
+		sub.Deadband = b.deadband(p.key("deadband"), wire.Deadband)
+	}
+	return sub
+}
+
+// deadband returns the text of a deadband and refuses a percentage above 100.
+// A text the schema refused is left to the schema's message.
+func (b *builder) deadband(p path, raw json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		text = strings.TrimSpace(string(raw))
+	}
+	number, percent := strings.CutSuffix(text, "%")
+	value, err := strconv.ParseFloat(number, 64)
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		b.add(p, "is too large")
+	case err == nil && percent && value > 100:
+		b.add(p, "must be at most 100%")
+	}
+	return text
 }
 
 // duration parses a duration the schema pattern accepted; it must be

@@ -50,6 +50,8 @@ var defMessages = map[string]string{
 	"signalName": "must not contain /",
 	// transformDeadband holds the percentage pattern of a deadband.
 	"transformDeadband": "must be a non-negative number or a percentage such as 5%",
+	// readDeadband holds the percentage pattern of a subscription deadband.
+	"readDeadband": "must be a non-negative number or a percentage such as 5%",
 }
 
 // mapKindsMessage reports a map table whose values (with the default) are not
