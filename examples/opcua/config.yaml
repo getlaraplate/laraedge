@@ -1,0 +1,65 @@
+# Configuration document of the OPC UA demo: one opcua input reading a
+# server, sent to a Laraplate running on this machine. The token is read from
+# the environment of the agent: export LARAPLATE_EDGE_TOKEN before running it.
+# Adjust the endpoint and every NodeId to your server (docs/CONFIGURATION.md,
+# "The opcua driver").
+#
+# The agent trusts a server certificate only after you say so. Once:
+#   laraplate-edge opcua trust ua-server --config config.yaml --bootstrap bootstrap.yaml
+# Find the NodeIds to use:
+#   laraplate-edge browse ua-server --config config.yaml --bootstrap bootstrap.yaml
+# Check the document offline, then read every point once:
+#   laraplate-edge config validate config.yaml
+#   laraplate-edge probe ua-server --config config.yaml --bootstrap bootstrap.yaml
+
+schema: laraplate-edge-config/1
+version: 1
+
+inputs:
+  - id: ua-server
+    driver: opcua
+    # The devices of the input sit behind one server, whose liveness is
+    # theirs: no successful exchange with it for this long and they are
+    # reported dead; the first one after that is a birth.
+    death_tolerance: 15s
+    connection:
+      endpoint: opc.tcp://192.168.10.30:4840
+      security_policy: Basic256Sha256   # default; None, Aes128_Sha256_RsaOaep, Aes256_Sha256_RsaPss
+      security_mode: SignAndEncrypt     # default; Sign
+      publishing_interval: 1s           # default
+      # Anonymous is the default. For a user name, the password is a secret
+      # reference, read again at every connect; it needs a policy other than None:
+      # auth:
+      #   user: edge
+      #   password: secret://env/OPCUA_PASSWORD
+    devices:
+      - device: press-07
+        points:
+          # ns=<index>;s=<name>. The index of a namespace can change when the
+          # server is reinstalled: the nsu= form below names it by URI.
+          # subscribe: the server pushes changes; the sampling interval is the
+          # publishing interval, the queue holds 10 values.
+          - {signal: running, address: "ns=2;s=Press07.Running", type: bool, read: subscribe, priority: critical}
+          # The long form: sample every 200 ms, queue 20 values, report a change
+          # of at least 0.5 (a percent form such as "1%" needs an EURange on
+          # the server's variable).
+          - signal: press_force
+            address: "ns=2;s=Press07.Force"
+            type: float64
+            unit: kN
+            read:
+              subscribe: {sampling: 200ms, queue: 20, deadband: 0.5}
+            priority: bulk
+          # Numeric NodeId and a read every 5 seconds instead of a subscription.
+          - {signal: cycle_count, address: "ns=2;i=5012", type: int32, read: {poll: 5s}, priority: critical}
+      - device: furnace-02
+        points:
+          # A namespace by its URI, resolved at every connect.
+          - {signal: recipe, address: "nsu=urn:vendor:furnace;s=Recipe.Name", type: string, read: subscribe, priority: critical}
+          - {signal: temperature, address: "nsu=urn:vendor:furnace;s=Zone1.Temperature", type: float64, unit: C, read: {poll: 5s}, priority: bulk}
+
+outputs:
+  - id: laraplate
+    type: laraplate-http
+    url: http://127.0.0.1:8000
+    token: secret://env/LARAPLATE_EDGE_TOKEN

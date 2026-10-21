@@ -1,0 +1,18 @@
+# Bootstrap of the OPC UA demo. Run from this directory:
+#
+#   export LARAPLATE_EDGE_TOKEN=...
+#   laraplate-edge opcua trust ua-server --bootstrap bootstrap.yaml --config config.yaml
+#   laraplate-edge run --bootstrap bootstrap.yaml
+#
+# The disk buffer, the applied configuration and the OPC UA certificates (the
+# agent's own and the ones you trusted) go under ./data (ignored by git). The
+# agent_id forms the agent's application URI, urn:laraplate-edge:<agent_id>.
+# The status endpoint binds its default, 127.0.0.1:9180.
+
+agent_id: opcua-demo-01
+
+config:
+  provider: file
+  file: config.yaml
+
+data_dir: ./data

@@ -42,7 +42,7 @@ laraplate-edge config validate config.yaml
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | input id |
-| `driver` | yes | | `simulated` or `modbus` in this build. The schema also knows `opcua`, `mqtt`, `serial`, `file` and `plugin:<id>`. |
+| `driver` | yes | | `simulated`, `modbus` or `opcua` in this build. The schema also knows `mqtt`, `serial`, `file` and `plugin:<id>`. |
 | `connection` | no | `{}` | driver settings, an object the schema does not interpret (see the secret rule below) |
 | `death_tolerance` | no | `30s` | how long without a successful read before the input reports its devices dead; `birth` follows at the next successful read |
 | `devices` | yes | | at least one device |
@@ -56,7 +56,7 @@ A **point** is one signal read from the machine:
 |---|---|---|---|
 | `signal` | yes | | signal name: 1 to 160 characters, no `/` |
 | `address` | yes | | driver-specific address of the value |
-| `read` | yes | | `subscribe`, `event`, or `{poll: <duration>}` |
+| `read` | yes | | `subscribe`, `event`, `{poll: <duration>}`, or `{subscribe: {sampling, queue, deadband}}`, the long form of `subscribe` whose settings only the `opcua` driver uses (the others ignore them). What each driver accepts is in its section. |
 | `priority` | no | `critical` | buffer class: `critical` or `bulk` (see "Buffer") |
 | `type` | no | | decoding type: `bool`, `int16`, `uint16`, `int32`, `uint32`, `int64`, `uint64`, `float32`, `float64`, `string`. It sets the kind of the values the driver produces (see "Transforms") and, for a point without transforms, the data type announced in the device's `birth`: `bool` is `boolean`, `string` is `string`, any other type (or none) is `number`. A point with transforms announces the data type of what its chain produces. |
 | `byte_order` | no | | `ABCD`, `CDAB`, `BADC`, `DCBA` (drivers that decode registers) |
@@ -265,6 +265,205 @@ document; the Prometheus functions `rate()` and `increase()` handle such counter
 `laraplate_edge_input_connected` and `laraplate_edge_input_read_errors_total`
 ([USAGE.md](USAGE.md#metrics)). Values and connection settings (host, port, device path) are never
 written to the logs at `info` and above.
+
+### The `opcua` driver
+
+Reads variables of an OPC UA server, by subscription or by polling. The driver is read-only: it reads the
+`Value` attribute and never sends a Write, a Call or a node management request. `examples/opcua` is a
+complete document; [USAGE.md](USAGE.md#opc-ua-servers) describes the `opcua trust`, `browse` and `probe`
+commands that go with it.
+
+**Connection.** An unknown field is an error here, unlike in other drivers' `connection`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `endpoint` | | required: `opc.tcp://<host>[:<port>]`, without a user name or password in it. Give the port (the registered one is 4840). |
+| `security_policy` | `Basic256Sha256` | `None`, `Basic256Sha256`, `Aes128_Sha256_RsaOaep` or `Aes256_Sha256_RsaPss` |
+| `security_mode` | `SignAndEncrypt` | `Sign` or `SignAndEncrypt`; checked but ignored with `None` |
+| `auth` | anonymous | `anonymous`, or `{user, password}` with `password` a `secret://` reference |
+| `publishing_interval` | `1s` | the subscription's publishing interval, at least `1ms` |
+
+The agent asks the server for its endpoints and takes the one with the configured policy and mode: a server
+that offers none, or whose endpoint offers no user token of the kind `auth` needs, is a connection failure
+(`connection`, below).
+
+**`None`.** With `security_policy: None` nothing is signed or encrypted: anyone on the network can read the
+values and change them on their way. The driver does not check any certificate, and writes a `WARN` at every
+start of the input: `input <id>: OPC UA connection is unprotected (security_policy None)`. A `user` with
+`None` is refused by `config validate` (`connection.auth: user and password need a security_policy other
+than None`), because the password would travel in the clear. Use `None` only on a network you control, and
+prefer the default policy and trust the server's certificate (below).
+
+**User name.** `auth: {user, password: secret://...}`. The password is resolved through the secret
+resolver at every connect, not once: a `secret://file/` password that was rotated takes effect at the next
+connect. A password that does not resolve is a `connection` error and the input tries again with its
+backoff. Neither the user name nor the password is written to a log or to an error.
+
+**Certificates.** Under `data_dir/opcua/pki/`:
+
+| Directory | Holds |
+|---|---|
+| `own/` | the agent's own application certificate `cert.der` and its key `key.pem` (PKCS#8, mode `0600`) |
+| `trusted/` | the server certificates you trusted, `<thumbprint>.der` |
+| `rejected/` | the server certificates the agent met and refused, `<thumbprint>.der`, for you to trust later |
+
+A thumbprint is the SHA-1 of the server's certificate in DER form, written as 40 lowercase hexadecimal
+characters. Only the leaf certificate is stored and compared.
+
+- **The agent's certificate.** Created when the first `opcua` input starts (a failure to create or read it
+  fails the start of the input, so the document is `rolled_back`), or by `opcua trust`, `browse` and `probe`
+  when missing: RSA 2048, SHA-256, valid for 10 years, with the application URI `urn:laraplate-edge:<agent_id>`
+  and the host name as alternative names. It is never renewed and its expiry is not checked; to replace it, stop
+  the agent and delete the `own/` directory. Most servers refuse a client certificate they were not told to
+  trust: add `own/cert.der` to the list of trusted client certificates of the server. The key file mode
+  `0600` is a no-op on Windows: protect `data_dir` with ACLs.
+- **The server's certificate is trusted explicitly.** With a policy other than `None`, at every connect the
+  agent discovers the server's endpoints, takes the one for the policy and mode, computes the thumbprint of
+  its certificate and goes on only when `trusted/<thumbprint>.der` exists. Otherwise the attempt fails (a
+  `connection` error), the certificate is stored in `rejected/`, and one `WARN` names the input, the thumbprint
+  and the command to run (`laraplate-edge opcua trust <input>`). That warning comes once per thumbprint per run
+  of the input, not at every retry. There is no certificate chain or revocation check: your decision on the
+  thumbprint is the whole trust. Its expiry is shown by `opcua trust`, not enforced.
+- **A newly trusted certificate is picked up at the next retry, without restarting the agent.** The
+  retries follow the reconnection backoff (up to 1 minute). A server that was reinstalled, or whose
+  certificate was renewed, presents another thumbprint: it is untrusted again until you trust it. The old
+  file stays in `trusted/`; delete it by hand to withdraw that trust.
+
+**Points.** `type` is required: `bool`, `int16`, `uint16`, `int32`, `uint32`, `int64`, `uint64`, `float32`,
+`float64` or `string`. `byte_order` is refused (`byte_order: not for opcua`) and so is `read: event`. `unit`,
+`priority` and `transforms` work as for any driver. The `address` is a NodeId in its textual form:
+
+| Address | Meaning |
+|---|---|
+| `ns=<n>;i=<number>` | numeric identifier in namespace index `n` (0 to 65535) |
+| `ns=<n>;s=<text>` | string identifier |
+| `ns=<n>;g=<guid>` | GUID identifier |
+| `ns=<n>;b=<base64>` | opaque identifier |
+| `i=<number>`, `s=<text>`, `g=<guid>`, `b=<base64>` | the same in namespace 0 |
+| `nsu=<uri>;<i\|s\|g\|b>=<id>` | the namespace by its URI, looked up in the server's `NamespaceArray` at every connect |
+
+The namespace index of a server can change when it is reinstalled or reconfigured; a `nsu=` address
+survives that. If the server has no such namespace, that point alone is `bad` (and `exception` counts once for
+that connect). The parsing is stricter than the OPC UA text form: the identifier needs its type letter (a
+bare `Name` is refused, since a mistyped letter would otherwise name another node), the namespace index is
+plain digits, and `nsu=` needs both a URI and an identifier. Only the syntax is checked offline
+(`config validate`); whether the node exists is the server's answer. `browse` prints addresses in the `nsu=`
+form (USAGE.md).
+
+**Subscribe.** `read: subscribe` monitors the point in the input's one subscription, which runs at
+`publishing_interval`. The server samples the variable at its publishing interval, keeps up to 10 values
+between two publications and discards the oldest when the queue is full, and applies no filter. The long
+form sets those for the point:
+
+```yaml
+read:
+  subscribe: {sampling: 200ms, queue: 20, deadband: 0.5}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `sampling` | the publishing interval | how often the server samples the variable; sent in milliseconds, and the server may revise it |
+| `queue` | `10` | monitored item queue size, 1 to 4294967295 |
+| `deadband` | none | the change a value needs to be reported: a non-negative number (absolute), or `N%` with `N` up to 100 (percent of the variable's range) |
+
+A deadband is sent to the server as a data change filter (it reports on a change of status or value). A
+percent deadband works only on a variable that has an `EURange` on the server: a server that cannot apply it
+refuses the item, and the point is `bad` (see "Health"). The server decides whether to apply any deadband;
+the test server of the library ignores them. A monitored item the server refuses is created again at the
+next reconnect only. Only `opcua` uses `sampling`, `queue` and `deadband`: other drivers that accept
+`subscribe` ignore them.
+
+**Poll.** `read: {poll: <duration>}` reads the point with the Read service. The points of one input with
+the same interval are read together, in as few requests as the server's limit allows (below), and the group
+due first is read first. When the reads fall behind their intervals, a group is read once and its next read is
+one interval after that read: no backlog builds up. Subscribe and poll points can be mixed in an input.
+
+**Conversion.** A value is carried lossless or the sample is `bad` with a `decode` error:
+
+| `type` | Accepts |
+|---|---|
+| `bool` | a Boolean variant, and nothing else |
+| `int16`, `uint16`, `int32`, `uint32`, `int64`, `uint64` | any integer variant (SByte, Byte, Int16, UInt16, Int32, UInt32, Int64, UInt64) whose value fits the type; `uint64` holds up to 9223372036854775807, since integer values are 64-bit signed |
+| `float64` | a Float or Double variant; an integer variant of at most 2^53 in magnitude |
+| `float32` | a Float variant; a Double that is exactly a float32; an integer variant of at most 2^24 in magnitude |
+| `string` | a String variant that is valid UTF-8, and nothing else |
+
+A float never converts to an integer type; a NaN or an infinity is no value; a Boolean never converts to a
+number nor a number to a string. Arrays, DateTime, ByteString, structures and every other variant are `bad`.
+A `bad` sample from a failed conversion carries the zero of the point's kind (`false`, `0`, `""`), as for
+`modbus`.
+
+**Quality and timestamps.** The quality is the class of the value's OPC UA status: Good is `good`,
+Uncertain is `uncertain` (its value is kept), Bad is `bad`. A Bad status is the server's verdict, not a
+failed conversion: the sample is `bad`, carries the zero of the kind, whatever the server sent with it, and
+counts as `exception`, not `decode`. A Good or Uncertain status without a value is `bad` with a `decode` error.
+The sample time is the server's source timestamp when the value carries one, else its server timestamp, else
+the agent clock.
+
+**Reconnection and liveness.** Starting the input opens only local resources (the certificates) and returns;
+the server is connected in the background, so an unreachable or untrusted server is never a failing start:
+the agent starts, and once `death_tolerance` passes without a successful exchange the devices are reported
+dead, and born again at the first successful exchange afterwards (a `birth` with their signals, then the
+samples).
+
+- **The liveness is the server's.** All the devices of an input sit behind one server. Every successful
+  exchange with it keeps every device of the input alive: an answer to the watchdog read, a Read response,
+  a data change notification. So a subscription whose values never change keeps its devices alive, and a node
+  with a Bad status is a `bad` sample, not a dead device. A server whose machine is off, but which still
+  answers, does not get its devices reported dead.
+- **A watchdog** reads the server's `CurrentTime` every `min(5s, death_tolerance / 3)`, at least `1s`. The
+  library detects no half-open connection (a cable cut without a reset), so a failed watchdog read, and the
+  request timeout below, end the session.
+- A session ends on a connect error, a failed request, a lost connection or a lost subscription. The agent then
+  closes it and connects again with an exponential backoff with jitter, from 1 second up to 1 minute, a new
+  session with the subscription and monitored items created again. The backoff starts again from 1 second
+  only after a session that completed at least one exchange, so a server that accepts sessions but fails every
+  request is not flooded. A session lost without being closed stays on the server until its own timeout.
+
+**Limits of the server.** After connecting, the agent reads the server's `MaxNodesPerRead` and
+`MaxMonitoredItemsPerCall` and chunks its requests at them. 0, which means no limit, and any value above
+1000 count as 1000; a limit the server does not report (a Bad status, or not a number) counts as 100. A
+request that exceeds the server's limits is answered with a service fault, which tears the library client down,
+so the driver never sends one, nor an empty one.
+
+**Fixed timing.** There are no settings for these:
+
+| Timing | Value |
+|---|---|
+| TCP dial | 5 s |
+| each request | 5 s; discovery and the connection are each bounded by both |
+| requested session timeout | 60 s |
+| subscription keep-alive count | 10 |
+| watchdog | `min(5s, death_tolerance / 3)`, at least 1 s |
+| the request that closes a session | 1 s |
+
+**Health.** `/status` shows, for the input, `connected` (true while a session is open) and `read_errors`
+(always the four kinds, at 0 until the first error; the counts restart when the input is started again, see
+the `modbus` driver's Health). The metrics are `laraplate_edge_input_connected` and
+`laraplate_edge_input_read_errors_total` ([USAGE.md](USAGE.md#metrics)). The kinds mean:
+
+| Kind | Counted |
+|---|---|
+| `timeout` | a connection attempt or request the server did not answer in time |
+| `connection` | any other failure of the session: a refused or reset connection, an untrusted certificate, no endpoint with the configured policy and mode, a password that does not resolve, a lost session or subscription, a library panic recovered by the driver |
+| `exception` | a Bad status from the server (a refused monitored item, an unknown NodeId, a device behind the server in fault), counted once per exchange that carries at least one: a Read response of a poll group, the answer that creates the monitored items, a data change message; and once for a connect where an `nsu=` namespace is missing |
+| `decode` | a value that does not convert to the point's `type`, per point |
+
+Values, endpoints, user names and passwords are never written to the logs at `info` and above. The library
+writes its own lines through the standard logger: the agent sends them to its log at `debug` with
+`source=gopcua`.
+
+**Declared limits.**
+
+- A panic of the library in one of its own goroutines (on malformed data from a server, say) cannot be caught
+  and stops the process; the service manager restarts it (systemd does, with `Restart=`). A panic in a call the
+  driver makes itself is caught and becomes a `connection` error and a reconnect.
+- The automated tests run the agent against the Go library's own server only. Interoperability with other
+  vendors' servers is not tested in CI, and neither are `Aes128_Sha256_RsaOaep` and `Aes256_Sha256_RsaPss`
+  against a server of another vendor: try a new server with `probe` before relying on it.
+- That test server ignores deadbands and does not check user names, so the deadband and the user name
+  authentication are exercised only up to the request they send.
+- Only the `Value` attribute of scalar variables is read: no arrays, structures, events, alarms or history.
 
 ## Transforms
 
@@ -498,7 +697,7 @@ Outcomes, as reported to Laraplate:
 
 | Part | Comes with |
 |---|---|
-| drivers other than `simulated` and `modbus` | the driver plans, in the design's order: `opcua`, then `mqtt`, `serial` and `file` |
+| drivers other than `simulated`, `modbus` and `opcua` | the driver plans, in the design's order: `mqtt`, `serial` and `file` |
 | output types other than `laraplate-http` | the MQTT output plan (`laraplate-mqtt`) and the plugin plan (`plugin:<id>`) |
 | `plugins`, `plugin:<id>` drivers and outputs | the plugin plan (design section 8) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
@@ -558,6 +757,7 @@ is exact, but its `ts` range can span records that are still in the buffer.
 
 ## Known limits of this build
 
+- The `opcua` driver is tested against the Go library's own server only, and a panic of the library in one of its goroutines stops the agent: see "Declared limits" under the `opcua` driver.
 - A real serial port is not exercised by the automated tests: the `modbus` `rtu` transport is covered
   through a fake client, and the RTU framing through `rtuovertcp` against a test server. Try a new serial
   line with `probe` before relying on it.

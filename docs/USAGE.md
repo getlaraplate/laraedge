@@ -4,9 +4,9 @@ This guide is for whoever builds, installs and runs the agent. The configuration
 outputs, buffer) is described in [CONFIGURATION.md](CONFIGURATION.md). The design is in the stack:
 `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
-What this build provides: the `simulated` and `modbus` input drivers, the level-1 transforms of points, the
+What this build provides: the `simulated`, `modbus` and `opcua` input drivers, the level-1 transforms of points, the
 `laraplate-http` output, the disk buffer with loss markers, the `file` and `laraplate` configuration
-providers, the `probe` and `config test` commands, the status endpoint, JSON logs and the systemd
+providers, the `probe`, `config test`, `browse` and `opcua trust` commands, the status endpoint, JSON logs and the systemd
 watchdog. The other real drivers, derived signals (CEL), the MQTT output, plugins, the OS keystore and packages
 come with later plans (see "What this build refuses" in CONFIGURATION.md).
 
@@ -37,6 +37,9 @@ the `User-Agent` header.
 | `config validate <file>` | checks a configuration document with both validation layers (schema and rules, then what this build provides and the type check of every transform chain), and builds every input through its driver without connecting; relative paths in a `connection` resolve against the file's directory, as with the `file` provider; applies nothing | 0 and `<file>: valid` on stdout, or 1 and one `<file>: <path>: <problem>` line per problem on stderr |
 | `config test <file> --input <samples.jsonl>` | replays recorded samples through the transform chains of a document and writes the resulting samples to stdout; applies nothing (see "Trying transforms") | 0; 1 when the document is invalid, the sample file is unreadable or has a bad line; 2 on a usage error |
 | `probe <input> (--config <file> \| --bootstrap <path>) [--record <file>]` | reads every point of one input once and prints the raw samples, before transforms; never starts the input or an output (see "Trying transforms") | 0; 1 when the document is invalid, the input is unknown or the read fails; 2 on a usage error |
+| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>]` | lists the nodes of an OPC UA server, to find the addresses of points (see "OPC UA servers") | 0; 1 when the document is invalid, the input is unknown or not `opcua`, or the server cannot be browsed; 2 on a usage error |
+| `opcua trust <input> (--config <file> \| --bootstrap <path>) [--thumbprint <hex>]` | shows the certificate an OPC UA server presents and trusts it (see "OPC UA servers") | 0 when trusted or already trusted; 1 when refused, mismatched or on any other failure; 2 on a usage error |
+| `opcua trust --list --bootstrap <path>` | lists the trusted server certificates | 0; 1 when the bootstrap cannot be read, or no certificate could be listed because a file is unreadable; 2 on a usage error |
 | `status [--listen addr]` | prints the `/status` answer of a running agent, indented; `--listen` defaults to `127.0.0.1:9180`; the bearer token, when the endpoint has one, is read from `LARAPLATE_EDGE_STATUS_TOKEN` | 0, or 1 when the agent does not answer |
 | `version` | prints the version | 0 |
 
@@ -202,6 +205,13 @@ response time: 3µs
   device. On `rtu` the probe opens the serial port itself: stop the agent before probing an `rtu` input,
   because both would read the same port and corrupt each other's frames (on Windows the second open is
   refused).
+- An `opcua` input is probed through a session of its own, beside a running agent's: it reads every point
+  once with the Read service (subscribe points too; no subscription is created) and prints one line per
+  point, `bad` for an address that does not resolve or a Bad status. It needs the `data_dir` and the
+  `agent_id` of the bootstrap, for the agent's certificate: give `--bootstrap` with `--config` (the
+  bootstrap is read only for an `opcua` input, so `--config` keeps working with a broken bootstrap for the
+  other drivers), or `--bootstrap` alone. `--config` alone fails with `data_dir unknown`. An untrusted
+  server is an error naming its thumbprint: run `opcua trust` (below).
 - An input id the document does not have exits 1 with the ids it has.
 
 **`config test <file> --input <samples.jsonl>`** replays recorded samples through the transform chains
@@ -243,6 +253,81 @@ and `quality`, all required (no other key is accepted; key names are matched wit
 - The device and signal must be a point of the document. The first bad line stops the command with
   `<file>: line N: <reason>`, never quoting the line.
 
+## OPC UA servers
+
+The `opcua` driver ([CONFIGURATION.md](CONFIGURATION.md#the-opcua-driver)) trusts a server only after you
+say so, and its points are NodeIds. Three commands help; each takes the input id and the same two ways to
+find the document:
+
+- `--config <file>`: the file is checked like `config validate`, and `--bootstrap` gives the `data_dir`
+  (the certificates live there) and the `agent_id`. Give both on a machine where the agent has not run yet.
+- `--bootstrap <path>` alone: the document is the last valid one in its `data_dir`, which exists once the
+  agent has applied a document.
+
+`--config` alone fails with a `data_dir unknown` error.
+
+### Trusting the server: `opcua trust`
+
+```bash
+laraplate-edge opcua trust ua-server --config config.yaml --bootstrap bootstrap.yaml
+```
+
+```
+Subject: Press line OPC UA server
+Thumbprint: 4d8f0c5e1b9a7d3c62e4f1a08b5c9d2e7f3a6b10
+Expires: 2036-05-02T09:14:03Z
+Trust this certificate? [y/N] y
+Trusted 4d8f0c5e1b9a7d3c62e4f1a08b5c9d2e7f3a6b10
+```
+
+- It creates the agent's own certificate when missing, asks the server for its endpoints and takes the
+  certificate of the endpoint for the input's `security_policy` and `security_mode`. No session is opened and
+  nothing is read. The input must be an `opcua` input with a policy other than `None` (with `None` there is no
+  certificate to trust).
+- `Expires` is in UTC, followed by `(Expired)` when it is past. An expired certificate can still be trusted:
+  expiry is shown, not enforced.
+- Only `y` or `yes` (any case) on stdin trusts it; anything else, and the end of the input, answers `Not
+  trusted` and exits 1. The certificate is stored in `data_dir/opcua/pki/trusted/<thumbprint>.der`.
+- The server presented that certificate on a channel that proves nothing, so compare the thumbprint with the
+  one the server's own administration shows before answering yes. In a script give it: `--thumbprint
+  <hex>` (40 hexadecimal characters, no colons, any letter case) trusts without asking when it equals the
+  server's, and exits 1, storing nothing, when it does not.
+- A certificate already trusted prints `Already trusted <thumbprint>` and exits 0.
+- A running agent picks the new certificate up at its next connection attempt, without a restart: at most
+  a minute later, the longest wait of its backoff.
+- `opcua trust --list --bootstrap <path>` prints `<thumbprint>  <expiry>  <subject>` for each trusted
+  certificate, one per line, nothing when there is none. It needs `--bootstrap`, which gives the `data_dir`.
+  A file of `trusted/` that is damaged is named on stderr and does not stop the list.
+- To withdraw trust, delete the file from `trusted/`. The trust is checked when a session is opened, so
+  a session already open stays open until it ends.
+
+The server must trust the agent in turn: its certificate is `data_dir/opcua/pki/own/cert.der`. Where and how
+depends on the server.
+
+### Finding the addresses: `browse`
+
+```bash
+laraplate-edge browse ua-server --config config.yaml --bootstrap bootstrap.yaml --depth 3
+```
+
+```
+nsu=urn:vendor:press;s=Press07  Press07  Object
+  nsu=urn:vendor:press;s=Press07.Running  Running  Variable  Boolean
+  nsu=urn:vendor:press;s=Press07.Force  Force  Variable  Double
+```
+
+- It connects like `probe` (the trust check included), walks the hierarchical references depth first from
+  the Objects folder (`i=85`), or from `--node <nodeid>` (any address form of the driver, `nsu=` included), and
+  prints one line per node, indented two spaces per level: the NodeId, the browse name, the node class
+  and, for a variable, the name of its data type. The start node itself is not printed.
+- `--depth` is the number of levels printed below the start node, 1 (its children only) to 10, 2 by default.
+- A NodeId whose namespace is not 0 is printed in the `nsu=<uri>;...` form when the server's
+  `NamespaceArray` names the namespace, in the `ns=<n>;...` form otherwise: paste the line's NodeId as the
+  point's `address`. The `nsu=` form survives the server renumbering its namespaces.
+- A node reached twice is printed once. The walk stops after 1000 nodes with `... stopped after 1000 nodes`
+  on stdout: narrow it with `--node` and `--depth`.
+- No value is read. Like `probe`, it opens a session of its own.
+
 ## Status endpoint
 
 Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
@@ -251,7 +336,7 @@ Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
 |---|---|
 | `/healthz` | `200 ok` while the process serves; never needs the token |
 | `/readyz` | `200 {"ready":true}` once a configuration is applied and every input runs; otherwise `503 {"ready":false,"reason":"..."}` |
-| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`, and for an input that reports its health, such as `modbus`, `connected` and `read_errors`, the counts since the input was last started, restarting from 0 when its configuration changes or a rollback restarts it, always the four kinds `timeout`, `connection`, `exception` and `decode`, at 0 until the first error) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds`, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
+| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`, and for an input that reports its health, such as `modbus` and `opcua`, `connected` and `read_errors`, the counts since the input was last started, restarting from 0 when its configuration changes or a rollback restarts it, always the four kinds `timeout`, `connection`, `exception` and `decode`, at 0 until the first error) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds`, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
 | `/metrics` | Prometheus text format 0.0.4, below |
 
 With `status_token` set, every path but `/healthz` needs `Authorization: Bearer <token>`. The endpoint
@@ -268,7 +353,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
 | `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down |
-| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind`: `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception), `decode` (a value that does not decode); all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
+| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind`: `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_buffer_records` | gauge | `output`, `priority` | records not yet confirmed |
 | `laraplate_edge_buffer_bytes` | gauge | `output`, `priority` | bytes of the queue on disk |
@@ -280,7 +365,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_clock_offset_seconds` | gauge | `output` | backend clock minus agent clock, from the `Date` header of the last response |
 | `laraplate_edge_last_error_timestamp_seconds` | gauge | `output` | Unix time of the output's last error, 0 when none; the text is in `/status` |
 
-The connection and read error series exist only for inputs that report their health (`modbus`, not `simulated`). The buffer series and the drop counters exist only for outputs that run (a `failed` output has no open
+The connection and read error series exist only for inputs that report their health (`modbus` and `opcua`, not `simulated`). The buffer series and the drop counters exist only for outputs that run (a `failed` output has no open
 buffer). Counters restart from 0 when the agent restarts.
 
 ## Logs
@@ -363,6 +448,16 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `/status` `connected` true for a `modbus` input, but one device reported dead and `read_errors` `timeout` growing | on a shared serial line or behind a gateway, one unit does not answer: it is off, its unit id is not the configured `unit_id` or `@unit`, or its wiring or serial settings are wrong | the other units keep being read at their intervals and the connection is kept: it is reopened only on an I/O error (on `tcp` also a short frame or a protocol error) or when no unit has answered for `death_tolerance`. Check that device and its unit id; `timeout` grows by one at every poll of each of its blocks. Each such timeout holds the line for `timeout`, so keep `timeout` short on a shared line; on `tcp` a short `timeout` is safe (a late answer is skipped by its transaction id), but on `rtu` and `rtuovertcp` keep it above the slowest unit's answer time for its largest block (255 bytes for 125 registers, about 1.15 ms a byte at 9600 baud, so about 290 ms, plus the device's turnaround): a later answer stays on the line and the next request of the same unit, function and length takes it as its own, undetected (CONFIGURATION.md, "Choosing `timeout`"). |
 | a `modbus` block always `bad`, `read_errors` `exception` growing | the device refuses the request with exception 1 to 4: usually one address of the block is not mapped, or the area is wrong (`hr` for `ir`) | a block is one request, so a single unmapped address fails all its points. Split the points around the unmapped address (leave a gap of at least one address between them, or give them another `poll` interval) and check the area and the offset in the device manual. `probe` shows which points are `bad`. |
 | a `modbus` value is wrong, a huge number or noise | the byte order or the offset is wrong | try the other `byte_order` values (a `float32` from a PLC is often `CDAB`); offsets are zero-based, so the legacy `40011` is `hr:10`; a point read one register off pairs unrelated words. Check with `probe`. A `decode` error is a value that cannot be carried (`uint64` above 9223372036854775807, NaN or infinity, a string that is not UTF-8). |
+| `WARN` "server certificate not trusted, thumbprint ...; trust it with: laraplate-edge opcua trust ...", an `opcua` input `connected` false, `read_errors` `connection` growing, devices reported dead after `death_tolerance` | the server's certificate is not in `data_dir/opcua/pki/trusted/` (a copy is in `rejected/`). The warning comes once per thumbprint per run of the input. | compare the thumbprint with the server's own, then run `laraplate-edge opcua trust <input> ...` (above). The running agent picks it up at its next attempt, within a minute. |
+| the same warning with another thumbprint, for a server that worked | the server was reinstalled, or its certificate renewed or replaced | check that this is expected (a different thumbprint can also be another machine at that address), then `opcua trust` again. The old file stays in `trusted/`: delete it to withdraw that trust. |
+| an `opcua` input `connected` false, `read_errors` `connection` or `timeout` growing, no warning | the endpoint is not reachable (host, port, firewall), the server offers no endpoint with the configured `security_policy` and `security_mode`, it does not offer the user token `auth` needs, it refuses the agent's certificate, or it refuses the session | `probe` prints the status code or the reason; `--log-level debug` logs each failed attempt. Compare the policy and mode with the server's endpoints, and add `data_dir/opcua/pki/own/cert.der` to the server's trusted client certificates. The agent retries with backoff up to 1 minute. |
+| an `opcua` input cannot connect, a session limit reached on the server | the server allows few sessions. The agent keeps one per input, `probe` and `browse` open another while they run, and a session lost without being closed stays on the server until its timeout (the agent asks for 60 s). | stop the extra clients, wait for the old session to expire, or raise the server's limit. The agent reconnects on its own. |
+| `WARN` "input ...: OPC UA connection is unprotected (security_policy None)" at every start | the input uses `security_policy: None`: values travel in the clear and can be altered, and nothing authenticates the server | intended only on a network you control. Otherwise set `Basic256Sha256` (the default) and trust the server's certificate with `opcua trust`. |
+| an `opcua` point always `bad` with the zero of its type, `read_errors` `exception` growing | the server answers a Bad status for the node, usually `BadNodeIdUnknown`: the NodeId is wrong, or its namespace index changed (a server reinstalled or reconfigured). A subscribed point is `bad` once at each connect; a polled point at each poll. | `probe` shows which points are `bad`. Find the node with `browse` and use the `nsu=` form of the address, which does not depend on the index. |
+| an `opcua` point `bad` right after each connect, `exception` +1 per connect, with a `deadband` of `N%` | the server refuses a percent deadband for a variable without an `EURange` | give the variable an `EURange` on the server, or use an absolute deadband (a number). The refused item is created again only at the next connect. |
+| `read_errors` `decode` growing for an `opcua` point | the value does not convert to the point's `type`: a float to an integer type, a number too large for the type, an array or a structure, a string that is not UTF-8 | set the `type` the node holds (`browse` shows its data type); the conversion rules are in CONFIGURATION.md, "Conversion". |
+| an `opcua` input `connected` true, its devices alive, but the values are stale or `bad` | the liveness is the server's: while the server answers, the devices are alive even if the machine behind it is off. A Bad status gives `bad` samples, `read_errors` `exception` grows; an unchanged value gives no sample at all with a subscription. | look at the machine and at the server's own status of the nodes. The devices are reported dead only when the server stops answering for `death_tolerance`. |
+| the agent stops with a Go panic whose trace is in the OPC UA library | the library panicked in one of its own goroutines (malformed data from a server): this cannot be caught | the service manager restarts the agent (`Restart=` under systemd). Report it with the trace; `--log-level debug` logs the library's lines with `source=gopcua`. |
 | the document is `rolled_back` with `cannot open the serial port` | the `rtu` input could not open the port: wrong `device` path, or the user has no permission (on Windows also a port another process already has open) | check the path (`ls -l /dev/ttyUSB0`, adapters change number when replugged: prefer `/dev/serial/by-id/...`), and that the agent's user belongs to the group that owns the port (`dialout` on most Linux distributions). On Linux a second open of the port succeeds, so never run `probe` on an `rtu` input while the agent runs: both would read the same port and corrupt each other's frames. |
 | `/readyz` `503` "input ... is failed" | an input could not start again during a rollback | see its `last_error`; it is retried only when a new document is applied |
 | start fails with `data_dir ... has format N, newer than this agent supports` | the data directory was written by a newer agent | run the newer agent; an older one never rewrites a newer layout |
@@ -410,7 +505,13 @@ repeated, and that the four status endpoints answer. A separate run has a `modbu
 of the Go library, started by the test: it checks the decoded values (a `float32` in byte order `CDAB`, a
 negative `int16`, a string, a coil, a unit override, a transform chain), the births, that no write is ever
 sent, the death of both devices after the death tolerance when the server stops, `connected` and
-`read_errors` in `/status` and the metrics, and the births and data again when the server is back. It is not part of `go test ./...`; CI runs it in
+`read_errors` in `/status` and the metrics, and the births and data again when the server is back. A third run has an `opcua` input read the OPC UA
+server of the Go library, behind a TCP proxy that simulates the loss of the network, over `Basic256Sha256`
+`SignAndEncrypt`: it runs the built binary's `opcua trust` first (a wrong `--thumbprint` trusts nothing, the right one stores the
+certificate), then checks the births, a subscribed value, a polled one and a value changed on the server, the death of both devices after
+the death tolerance when the proxy drops the connection and refuses the next ones, the births and data again
+once it accepts (the session and the subscription created anew), and that no log line holds the endpoint or a
+sample value. It is not part of `go test ./...`; CI runs it in
 its own job on Linux amd64.
 
 ## Running against a local Laraplate
