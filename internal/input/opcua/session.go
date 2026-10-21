@@ -142,6 +142,15 @@ type session interface {
 	// CurrentTime reads Server_ServerStatus_CurrentTime, the watchdog: any
 	// answer is a live server.
 	CurrentTime(ctx context.Context) error
+	// Browse lists the nodes a node references through forward hierarchical
+	// references, all node classes, following continuation points (task 6,
+	// ruling R1). It is the one walk step of the browse command.
+	Browse(ctx context.Context, node *ua.NodeID) ([]*ua.ReferenceDescription, error)
+	// DataTypes reads the DataType attribute of ids, in chunks, in the order
+	// of ids. No request is sent for no ids.
+	DataTypes(ctx context.Context, ids []*ua.NodeID) ([]*ua.DataValue, error)
+	// Namespaces is the NamespaceArray read at this connect.
+	Namespaces() []string
 	// Close ends the session. It is idempotent and safe while a call is in
 	// flight; it never calls OnLost.
 	Close()
@@ -248,6 +257,8 @@ type uaClient interface {
 	Connect(ctx context.Context) error
 	Close(ctx context.Context) error
 	Read(ctx context.Context, req *ua.ReadRequest) (*ua.ReadResponse, error)
+	Browse(ctx context.Context, req *ua.BrowseRequest) (*ua.BrowseResponse, error)
+	BrowseNext(ctx context.Context, req *ua.BrowseNextRequest) (*ua.BrowseNextResponse, error)
 	Subscribe(ctx context.Context, params *opcua.SubscriptionParameters, notifyCh chan<- *opcua.PublishNotificationData) (uaSubscription, error)
 	Namespaces() []string
 }
@@ -784,6 +795,38 @@ func (s *uaSession) Read(ctx context.Context, ids []*ua.NodeID) ([]*ua.DataValue
 	}
 
 	return out, nil
+}
+
+// DataTypes reads the DataType attribute of ids in chunks of the server's
+// MaxNodesPerRead, never an empty request.
+func (s *uaSession) DataTypes(ctx context.Context, ids []*ua.NodeID) ([]*ua.DataValue, error) {
+	out := make([]*ua.DataValue, 0, len(ids))
+
+	for chunk := range slices.Chunk(ids, s.maxRead) {
+		nodes := make([]*ua.ReadValueID, len(chunk))
+		for i, nodeID := range chunk {
+			nodes[i] = &ua.ReadValueID{NodeID: nodeID, AttributeID: ua.AttributeIDDataType}
+		}
+
+		res, err := s.read(ctx, "read the data types", &ua.ReadRequest{TimestampsToReturn: ua.TimestampsToReturnNeither, NodesToRead: nodes})
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, res.Results...)
+	}
+
+	return out, nil
+}
+
+func (s *uaSession) Namespaces() []string {
+	var namespaces []string
+
+	if err := contain(func() error { namespaces = slices.Clone(s.client.Namespaces()); return nil }); err != nil {
+		return nil
+	}
+
+	return namespaces
 }
 
 func (s *uaSession) CurrentTime(ctx context.Context) error {

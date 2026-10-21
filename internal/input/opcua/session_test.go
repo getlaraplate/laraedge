@@ -1053,9 +1053,15 @@ type fakeClient struct {
 	// fails the limits read with a service error.
 	lossOnConnect bool
 	failLimits    bool
+	// browseFn and browseNextFn answer Browse and BrowseNext; nil means
+	// unsupported.
+	browseFn     func(*ua.BrowseRequest) (*ua.BrowseResponse, error)
+	browseNextFn func(*ua.BrowseNextRequest) (*ua.BrowseNextResponse, error)
 
 	mu     sync.Mutex
 	notify chan<- *opcua.PublishNotificationData
+	// dataTypeReads are the sizes of the DataType reads.
+	dataTypeReads []int
 }
 
 func (f *fakeClient) Connect(context.Context) error {
@@ -1080,6 +1086,12 @@ func (f *fakeClient) Read(_ context.Context, req *ua.ReadRequest) (*ua.ReadRespo
 	res := &ua.ReadResponse{}
 	limits := false
 
+	if len(req.NodesToRead) > 0 && req.NodesToRead[0].AttributeID == ua.AttributeIDDataType {
+		f.mu.Lock()
+		f.dataTypeReads = append(f.dataTypeReads, len(req.NodesToRead))
+		f.mu.Unlock()
+	}
+
 	for _, rv := range req.NodesToRead {
 		switch rv.NodeID.IntID() {
 		case id.Server_ServerCapabilities_OperationLimits_MaxNodesPerRead, id.Server_ServerCapabilities_OperationLimits_MaxMonitoredItemsPerCall:
@@ -1098,6 +1110,22 @@ func (f *fakeClient) Read(_ context.Context, req *ua.ReadRequest) (*ua.ReadRespo
 	}
 
 	return res, nil
+}
+
+func (f *fakeClient) Browse(_ context.Context, req *ua.BrowseRequest) (*ua.BrowseResponse, error) {
+	if f.browseFn == nil {
+		return nil, ua.StatusBadServiceUnsupported
+	}
+
+	return f.browseFn(req)
+}
+
+func (f *fakeClient) BrowseNext(_ context.Context, req *ua.BrowseNextRequest) (*ua.BrowseNextResponse, error) {
+	if f.browseNextFn == nil {
+		return nil, ua.StatusBadServiceUnsupported
+	}
+
+	return f.browseNextFn(req)
 }
 
 func (f *fakeClient) Subscribe(_ context.Context, _ *opcua.SubscriptionParameters, ch chan<- *opcua.PublishNotificationData) (uaSubscription, error) {

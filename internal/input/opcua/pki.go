@@ -1,6 +1,7 @@
 package opcua
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -348,4 +349,51 @@ func (s TrustStore) List() ([]CertInfo, error) {
 	}
 
 	return infos, errors.Join(errs...)
+}
+
+// ServerCertificate is the certificate a server presents for a security
+// policy and mode, as the operator is shown it before trusting it.
+type ServerCertificate struct {
+	// DER is the certificate as the server sent it (a chain keeps its
+	// leaf first).
+	DER []byte
+	// Thumbprint is the lowercase hex SHA-1 of the leaf, 40 characters.
+	Thumbprint string
+	// Subject is the common name, or the whole subject when there is none;
+	// it is printable (control characters replaced).
+	Subject  string
+	NotAfter time.Time
+}
+
+// DiscoverServerCertificate asks the server of conn for its endpoints over a
+// None channel and returns the certificate of the endpoint matching the
+// policy and mode (ruling R1). It opens no session and checks no trust: the
+// answer is not authenticated, so it only tells the operator what to decide
+// on. The errors never carry the endpoint.
+func DiscoverServerCertificate(ctx context.Context, conn Connection) (ServerCertificate, error) {
+	ep, err := discover(ctx, conn)
+	if err != nil {
+		return ServerCertificate{}, err
+	}
+
+	if len(ep.ServerCertificate) == 0 {
+		return ServerCertificate{}, fmt.Errorf("opcua discover endpoints: %w", errNoServerCertificate)
+	}
+
+	leaf, err := uapolicy.ParseCertificate(ep.ServerCertificate)
+	if err != nil {
+		return ServerCertificate{}, fmt.Errorf("opcua discover endpoints: %w", errCertInvalid)
+	}
+
+	subject := leaf.Subject.CommonName
+	if subject == "" {
+		subject = leaf.Subject.String()
+	}
+
+	return ServerCertificate{
+		DER:        ep.ServerCertificate,
+		Thumbprint: Thumbprint(ep.ServerCertificate),
+		Subject:    Printable(subject),
+		NotAfter:   leaf.NotAfter,
+	}, nil
 }

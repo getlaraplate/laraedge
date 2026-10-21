@@ -874,7 +874,14 @@ func (f *fakeSession) Subscribe(context.Context, time.Duration, []item) (<-chan 
 	return nil, nil, errClosed
 }
 func (f *fakeSession) CurrentTime(context.Context) error { return errClosed }
-func (f *fakeSession) Close()                            { f.closed.Store(true) }
+func (f *fakeSession) Browse(context.Context, *ua.NodeID) ([]*ua.ReferenceDescription, error) {
+	return nil, errClosed
+}
+func (f *fakeSession) DataTypes(context.Context, []*ua.NodeID) ([]*ua.DataValue, error) {
+	return nil, errClosed
+}
+func (f *fakeSession) Namespaces() []string { return nil }
+func (f *fakeSession) Close()               { f.closed.Store(true) }
 
 // TestCloseDuringAHungConnectReturnsAtOnce (Modbus R10): a connection
 // attempt the library does not end is not waited for; the session it opens

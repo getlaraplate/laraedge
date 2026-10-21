@@ -45,6 +45,17 @@ commands:
                              agent_id an opcua input still uses), else the
                              last valid one in the bootstrap's data_dir;
                              --record writes the raw samples as JSON Lines
+  browse <input> (--config <file> | --bootstrap <path>) [--node <nodeid>] [--depth <n>]
+                             list the nodes of an OPC UA server, indented by
+                             depth, from the Objects folder or --node
+                             (nsu=<uri>;<id> works); --depth 1 to 10, default 2;
+                             stops after 1000 nodes; reads no value
+  opcua trust <input> (--config <file> | --bootstrap <path>) [--thumbprint <hex>]
+                             show the certificate an OPC UA server presents and
+                             trust it after a yes on stdin, or without asking
+                             when --thumbprint equals the server's
+  opcua trust --list (--config <file> | --bootstrap <path>)
+                             list the trusted certificates
   status [--listen addr]     query a running agent (default ` + defaultListen + `);
                              the token, if any, from ` + statusTokenEnv + `
   version                    print the version
@@ -56,6 +67,11 @@ func main() {
 
 // run executes the CLI and returns the process exit code.
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithInput(args, os.Stdin, stdout, stderr)
+}
+
+// runWithInput is run with the standard input the interactive commands read.
+func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usageText)
 		return exitUsage
@@ -70,6 +86,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runConfig(args[1:], stdout, stderr)
 	case "probe":
 		return runProbe(args[1:], stdout, stderr)
+	case "browse":
+		return runBrowse(args[1:], stdout, stderr)
+	case "opcua":
+		return runOPCUA(args[1:], stdin, stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
