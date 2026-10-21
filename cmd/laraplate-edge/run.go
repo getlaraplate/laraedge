@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdlog "log"
 	"log/slog"
 	"maps"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/input/modbus"
+	"github.com/getlaraplate/laraedge/internal/input/opcua"
 	"github.com/getlaraplate/laraedge/internal/input/simulated"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/provider"
@@ -83,6 +85,8 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 		return err
 	}
 
+	defer routeLibraryLogs(log)()
+
 	// The watchdog pings until runAgent returns, closing the supervisor
 	// included.
 	wd := watchdog.New(watchdog.Config{LookupEnv: deps.lookupEnv, Clock: deps.clock, Logger: log})
@@ -99,7 +103,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 	sup, err := supervisor.New(supervisor.Config{
 		DataDir:  boot.DataDir,
 		Store:    store,
-		Drivers:  inputDrivers(boot, deps.drivers),
+		Drivers:  inputDrivers(boot, resolver, log, deps.drivers),
 		Resolver: resolver,
 		Clock:    deps.clock,
 		Logger:   log,
@@ -167,15 +171,40 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 // inputDrivers returns the input driver registry: the built-in drivers, then
 // extra, which replaces a built-in of the same name. Drivers that read files
 // named in the configuration resolve relative paths against the directory of
-// the configuration file, which only the file provider has.
-func inputDrivers(boot bootstrap.File, extra map[string]input.Factory) map[string]input.Factory {
+// the configuration file, which only the file provider has. The opcua driver
+// keeps its PKI under the bootstrap's data_dir, forms its application URI
+// from the agent id, resolves its passwords through resolver and warns
+// through log (decision O13).
+func inputDrivers(boot bootstrap.File, resolver opcua.SecretResolver, log *slog.Logger, extra map[string]input.Factory) map[string]input.Factory {
 	drivers := map[string]input.Factory{
 		config.DriverSimulated: simulated.Factory(configBaseDir(boot)),
 		config.DriverModbus:    modbus.Factory(),
+		config.DriverOPCUA: opcua.Factory(opcua.Options{
+			DataDir:  boot.DataDir,
+			AgentID:  boot.AgentID,
+			Resolver: resolver,
+			Logger:   log,
+		}),
 	}
 	maps.Copy(drivers, extra)
 
 	return drivers
+}
+
+// routeLibraryLogs sends the output of the standard log package, through
+// which the OPC UA library logs, to l at debug with source=gopcua (decision
+// O6), and returns the function that restores the previous output and
+// flags.
+func routeLibraryLogs(l *slog.Logger) (restore func()) {
+	output, flags := stdlog.Writer(), stdlog.Flags()
+
+	stdlog.SetFlags(0)
+	stdlog.SetOutput(logging.StdlogBridge(l))
+
+	return func() {
+		stdlog.SetOutput(output)
+		stdlog.SetFlags(flags)
+	}
 }
 
 // configBaseDir returns the directory of the configuration file of the file

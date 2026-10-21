@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/logging"
+	"github.com/getlaraplate/laraedge/internal/secrets"
 	"github.com/getlaraplate/laraedge/internal/transform"
 	"github.com/getlaraplate/laraedge/internal/version"
 )
@@ -39,9 +41,10 @@ commands:
   probe <input> (--config <file> | --bootstrap <path>) [--record <file>]
                              read every point of an input once and print the
                              samples; the document is the --config file (it
-                             wins over --bootstrap), else the last valid one
-                             in the bootstrap's data_dir; --record writes the
-                             raw samples as JSON Lines
+                             wins over --bootstrap, whose data_dir and
+                             agent_id an opcua input still uses), else the
+                             last valid one in the bootstrap's data_dir;
+                             --record writes the raw samples as JSON Lines
   status [--listen addr]     query a running agent (default ` + defaultListen + `);
                              the token, if any, from ` + statusTokenEnv + `
   version                    print the version
@@ -200,10 +203,11 @@ func checkDocument(doc config.Document) []string {
 // <error>" (decision M1). Factories only validate and never connect (core
 // R47), so this works offline. Relative paths of a connection resolve
 // against the directory of file, as with the file provider. An input whose
-// driver this build lacks is left to config.CheckBuild.
+// driver this build lacks is left to config.CheckBuild. No factory resolves a
+// secret nor logs, so the resolver is never used and the logger discards.
 func checkInputs(doc config.Document, file string) []string {
 	boot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: file}}
-	drivers := inputDrivers(boot, nil)
+	drivers := inputDrivers(boot, secrets.NewResolver(), slog.New(slog.DiscardHandler), nil)
 
 	var msgs []string
 	for i, cfg := range doc.Inputs {

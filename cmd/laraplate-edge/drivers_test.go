@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +21,8 @@ import (
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/logging"
+	"github.com/getlaraplate/laraedge/internal/secrets"
 	"github.com/getlaraplate/laraedge/internal/supervisor"
 )
 
@@ -37,7 +44,7 @@ func TestInputDriversRegisterSimulatedWithTheConfigFileDirectory(t *testing.T) {
 	relative := simulatedInput(`{"scenario_file":"scenario.json"}`)
 
 	fileBoot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: filepath.Join(dir, "config.yaml")}}
-	factory := inputDrivers(fileBoot, nil)[config.DriverSimulated]
+	factory := inputDrivers(fileBoot, nil, nil, nil)[config.DriverSimulated]
 	if factory == nil {
 		t.Fatal("simulated is not registered")
 	}
@@ -50,18 +57,18 @@ func TestInputDriversRegisterSimulatedWithTheConfigFileDirectory(t *testing.T) {
 	}
 
 	laraplateBoot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderLaraplate}}
-	if _, err := inputDrivers(laraplateBoot, nil)[config.DriverSimulated](relative, clk); err == nil || !strings.Contains(err.Error(), "scenario_file") {
+	if _, err := inputDrivers(laraplateBoot, nil, nil, nil)[config.DriverSimulated](relative, clk); err == nil || !strings.Contains(err.Error(), "scenario_file") {
 		t.Fatalf("a relative scenario file with the laraplate provider: err = %v, want a refusal naming scenario_file", err)
 	}
 	abs := simulatedInput(`{"scenario_file":` + `"` + filepath.ToSlash(filepath.Join(dir, "scenario.json")) + `"}`)
-	if _, err := inputDrivers(laraplateBoot, nil)[config.DriverSimulated](abs, clk); err != nil {
+	if _, err := inputDrivers(laraplateBoot, nil, nil, nil)[config.DriverSimulated](abs, clk); err != nil {
 		t.Fatalf("an absolute scenario file with the laraplate provider: %v", err)
 	}
 }
 
 func TestInputDriversRegisterModbus(t *testing.T) {
 	boot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderLaraplate}}
-	factory := inputDrivers(boot, nil)[config.DriverModbus]
+	factory := inputDrivers(boot, nil, nil, nil)[config.DriverModbus]
 	if factory == nil {
 		t.Fatal("modbus is not registered")
 	}
@@ -92,7 +99,7 @@ func TestInputDriversLetExtraFactoriesReplaceBuiltIns(t *testing.T) {
 	}}
 
 	boot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: "config.yaml"}}
-	if _, err := inputDrivers(boot, extra)[config.DriverSimulated](config.Input{}, clock.Real()); err != nil || !called {
+	if _, err := inputDrivers(boot, nil, nil, extra)[config.DriverSimulated](config.Input{}, clock.Real()); err != nil || !called {
 		t.Fatalf("the extra factory was not used: called = %v, err = %v", called, err)
 	}
 }
@@ -192,5 +199,56 @@ func TestSimulatedExampleBootstrapLoads(t *testing.T) {
 	}
 	if boot.Config.Provider != bootstrap.ProviderFile || boot.Config.File != "config.yaml" || boot.DataDir != "./data" || boot.StatusListen != bootstrap.DefaultStatusListen {
 		t.Fatalf("unexpected bootstrap: %+v", boot)
+	}
+}
+
+func TestInputDriversRegisterOPCUAWithTheBootstrap(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	boot := bootstrap.File{AgentID: "plant-a-edge-01", DataDir: dataDir, Config: bootstrap.Config{Provider: bootstrap.ProviderLaraplate}}
+
+	factory := inputDrivers(boot, secrets.NewResolver(), slog.New(slog.DiscardHandler), nil)[config.DriverOPCUA]
+	if factory == nil {
+		t.Fatal("opcua is not registered")
+	}
+
+	cfg := config.Input{
+		ID:         "press",
+		Driver:     config.DriverOPCUA,
+		Connection: []byte(`{"endpoint":"opc.tcp://127.0.0.1:1","security_policy":"None"}`),
+		Devices: []config.Device{{Device: "press-07", Points: []config.Point{
+			{Signal: "speed", Address: "ns=2;s=Speed", Type: "float64", Read: config.Read{Mode: config.ReadPoll, Interval: time.Second}},
+		}}},
+	}
+	in, err := factory(cfg, clock.NewFake(time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)))
+	if err != nil {
+		t.Fatalf("opcua factory: %v", err)
+	}
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the factory touched data_dir: %v", err)
+	}
+}
+
+func TestRouteLibraryLogsSendsTheStandardLogToDebug(t *testing.T) {
+	var logs bytes.Buffer
+
+	restore := routeLibraryLogs(logging.New(&logs, slog.LevelDebug))
+	log.Print("opc.tcp://10.0.5.20:4840: connecting")
+	restore()
+
+	var rec map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &rec); err != nil {
+		t.Fatalf("log output = %q, want one JSON record: %v", logs.String(), err)
+	}
+	if rec["level"] != "DEBUG" || rec["source"] != "gopcua" || rec["msg"] != "opc.tcp://10.0.5.20:4840: connecting" {
+		t.Fatalf("record = %v, want the line at debug with source=gopcua and no date prefix", rec)
+	}
+
+	logs.Reset()
+	routeLibraryLogs(logging.New(&logs, slog.LevelInfo))()
+	if logs.Len() != 0 {
+		t.Fatalf("restore left output %q", logs.String())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -13,7 +14,9 @@ import (
 	"github.com/getlaraplate/laraedge/internal/bootstrap"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/secrets"
 	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
@@ -24,8 +27,11 @@ const probeTimeout = 30 * time.Second
 // document names through the driver registry of run, reads every point once
 // and prints the raw driver samples, before any transform. It never starts
 // the input, an output or the status endpoint, and writes nothing but the
-// --record file. The samples are printed on purpose: probe is an operator
-// tool, and prints samples only, never the document.
+// --record file (and the agent certificate of an opcua input, created under
+// data_dir when missing). The samples are printed on purpose: probe is an
+// operator tool, and prints samples only, never the document. The warnings
+// of the drivers, and the OPC UA library's output at debug (dropped), go to
+// stderr as the agent's JSON log lines.
 func runProbe(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("probe", stderr)
 	bootstrapPath := fs.String("bootstrap", "", "path to the bootstrap file; its data_dir holds the last valid document")
@@ -54,7 +60,10 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 
-	samples, elapsed, err := probeInput(doc, boot, positional[0])
+	log := logging.New(stderr, slog.LevelWarn)
+	defer routeLibraryLogs(log)()
+
+	samples, elapsed, err := probeInput(doc, boot, positional[0], log)
 	if err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge probe: %v\n", err)
 		return exitFailure
@@ -84,12 +93,19 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 // registry is built from. With a configuration file the document is checked
 // like config validate does, the messages being returned, and relative paths
 // of the connection resolve against that file's directory, as the file
-// provider of run does. Without one it is the last valid document of the
-// bootstrap's data_dir.
+// provider of run does; a bootstrap given too still supplies data_dir and
+// agent_id, which an opcua input needs for its certificate. Without one it is
+// the last valid document of the bootstrap's data_dir.
 func probeDocument(configFile, bootstrapPath string) (doc config.Document, boot bootstrap.File, msgs []string, err error) {
 	if configFile != "" {
+		if bootstrapPath != "" {
+			if boot, err = bootstrap.Load(bootstrapPath); err != nil {
+				return doc, boot, nil, err
+			}
+		}
+
 		doc, msgs, err = loadDocument(configFile)
-		boot = bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: configFile}}
+		boot.Config = bootstrap.Config{Provider: bootstrap.ProviderFile, File: configFile}
 
 		return doc, boot, msgs, err
 	}
@@ -111,8 +127,10 @@ func probeDocument(configFile, bootstrapPath string) (doc config.Document, boot 
 }
 
 // probeInput builds the input id of doc and reads every point once. The
-// elapsed time is the response time of that read.
-func probeInput(doc config.Document, boot bootstrap.File, id string) ([]model.Sample, time.Duration, error) {
+// elapsed time is the response time of that read. Passwords resolve from
+// the environment and files of this process; log receives the drivers'
+// warnings.
+func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) ([]model.Sample, time.Duration, error) {
 	var cfg *config.Input
 	for i := range doc.Inputs {
 		if doc.Inputs[i].ID == id {
@@ -125,7 +143,7 @@ func probeInput(doc config.Document, boot bootstrap.File, id string) ([]model.Sa
 		return nil, 0, fmt.Errorf("the configuration has no input %q (inputs: %s)", id, inputIDs(doc))
 	}
 
-	factory := inputDrivers(boot, nil)[cfg.Driver]
+	factory := inputDrivers(boot, secrets.NewResolver(), log, nil)[cfg.Driver]
 	if factory == nil {
 		return nil, 0, fmt.Errorf("input %q: driver %s is not available in this build", id, cfg.Driver)
 	}

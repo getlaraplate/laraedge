@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -265,4 +267,57 @@ func listTree(t *testing.T, dir string) []string {
 	}
 
 	return out
+}
+
+// opcuaProbeDoc is a document with one OPC UA input whose server is not
+// there: nothing listens on the port.
+func opcuaProbeDoc(t *testing.T) string {
+	t.Helper()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	_ = l.Close()
+
+	return `schema: laraplate-edge-config/1
+inputs:
+  - id: press
+    driver: opcua
+    connection: {endpoint: 'opc.tcp://127.0.0.1:` + port + `', security_policy: None}
+    devices:
+      - device: press-07
+        points:
+          - {signal: speed, address: "ns=2;s=Speed", type: float64, read: {poll: 1s}}
+outputs:
+  - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
+`
+}
+
+func TestProbeOfAnOPCUAInputUsesTheBootstrapDataDir(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.yaml")
+	writeFile(t, configFile, opcuaProbeDoc(t))
+	dataDir := filepath.Join(dir, "data")
+	bootstrapFile := filepath.Join(dir, "bootstrap.yaml")
+	writeFile(t, bootstrapFile, bootstrapYAML("plant-a-edge-01", configFile, dataDir))
+
+	var stdout, stderr bytes.Buffer
+
+	code := run([]string{"probe", "press", "--config", configFile, "--bootstrap", bootstrapFile}, &stdout, &stderr)
+	if code != exitFailure || !strings.Contains(stderr.String(), `opcua input "press": probe: `) {
+		t.Fatalf("exit code = %d, stderr = %q; want a failed connection to the absent server", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "127.0.0.1") {
+		t.Fatalf("stderr names the endpoint: %q", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "opcua", "pki", "own", "cert.der")); err != nil {
+		t.Fatalf("the agent certificate was not created under the bootstrap's data_dir: %v", err)
+	}
+
+	stderr.Reset()
+	if code := run([]string{"probe", "press", "--config", configFile}, &stdout, &stderr); code != exitFailure || !strings.Contains(stderr.String(), "data_dir") {
+		t.Fatalf("without a bootstrap: exit code = %d, stderr = %q; want an error naming data_dir", code, stderr.String())
+	}
 }

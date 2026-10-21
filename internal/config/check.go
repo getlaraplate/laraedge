@@ -13,8 +13,8 @@ const keystorePrefix = "secret://keystore/"
 
 // CheckBuild is the second validation layer: it refuses, with "<path>: not
 // available in this build", the parts of a valid document this build does
-// not provide: drivers other than simulated and modbus (plugin drivers
-// included), output types other than laraplate-http, secret://keystore/
+// not provide: drivers other than simulated, modbus and opcua (plugin
+// drivers included), output types other than laraplate-http, secret://keystore/
 // references, derived signals with their transforms, and plugins. Point
 // transforms are provided; their chains are type-checked by
 // transform.CheckDocument, which config cannot call (import cycle). It
@@ -25,7 +25,7 @@ func CheckBuild(doc Document) []string {
 
 	for i, in := range doc.Inputs {
 		p := path{"inputs"}.index(i)
-		if in.Driver != DriverSimulated && in.Driver != DriverModbus {
+		if in.Driver != DriverSimulated && in.Driver != DriverModbus && in.Driver != DriverOPCUA {
 			add(p.key("driver"))
 		}
 		var conn any

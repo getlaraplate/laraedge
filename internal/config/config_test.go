@@ -139,7 +139,6 @@ func TestCheckBuildRefusesExactlyTheSpecExampleNonBuildParts(t *testing.T) {
 
 	got := config.CheckBuild(doc)
 	want := []string{
-		"inputs.0.driver: not available in this build",
 		"inputs.0.connection.auth.password: not available in this build",
 		"inputs.0.devices.0.derived: not available in this build",
 		"outputs.0.token: not available in this build",
@@ -589,7 +588,7 @@ func TestCheckBuild(t *testing.T) {
 		{"simulated and laraplate-http", base, nil},
 		{"env and file references", edit(t, base, "scenario: s.json", "scenario: s.json\n      password: secret://file/etc/p\n      token: secret://env/T"), nil},
 		{"modbus", edit(t, base, "driver: simulated", "driver: modbus"), nil},
-		{"opcua", edit(t, base, "driver: simulated", "driver: opcua"), []string{"inputs.0.driver: not available in this build"}},
+		{"opcua", edit(t, base, "driver: simulated", "driver: opcua"), nil},
 		{"plugin driver", edit(t, base, "driver: simulated", "driver: 'plugin:fanuc'"), []string{"inputs.0.driver: not available in this build"}},
 		{"mqtt output", edit(t, base, "type: laraplate-http", "type: laraplate-mqtt"), []string{"outputs.0.type: not available in this build"}},
 		{"plugin output", edit(t, base, "type: laraplate-http", "type: 'plugin:kafka'"), []string{"outputs.0.type: not available in this build"}},
