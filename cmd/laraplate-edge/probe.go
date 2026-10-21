@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 
@@ -60,6 +61,11 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 
+	if boot, err = probeBootstrap(doc, boot, positional[0], *configFile, *bootstrapPath); err != nil {
+		fmt.Fprintf(stderr, "laraplate-edge probe: %v\n", err)
+		return exitFailure
+	}
+
 	log := logging.New(stderr, slog.LevelWarn)
 	defer routeLibraryLogs(log)()
 
@@ -93,19 +99,12 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 // registry is built from. With a configuration file the document is checked
 // like config validate does, the messages being returned, and relative paths
 // of the connection resolve against that file's directory, as the file
-// provider of run does; a bootstrap given too still supplies data_dir and
-// agent_id, which an opcua input needs for its certificate. Without one it is
-// the last valid document of the bootstrap's data_dir.
+// provider of run does (see probeBootstrap for data_dir and agent_id).
+// Without one it is the last valid document of the bootstrap's data_dir.
 func probeDocument(configFile, bootstrapPath string) (doc config.Document, boot bootstrap.File, msgs []string, err error) {
 	if configFile != "" {
-		if bootstrapPath != "" {
-			if boot, err = bootstrap.Load(bootstrapPath); err != nil {
-				return doc, boot, nil, err
-			}
-		}
-
 		doc, msgs, err = loadDocument(configFile)
-		boot.Config = bootstrap.Config{Provider: bootstrap.ProviderFile, File: configFile}
+		boot = bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: configFile}}
 
 		return doc, boot, msgs, err
 	}
@@ -124,6 +123,30 @@ func probeDocument(configFile, bootstrapPath string) (doc config.Document, boot 
 	}
 
 	return doc, boot, nil, nil
+}
+
+// probeBootstrap completes boot when the document comes from --config and a
+// --bootstrap is given too: an opcua input takes data_dir (its certificate)
+// and agent_id (its application URI) from the bootstrap (ruling R9). For the
+// other drivers the bootstrap is not read, as --config wins over it.
+func probeBootstrap(doc config.Document, boot bootstrap.File, id, configFile, bootstrapPath string) (bootstrap.File, error) {
+	if configFile == "" || bootstrapPath == "" {
+		return boot, nil
+	}
+
+	i := slices.IndexFunc(doc.Inputs, func(in config.Input) bool { return in.ID == id })
+	if i < 0 || doc.Inputs[i].Driver != config.DriverOPCUA {
+		return boot, nil
+	}
+
+	loaded, err := bootstrap.Load(bootstrapPath)
+	if err != nil {
+		return boot, err
+	}
+
+	boot.DataDir, boot.AgentID = loaded.DataDir, loaded.AgentID
+
+	return boot, nil
 }
 
 // probeInput builds the input id of doc and reads every point once. The

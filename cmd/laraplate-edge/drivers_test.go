@@ -232,11 +232,18 @@ func TestInputDriversRegisterOPCUAWithTheBootstrap(t *testing.T) {
 }
 
 func TestRouteLibraryLogsSendsTheStandardLogToDebug(t *testing.T) {
-	var logs bytes.Buffer
+	var before, logs bytes.Buffer
+
+	output, flags := log.Writer(), log.Flags()
+	t.Cleanup(func() {
+		log.SetOutput(output)
+		log.SetFlags(flags)
+	})
+	log.SetOutput(&before)
+	log.SetFlags(log.LstdFlags)
 
 	restore := routeLibraryLogs(logging.New(&logs, slog.LevelDebug))
 	log.Print("opc.tcp://10.0.5.20:4840: connecting")
-	restore()
 
 	var rec map[string]any
 	if err := json.Unmarshal(logs.Bytes(), &rec); err != nil {
@@ -245,10 +252,18 @@ func TestRouteLibraryLogsSendsTheStandardLogToDebug(t *testing.T) {
 	if rec["level"] != "DEBUG" || rec["source"] != "gopcua" || rec["msg"] != "opc.tcp://10.0.5.20:4840: connecting" {
 		t.Fatalf("record = %v, want the line at debug with source=gopcua and no date prefix", rec)
 	}
+	if before.Len() != 0 {
+		t.Fatalf("the previous output received %q while routed", before.String())
+	}
 
-	logs.Reset()
-	routeLibraryLogs(logging.New(&logs, slog.LevelInfo))()
-	if logs.Len() != 0 {
-		t.Fatalf("restore left output %q", logs.String())
+	restore()
+	routed := logs.Len()
+	log.Print("after restore")
+
+	if logs.Len() != routed {
+		t.Fatalf("the bridge received %q after restore", logs.String()[routed:])
+	}
+	if !strings.HasSuffix(before.String(), "after restore\n") || log.Flags() != log.LstdFlags {
+		t.Fatalf("previous output = %q, flags = %d; want the line there and the flags back", before.String(), log.Flags())
 	}
 }

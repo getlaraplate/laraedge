@@ -1059,12 +1059,18 @@ func TestWatchdogFailureReconnects(t *testing.T) {
 	h.waitSamples(mark, "temp", 1)
 }
 
-// scriptedSession is a session that answers every Read with good values of 1,
-// every watchdog read, and subscribes unless subscribeErr is set.
+// scriptedSession is a session that answers every Read with good values of 1
+// unless values holds another data value for the node (by numeric id) or
+// readErr is set, answers every watchdog read, and subscribes unless
+// subscribeErr is set, with the create statuses of statuses (Good when
+// nil). The test pushes notifications on notifyCh.
 type scriptedSession struct {
 	fakeSession
 
 	subscribeErr error
+	readErr      error
+	values       map[uint32]*ua.DataValue
+	statuses     []ua.StatusCode
 	once         sync.Once
 	notifyCh     chan notification
 }
@@ -1074,9 +1080,16 @@ func newScriptedSession(subscribeErr error) *scriptedSession {
 }
 
 func (s *scriptedSession) Read(_ context.Context, ids []*ua.NodeID) ([]*ua.DataValue, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
+
 	out := make([]*ua.DataValue, len(ids))
-	for i := range out {
+	for i, nodeID := range ids {
 		out[i] = &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(float64(1))}
+		if dv, ok := s.values[nodeID.IntID()]; ok {
+			out[i] = dv
+		}
 	}
 
 	return out, nil
@@ -1087,7 +1100,12 @@ func (s *scriptedSession) Subscribe(_ context.Context, _ time.Duration, items []
 		return nil, nil, s.subscribeErr
 	}
 
-	return s.notifyCh, make([]ua.StatusCode, len(items)), nil
+	statuses := s.statuses
+	if statuses == nil {
+		statuses = make([]ua.StatusCode, len(items))
+	}
+
+	return s.notifyCh, statuses, nil
 }
 
 func (s *scriptedSession) CurrentTime(context.Context) error { return nil }
@@ -1097,11 +1115,16 @@ func (s *scriptedSession) Close() {
 	s.once.Do(func() { close(s.notifyCh) })
 }
 
-// scriptedDials hands out sessions in order and keeps the OnLost of each dial.
+// scriptedDials hands out sessions in order, then the sessions of more, and
+// keeps the OnLost and the clock time of each dial.
 type scriptedDials struct {
+	more func() *scriptedSession
+	clk  *clock.Fake
+
 	mu       sync.Mutex
 	sessions []*scriptedSession
 	onLost   []func()
+	at       []time.Time
 }
 
 func (d *scriptedDials) install(in *Input) {
@@ -1111,9 +1134,22 @@ func (d *scriptedDials) install(in *Input) {
 
 		n := len(d.onLost)
 		d.onLost = append(d.onLost, deps.OnLost)
+		if d.clk != nil {
+			d.at = append(d.at, d.clk.Now())
+		}
+		if n >= len(d.sessions) {
+			d.sessions = append(d.sessions, d.more())
+		}
 
 		return d.sessions[n], nil
 	}
+}
+
+func (d *scriptedDials) times() []time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return slices.Clone(d.at)
 }
 
 func (d *scriptedDials) dialled() int {
@@ -1193,5 +1229,93 @@ func TestALateOnLostOfAClosedSessionIsIgnored(t *testing.T) {
 	}
 	if n := h.in.Health().ReadErrors[input.ReadErrorConnection]; n != 1 {
 		t.Fatalf("connection errors = %d, want the one real loss", n)
+	}
+}
+
+// TestSessionsFailingAtTheFirstReadBackOffAndDie: a server that accepts every
+// session and fails its first poll is no successful exchange. The backoff
+// keeps growing and the devices die after the tolerance.
+func TestSessionsFailingAtTheFirstReadBackOffAndDie(t *testing.T) {
+	h := newHarness(t, opcuaInput(noneConn("opc.tcp://127.0.0.1:1"), 5*time.Second, device("press-07",
+		polled("count", "i=2259", "float64", time.Second),
+	)))
+	dials := &scriptedDials{clk: h.clk, more: func() *scriptedSession {
+		s := newScriptedSession(nil)
+		s.readErr = fmt.Errorf("opcua read: %w", errConnection)
+
+		return s
+	}}
+	dials.install(h.in)
+	h.start()
+
+	h.waitFor("first session closed", func() bool { return dials.dialled() == 1 && !h.connected() })
+	h.idle()
+	h.stepUntil("six dials", 250*time.Millisecond, time.Minute, func() bool { return dials.dialled() >= 6 })
+
+	at := dials.times()
+	var waits []time.Duration
+	for i := 1; i < len(at); i++ {
+		waits = append(waits, at[i].Sub(at[i-1]))
+	}
+	if want := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}; !slices.Equal(waits[:5], want) {
+		t.Fatalf("waits between dials = %v, want the backoff growing %v", waits, want)
+	}
+	if got := h.events(0); !slices.Equal(got, []string{"death press-07"}) {
+		t.Fatalf("events = %v, want one death: no session ever exchanged anything", got)
+	}
+	if n := len(h.samples(0, "count")); n != 0 {
+		t.Fatalf("%d samples, want none", n)
+	}
+}
+
+// TestExceptionCountsOncePerExchange (ruling R8): kind exception counts once
+// per CreateMonitoredItems response, Read response or publish message that
+// carries a Bad status; decode counts once per point.
+func TestExceptionCountsOncePerExchange(t *testing.T) {
+	h := newHarness(t, opcuaInput(noneConn("opc.tcp://127.0.0.1:1"), 30*time.Second, device("press-07",
+		subscribed("a", "i=1", "float64"),
+		subscribed("b", "i=2", "float64"),
+		subscribed("c", "i=3", "float64"),
+		polled("p1", "i=4", "float64", time.Second),
+		polled("p2", "i=5", "float64", time.Second),
+		polled("p3", "i=6", "bool", time.Second),
+		polled("p4", "i=7", "string", time.Second),
+	)))
+
+	bad := &ua.DataValue{EncodingMask: ua.DataValueStatusCode, Status: ua.StatusBadSensorFailure}
+	sess := newScriptedSession(nil)
+	sess.statuses = []ua.StatusCode{ua.StatusBadNodeIDUnknown, ua.StatusBadNodeIDUnknown, ua.StatusOK}
+	sess.values = map[uint32]*ua.DataValue{4: bad, 5: bad}
+	dials := &scriptedDials{sessions: []*scriptedSession{sess}}
+	dials.install(h.in)
+	h.start()
+
+	h.waitSamples(0, "p4", 1)
+	h.idle()
+
+	exceptions := func() uint64 { return h.in.Health().ReadErrors[input.ReadErrorException] }
+	decodes := func() uint64 { return h.in.Health().ReadErrors[input.ReadErrorDecode] }
+
+	if exceptions() != 2 || decodes() != 2 {
+		t.Fatalf("after the setup and the first poll: exception %d, decode %d; want 2 (one create response, one Read) and 2 (two points)", exceptions(), decodes())
+	}
+	if got := h.samples(0, "a"); len(got) != 1 || got[0].Quality != model.Bad {
+		t.Fatalf("a = %+v, want one bad sample for its refused item", got)
+	}
+
+	// Two Bad values in one publish message, then one in the next.
+	for _, n := range []notification{{Handle: 2, Message: 1, Value: bad}, {Handle: 2, Message: 1, Value: bad}, {Handle: 2, Message: 2, Value: bad}} {
+		sess.notifyCh <- n
+	}
+	h.waitSamples(0, "c", 3)
+
+	if exceptions() != 4 {
+		t.Fatalf("after two publish messages with Bad values: exception %d, want 4", exceptions())
+	}
+
+	h.step(time.Second)
+
+	if exceptions() != 5 || decodes() != 4 {
+		t.Fatalf("after the second poll: exception %d, decode %d; want 5 and 4", exceptions(), decodes())
 	}
 }

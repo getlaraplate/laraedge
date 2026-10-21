@@ -321,3 +321,28 @@ func TestProbeOfAnOPCUAInputUsesTheBootstrapDataDir(t *testing.T) {
 		t.Fatalf("without a bootstrap: exit code = %d, stderr = %q; want an error naming data_dir", code, stderr.String())
 	}
 }
+
+// TestProbeWithConfigLoadsTheBootstrapOnlyForOPCUA (ruling R9): the document
+// of --config wins, so a broken --bootstrap is ignored for the inputs that do
+// not need data_dir.
+func TestProbeWithConfigLoadsTheBootstrapOnlyForOPCUA(t *testing.T) {
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "broken.yaml")
+	writeFile(t, broken, "agent_id: [\n")
+
+	for _, bootstrapPath := range []string{broken, filepath.Join(dir, "missing.yaml")} {
+		var stdout, stderr bytes.Buffer
+
+		if code := run([]string{"probe", "press-line", "--config", simulatedExample, "--bootstrap", bootstrapPath}, &stdout, &stderr); code != exitOK {
+			t.Fatalf("%s: exit code = %d (stderr: %q), want the simulated probe as without --bootstrap", bootstrapPath, code, stderr.String())
+		}
+	}
+
+	configFile := filepath.Join(dir, "config.yaml")
+	writeFile(t, configFile, opcuaProbeDoc(t))
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"probe", "press", "--config", configFile, "--bootstrap", broken}, &stdout, &stderr); code != exitFailure || !strings.Contains(stderr.String(), "bootstrap") {
+		t.Fatalf("opcua with a broken bootstrap: exit code = %d, stderr = %q; want the bootstrap error", code, stderr.String())
+	}
+}

@@ -159,6 +159,10 @@ type item struct {
 type notification struct {
 	Handle uint32
 	Value  *ua.DataValue
+	// Message numbers the publish message that carried the change, from 1 per
+	// session: the changes of one message share it (ruling R8 counts a Bad
+	// status once per message).
+	Message uint64
 }
 
 // dialDeps is what dial needs besides the connection.
@@ -458,6 +462,9 @@ type uaSession struct {
 
 	done chan struct{}
 	wg   sync.WaitGroup
+	// messages counts the data change messages; only the drain goroutine
+	// touches it.
+	messages uint64
 
 	mu         sync.Mutex
 	closed     bool
@@ -965,13 +972,15 @@ func (s *uaSession) dispatch(msg *opcua.PublishNotificationData, out chan<- noti
 
 	switch v := msg.Value.(type) {
 	case *ua.DataChangeNotification:
+		s.messages++
+
 		for _, mi := range v.MonitoredItems {
 			if mi == nil {
 				continue
 			}
 
 			select {
-			case out <- notification{Handle: mi.ClientHandle, Value: mi.Value}:
+			case out <- notification{Handle: mi.ClientHandle, Value: mi.Value, Message: s.messages}:
 			case <-s.done:
 				return false
 			}

@@ -1260,6 +1260,53 @@ func TestSubscriptionLossCallsOnLost(t *testing.T) {
 	}
 }
 
+// TestNotificationsCarryTheirPublishMessage: the data changes of one publish
+// message share its number, so the driver counts a Bad status once per
+// message (ruling R8).
+func TestNotificationsCarryTheirPublishMessage(t *testing.T) {
+	deps, _ := testDeps(t)
+	f := &fakeClient{}
+	withFake(&deps, f)
+
+	s := mustDial(t, noneConnection("opc.tcp://fake:4840"), deps)
+
+	ctx, cancel := context.WithTimeout(context.Background(), guard)
+	defer cancel()
+
+	ch, _, err := s.Subscribe(ctx, time.Second, fakeItems)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	change := func(handles ...uint32) *opcua.PublishNotificationData {
+		var items []*ua.MonitoredItemNotification
+		for _, h := range handles {
+			items = append(items, &ua.MonitoredItemNotification{ClientHandle: h, Value: &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(float64(h))}})
+		}
+
+		return &opcua.PublishNotificationData{Value: &ua.DataChangeNotification{MonitoredItems: items}}
+	}
+
+	f.publish(t, change(1, 2))
+	f.publish(t, change(3))
+
+	var got []notification
+
+	timeout := time.After(guard)
+	for len(got) < 3 {
+		select {
+		case n := <-ch:
+			got = append(got, n)
+		case <-timeout:
+			t.Fatalf("notifications = %+v, want 3", got)
+		}
+	}
+
+	if got[0].Message == 0 || got[0].Message != got[1].Message || got[2].Message == got[0].Message {
+		t.Fatalf("messages = %d %d %d, want the first two equal and non-zero, the third another", got[0].Message, got[1].Message, got[2].Message)
+	}
+}
+
 func TestLimitValue(t *testing.T) {
 	good := func(v any) *ua.DataValue {
 		return &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(v)}

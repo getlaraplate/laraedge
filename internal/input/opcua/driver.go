@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gopcua/opcua/ua"
@@ -380,8 +381,17 @@ func (in *Input) run(ctx context.Context, own ownKeyPair, emit func(model.Record
 	for {
 		s, lost, err := in.connect(ctx, own)
 		if err == nil {
-			err = in.serve(ctx, s, lost, emit, life, backoff)
+			l := &link{life: life, emit: emit}
+			err = in.serve(ctx, s, lost, l)
 			in.health.SetConnected(false)
+
+			// Only a session that exchanged something worked: one that
+			// fails at its first request keeps the backoff growing, so the
+			// server is not flooded with sessions (Modbus resets on an
+			// answer too).
+			if l.exchanged.Load() {
+				backoff.Reset()
+			}
 		}
 		if ctx.Err() != nil {
 			return
@@ -449,12 +459,28 @@ func (in *Input) connect(ctx context.Context, own ownKeyPair) (session, <-chan s
 	}
 }
 
+// link is what the owner and the notification reader share of one session.
+type link struct {
+	life *input.Lifecycle
+	emit func(model.Record)
+
+	// setup holds the bad samples of the session's setup (addresses that do
+	// not resolve, monitored items the server refused). It is written
+	// before the reader starts and emitted at the first successful
+	// exchange, after the births.
+	setup []model.Sample
+	first sync.Once
+	// exchanged is set at the first successful exchange.
+	exchanged atomic.Bool
+}
+
 // serve runs one session until it fails, is lost or ctx is done, and closes
-// it. The connect answered, so the devices are alive (O4); the points are
-// resolved (an nsu= address against this server's NamespaceArray), the
-// subscribe points monitored, and the poll groups and the watchdog read at
-// their times, earliest due first, on the clock.
-func (in *Input) serve(ctx context.Context, s session, lost <-chan struct{}, emit func(model.Record), life *input.Lifecycle, backoff *driverkit.Backoff) error {
+// it. The points are resolved (an nsu= address against this server's
+// NamespaceArray), the subscribe points monitored, and the poll groups and
+// the watchdog read at their times, earliest due first, on the clock. Only a
+// successful exchange (a Read response, a watchdog answer, a data
+// notification) keeps the devices alive (O4); the setup alone does not.
+func (in *Input) serve(ctx context.Context, s session, lost <-chan struct{}, l *link) error {
 	var reader sync.WaitGroup
 
 	defer func() {
@@ -463,18 +489,15 @@ func (in *Input) serve(ctx context.Context, s session, lost <-chan struct{}, emi
 	}()
 
 	in.health.SetConnected(true)
-	in.alive(life)
 
-	ids, err := in.resolve(s, emit)
+	ids, err := in.resolve(s, l)
 	if err != nil {
 		return err
 	}
 
-	if err := in.subscribe(ctx, s, ids, emit, life, &reader); err != nil {
+	if err := in.subscribe(ctx, s, ids, l, &reader); err != nil {
 		return err
 	}
-
-	backoff.Reset()
 
 	groups := make([][]*ua.NodeID, len(in.groups))
 	members := make([][]int, len(in.groups))
@@ -505,13 +528,13 @@ func (in *Input) serve(ctx context.Context, s session, lost <-chan struct{}, emi
 			if err := s.CurrentTime(ctx); err != nil {
 				return err
 			}
-			in.alive(life)
+			in.alive(l)
 			watchdogAt = nextDue(watchdogAt, every, in.clk.Now())
 
 			continue
 		}
 
-		if err := in.poll(ctx, s, groups[g], members[g], emit, life); err != nil {
+		if err := in.poll(ctx, s, groups[g], members[g], l); err != nil {
 			return err
 		}
 		// Read after the exchange, which takes time: a group that fell
@@ -522,11 +545,12 @@ func (in *Input) serve(ctx context.Context, s session, lost <-chan struct{}, emi
 
 // resolve returns the NodeId of every point, nil for a point whose address
 // does not resolve on this server (an nsu= namespace it does not have): that
-// point gets one bad sample and kind exception, the others proceed. A
-// library panic fails the session.
-func (in *Input) resolve(s session, emit func(model.Record)) ([]*ua.NodeID, error) {
+// point gets one bad sample, the others proceed, and kind exception counts
+// once for the connect (ruling R8). A library panic fails the session.
+func (in *Input) resolve(s session, l *link) ([]*ua.NodeID, error) {
 	ids := make([]*ua.NodeID, len(in.points))
 	now := in.clk.Now()
+	unresolved := false
 
 	for i, p := range in.points {
 		nodeID, err := s.Resolve(p.node)
@@ -536,9 +560,13 @@ func (in *Input) resolve(s session, emit func(model.Record)) ([]*ua.NodeID, erro
 		case errors.Is(err, errLibraryPanic):
 			return nil, err
 		default:
-			in.health.CountError(input.ReadErrorException)
-			emit(model.SampleRecord(in.badSample(i, now)))
+			unresolved = true
+			l.setup = append(l.setup, in.badSample(i, now))
 		}
+	}
+
+	if unresolved {
+		in.health.CountError(input.ReadErrorException)
 	}
 
 	return ids, nil
@@ -546,9 +574,9 @@ func (in *Input) resolve(s session, emit func(model.Record)) ([]*ua.NodeID, erro
 
 // subscribe creates the session's subscription for the resolved subscribe
 // points and starts the reader of its notifications. A monitored item the
-// server refuses gets one bad sample and kind exception; it is created again
-// at the next connect only.
-func (in *Input) subscribe(ctx context.Context, s session, ids []*ua.NodeID, emit func(model.Record), life *input.Lifecycle, reader *sync.WaitGroup) error {
+// server refuses gets one bad sample, and kind exception counts once for the
+// response (ruling R8); the item is created again at the next connect only.
+func (in *Input) subscribe(ctx context.Context, s session, ids []*ua.NodeID, l *link, reader *sync.WaitGroup) error {
 	var items []item
 
 	for _, i := range in.subscribed {
@@ -573,47 +601,62 @@ func (in *Input) subscribe(ctx context.Context, s session, ids []*ua.NodeID, emi
 		return err
 	}
 
-	// The reader never blocks on anything but emit, so the session's drain
-	// never stalls the library's publish loop on I/O (Task 4).
+	now := in.clk.Now()
+	refused := false
+
+	for k, status := range statuses {
+		if Quality(status) == model.Bad {
+			refused = true
+			l.setup = append(l.setup, in.badSample(int(items[k].Handle), now))
+		}
+	}
+
+	if refused {
+		in.health.CountError(input.ReadErrorException)
+	}
+
+	// Started after l.setup is complete. The reader never blocks on anything
+	// but emit, so the session's drain never stalls the library's publish
+	// loop on I/O (Task 4).
 	reader.Go(func() {
+		var counted uint64
+
 		for n := range notifications {
 			if ctx.Err() == nil {
-				in.notify(n, emit, life)
+				in.notify(n, l, &counted)
 			}
 		}
 	})
-
-	now := in.clk.Now()
-	for k, status := range statuses {
-		if Quality(status) == model.Bad {
-			in.health.CountError(input.ReadErrorException)
-			emit(model.SampleRecord(in.badSample(int(items[k].Handle), now)))
-		}
-	}
 
 	return nil
 }
 
 // notify emits the sample of one data change; a notification is a
-// successful exchange (O4).
-func (in *Input) notify(n notification, emit func(model.Record), life *input.Lifecycle) {
+// successful exchange (O4). A Bad status counts kind exception once per
+// publish message (ruling R8): counted is the last message counted.
+func (in *Input) notify(n notification, l *link, counted *uint64) {
 	if int(n.Handle) >= len(in.points) {
 		in.log.Debug("opcua: notification for an unknown handle ignored", "input", in.cfg.ID, "handle", n.Handle)
 
 		return
 	}
 
-	in.alive(life)
+	in.alive(l)
 
 	s, kind := in.sample(int(n.Handle), n.Value)
-	if kind != "" {
+	switch {
+	case kind == input.ReadErrorDecode:
 		in.health.CountError(kind)
+	case kind == input.ReadErrorException && (n.Message == 0 || n.Message != *counted):
+		in.health.CountError(kind)
+		*counted = n.Message
 	}
-	emit(model.SampleRecord(s))
+	l.emit(model.SampleRecord(s))
 }
 
-// poll reads one poll group; no request without nodes.
-func (in *Input) poll(ctx context.Context, s session, ids []*ua.NodeID, members []int, emit func(model.Record), life *input.Lifecycle) error {
+// poll reads one poll group; no request without nodes. Decode counts per
+// point, a Bad status once per Read (ruling R8).
+func (in *Input) poll(ctx context.Context, s session, ids []*ua.NodeID, members []int, l *link) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -623,14 +666,23 @@ func (in *Input) poll(ctx context.Context, s session, ids []*ua.NodeID, members 
 		return err
 	}
 
-	in.alive(life)
+	in.alive(l)
+
+	bad := false
 
 	for k, dv := range values {
 		sample, kind := in.sample(members[k], dv)
-		if kind != "" {
+		switch kind {
+		case input.ReadErrorDecode:
 			in.health.CountError(kind)
+		case input.ReadErrorException:
+			bad = true
 		}
-		emit(model.SampleRecord(sample))
+		l.emit(model.SampleRecord(sample))
+	}
+
+	if bad {
+		in.health.CountError(input.ReadErrorException)
 	}
 
 	return nil
@@ -638,11 +690,20 @@ func (in *Input) poll(ctx context.Context, s session, ids []*ua.NodeID, members 
 
 // alive records a successful exchange with the server for every device of
 // the input: the devices sit behind the server, whose liveness is theirs
-// (O4).
-func (in *Input) alive(life *input.Lifecycle) {
+// (O4). The first one of the session also marks it as working and emits the
+// bad samples of its setup, after the births.
+func (in *Input) alive(l *link) {
 	for _, d := range in.devices {
-		life.Read(d)
+		l.life.Read(d)
 	}
+
+	l.first.Do(func() {
+		l.exchanged.Store(true)
+
+		for _, s := range l.setup {
+			l.emit(model.SampleRecord(s))
+		}
+	})
 }
 
 // dueFirst returns the poll group due first and its time, or -1 and the
