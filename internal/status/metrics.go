@@ -75,7 +75,7 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 			w.sample("input_connected", boolValue(*in.Connected), "input", in.ID)
 		}
 
-		w.family("input_read_errors_total", "counter", "Read errors of the input since the agent started, by kind: timeout, connection, exception, decode.")
+		w.family("input_read_errors_total", "counter", "Read errors of the input since it was last started, by kind: timeout, connection, exception, decode; reset to 0 when the input restarts after a configuration change or a rollback.")
 		for _, in := range reporting {
 			for _, kind := range readErrorKinds(in.ReadErrors) {
 				w.sample("input_read_errors_total", float64(in.ReadErrors[kind]), "input", in.ID, "kind", kind)
