@@ -252,6 +252,73 @@ func TestBrokenBlockDoesNotStarveTheOthers(t *testing.T) {
 	}
 }
 
+// TestUnreadableFrameReopensOnlyATCPConnection (ruling R19): on tcp a
+// protocol error or a short frame can leave the MBAP stream out of step, and
+// the library does not resynchronise it, so the connection is closed and
+// reopened after the backoff. On rtu and rtuovertcp the library flushes the
+// line after these errors and the connection is kept (ruling R13), as it is
+// on tcp for an answer of another unit, read whole.
+func TestUnreadableFrameReopensOnlyATCPConnection(t *testing.T) {
+	tests := []struct {
+		name       string
+		connection string
+		err        error
+		reopened   bool
+	}{
+		{"tcp protocol error", `{"transport":"tcp","host":"plc"}`, mbus.ErrProtocolError, true},
+		{"tcp short frame", `{"transport":"tcp","host":"plc"}`, mbus.ErrShortFrame, true},
+		{"tcp another unit", `{"transport":"tcp","host":"plc"}`, mbus.ErrBadUnitId, false},
+		{"rtuovertcp protocol error", `{"transport":"rtuovertcp","host":"gw"}`, mbus.ErrProtocolError, false},
+		{"rtuovertcp short frame", `{"transport":"rtuovertcp","host":"gw"}`, mbus.ErrShortFrame, false},
+		{"rtu protocol error", `{"transport":"rtu","device":"/dev/ttyUSB0","baud":9600}`, mbus.ErrProtocolError, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			link := newFakeLink()
+			link.holding[0] = 11
+			link.readErrs = []error{tt.err}
+			h := newHarness(t, modbusInput([]byte(tt.connection), 30*time.Second, config.Device{
+				Device: "press-07",
+				Points: []config.Point{pollPoint("speed", "hr:0", "int16", time.Second)},
+			}))
+			h.in.newClient = link.newClient
+			h.start()
+
+			// The first read fails: no record, one connection error. A
+			// reopened connection waits the 0.5 s backoff, so it is down.
+			if got := h.take(); len(got) != 0 {
+				t.Fatalf("records after the unreadable frame: %+v", got)
+			}
+			health := h.in.Health()
+			if health.Connected == tt.reopened || health.ReadErrors[input.ReadErrorConnection] != 1 || len(health.ReadErrors) != 1 {
+				t.Fatalf("Health = %+v, want connected %v with one connection error", health, !tt.reopened)
+			}
+			clients := link.built()
+			if _, closes := clients[0].counts(); (closes == 1) != tt.reopened {
+				t.Errorf("first client closed %d times, reopened %v", closes, tt.reopened)
+			}
+
+			// The next poll reads the value, on a new connection or the same.
+			h.step(time.Second)
+			want := []reading{{"press-07", "speed", model.IntValue(11), model.Good, h.clk.Now()}}
+			if got := readings(t, h.take()); !slices.Equal(got, want) {
+				t.Fatalf("samples at the next poll = %+v, want %+v", got, want)
+			}
+			wantBuilt := 1
+			if tt.reopened {
+				wantBuilt = 2
+			}
+			if n := len(link.built()); n != wantBuilt {
+				t.Errorf("clients built = %d, want %d", n, wantBuilt)
+			}
+			if !h.in.Health().Connected {
+				t.Error("not connected at the next poll")
+			}
+		})
+	}
+}
+
 // TestUnknownExceptionCodeIsADeviceAnswer (ruling R15): an exception code the
 // library does not know is a device answer like exceptions 5 and 6: no
 // sample, the device is read (never reported dead), kind exception, and the
@@ -286,33 +353,40 @@ func TestUnknownExceptionCodeIsADeviceAnswer(t *testing.T) {
 	}
 }
 
-// TestClassifyKeepsTheConnectionUnlessItFailed (rulings R13, R15): only an
-// I/O error is a broken connection; a timeout or an answer the library
-// rejects keeps it, and an exception code the library does not know is a
-// device answer.
+// TestClassifyKeepsTheConnectionUnlessItFailed (rulings R13, R15, R19): only
+// an I/O error, or on tcp a protocol error or a short frame, is a broken
+// connection; a timeout or another answer the library rejects keeps it, and
+// an exception code the library does not know is a device answer.
 func TestClassifyKeepsTheConnectionUnlessItFailed(t *testing.T) {
 	tests := []struct {
-		name string
-		err  error
-		want outcome
+		name      string
+		err       error
+		transport string
+		want      outcome
 	}{
-		{"timeout", mbus.ErrRequestTimedOut, outcomeTimeout},
-		{"bad CRC", mbus.ErrBadCRC, outcomeGarbled},
-		{"short frame", mbus.ErrShortFrame, outcomeGarbled},
-		{"protocol error", mbus.ErrProtocolError, outcomeGarbled},
-		{"another unit", mbus.ErrBadUnitId, outcomeGarbled},
-		{"another transaction", mbus.ErrBadTransactionId, outcomeGarbled},
-		{"unknown protocol", mbus.ErrUnknownProtocolId, outcomeGarbled},
-		{"unknown exception code", fmt.Errorf("unknown exception code (%v)", 9), outcomeUnknownException},
-		{"end of stream", io.EOF, outcomeConnection},
-		{"connection reset", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, outcomeConnection},
-		{"closed", net.ErrClosed, outcomeConnection},
+		{"timeout", mbus.ErrRequestTimedOut, TransportRTUOverTCP, outcomeTimeout},
+		{"timeout on tcp", mbus.ErrRequestTimedOut, TransportTCP, outcomeTimeout},
+		{"bad CRC", mbus.ErrBadCRC, TransportRTU, outcomeGarbled},
+		{"short frame", mbus.ErrShortFrame, TransportRTUOverTCP, outcomeGarbled},
+		{"short frame on rtu", mbus.ErrShortFrame, TransportRTU, outcomeGarbled},
+		{"short frame on tcp", mbus.ErrShortFrame, TransportTCP, outcomeOutOfStep},
+		{"protocol error", mbus.ErrProtocolError, TransportRTUOverTCP, outcomeGarbled},
+		{"protocol error on rtu", mbus.ErrProtocolError, TransportRTU, outcomeGarbled},
+		{"protocol error on tcp", mbus.ErrProtocolError, TransportTCP, outcomeOutOfStep},
+		{"another unit", mbus.ErrBadUnitId, TransportRTUOverTCP, outcomeGarbled},
+		{"another unit on tcp", mbus.ErrBadUnitId, TransportTCP, outcomeGarbled},
+		{"another transaction", mbus.ErrBadTransactionId, TransportTCP, outcomeGarbled},
+		{"unknown protocol", mbus.ErrUnknownProtocolId, TransportTCP, outcomeGarbled},
+		{"unknown exception code", fmt.Errorf("unknown exception code (%v)", 9), TransportTCP, outcomeUnknownException},
+		{"end of stream", io.EOF, TransportTCP, outcomeConnection},
+		{"connection reset", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, TransportRTUOverTCP, outcomeConnection},
+		{"closed", net.ErrClosed, TransportRTU, outcomeConnection},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := classify(tt.err); got != tt.want {
-				t.Errorf("classify(%v) = %d, want %d", tt.err, got, tt.want)
+			if got := classify(tt.err, tt.transport); got != tt.want {
+				t.Errorf("classify(%v, %s) = %d, want %d", tt.err, tt.transport, got, tt.want)
 			}
 		})
 	}

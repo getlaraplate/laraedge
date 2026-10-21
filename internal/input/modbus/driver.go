@@ -252,7 +252,7 @@ func probeError(o outcome) error {
 		return errors.New("the gateway did not reach the device (exception 10 or 11)")
 	case outcomeTimeout:
 		return errors.New("the device did not answer in time")
-	case outcomeGarbled:
+	case outcomeGarbled, outcomeOutOfStep:
 		return errors.New("the answer of the device could not be read (bad CRC or protocol error)")
 	case outcomeConnection:
 		return errors.New("the connection to the device failed")
@@ -266,8 +266,9 @@ func probeError(o outcome) error {
 // due, the one due the longest first, through the rate limiter, until ctx is
 // done. The blocks are first due at start. A unit that does not answer only
 // times out its own blocks (ruling R13): the connection is closed and
-// reopened after the backoff on an I/O error, or when nothing answered on it
-// for the death tolerance.
+// reopened after the backoff on an I/O error, on a protocol error or a short
+// frame on tcp (ruling R19), or when nothing answered on it for the death
+// tolerance.
 func (in *Input) poll(ctx context.Context, c client, emit func(model.Record), life *input.Lifecycle, start time.Time) {
 	defer func() {
 		if c != nil {
@@ -443,13 +444,14 @@ const (
 	// linkSilent: nothing usable came back (a timeout, a garbled answer);
 	// the library resynchronises by itself, so the connection is kept.
 	linkSilent
-	// linkBroken: an I/O error; the connection must be reopened.
+	// linkBroken: an I/O error, or a tcp stream out of step; the
+	// connection must be reopened.
 	linkBroken
 )
 
 // apply counts the result of one exchange and, when the device answered,
 // records the read of the block's devices and emits the samples (rulings R8,
-// R13 and R15). It reports what the exchange tells of the connection.
+// R13, R15 and R19). It reports what the exchange tells of the connection.
 func (in *Input) apply(r result, devices []string, emit func(model.Record), life *input.Lifecycle, backoff *driverkit.Backoff) link {
 	switch r.outcome {
 	case outcomeTimeout:
@@ -458,7 +460,7 @@ func (in *Input) apply(r result, devices []string, emit func(model.Record), life
 	case outcomeGarbled:
 		in.health.CountError(input.ReadErrorConnection)
 		return linkSilent
-	case outcomeConnection:
+	case outcomeConnection, outcomeOutOfStep:
 		in.health.CountError(input.ReadErrorConnection)
 		return linkBroken
 	case outcomeUnavailable:
@@ -503,9 +505,15 @@ const (
 	// outcomeTimeout is a request without an answer in time.
 	outcomeTimeout
 	// outcomeGarbled is an answer that cannot be used: a bad CRC, a short
-	// frame, a protocol error, another unit or transaction. The library
-	// skips or flushes it, so the connection stays usable.
+	// frame or a protocol error on rtu and rtuovertcp, another unit or
+	// transaction. The library skips or flushes it, so the connection
+	// stays usable.
 	outcomeGarbled
+	// outcomeOutOfStep is a protocol error or a short frame on tcp (ruling
+	// R19): the library may have stopped inside a frame, read its header
+	// and not its PDU, and it never resynchronises the MBAP stream, so the
+	// connection is reopened.
+	outcomeOutOfStep
 	// outcomeConnection is an I/O error: the connection failed.
 	outcomeConnection
 )
@@ -516,10 +524,10 @@ const (
 // line 88, mapExceptionCodeToError).
 const unknownExceptionPrefix = "unknown exception code ("
 
-// classify maps a library error to its outcome. Anything not recognised is
-// an I/O error (EOF, reset, refused, a write failure, a closed port), and
-// the connection is reopened.
-func classify(err error) outcome {
+// classify maps a library error on a connection of transport to its
+// outcome. Anything not recognised is an I/O error (EOF, reset, refused, a
+// write failure, a closed port), and the connection is reopened.
+func classify(err error, transport string) outcome {
 	var netErr net.Error
 	switch {
 	case err == nil:
@@ -536,6 +544,8 @@ func classify(err error) outcome {
 		return outcomeUnavailable
 	case errors.Is(err, mbus.ErrRequestTimedOut), errors.As(err, &netErr) && netErr.Timeout():
 		return outcomeTimeout
+	case transport == TransportTCP && (errors.Is(err, mbus.ErrProtocolError) || errors.Is(err, mbus.ErrShortFrame)):
+		return outcomeOutOfStep
 	case errors.Is(err, mbus.ErrBadCRC), errors.Is(err, mbus.ErrShortFrame), errors.Is(err, mbus.ErrProtocolError),
 		errors.Is(err, mbus.ErrBadUnitId), errors.Is(err, mbus.ErrBadTransactionId), errors.Is(err, mbus.ErrUnknownProtocolId):
 		return outcomeGarbled
@@ -558,7 +568,7 @@ type result struct {
 // the answer.
 func (in *Input) exchange(c client, b *Block) result {
 	regs, bits, err := readBlock(c, b)
-	r := result{outcome: classify(err)}
+	r := result{outcome: classify(err, in.conn.Transport)}
 	ts := in.clk.Now().UTC()
 
 	switch r.outcome {
