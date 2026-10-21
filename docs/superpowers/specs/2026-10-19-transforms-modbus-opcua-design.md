@@ -3,6 +3,9 @@
 **Status:** Approved (2026-10-19), section by section. Transforms delivered (2026-10-20) by the plan
 `../plans/2026-10-19-transforms.md`; the `modbus` and `opcua` plans follow, in that order (section 7).
 Amended 2026-10-20 after delivery to match the shipped behaviour (rulings R5-R17 of the transforms plan).
+`modbus` delivered (2026-10-21) by `../plans/2026-10-20-modbus.md`: where it differs from section 5 (a timeout
+keeps the connection; byte orders for 1- and 4-register types) and from D6 (the serial port is exclusive on Windows
+only), its Delivery status and rulings R7, R12, R13 and R19 describe the shipped behaviour.
 
 **Date:** 2026-10-19
 
