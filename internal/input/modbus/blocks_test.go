@@ -172,6 +172,21 @@ func TestPlan(t *testing.T) {
 				{1, AreaHoldingRegister, 5 * s, 0, 1, []string{"slow"}},
 			},
 		},
+		{
+			name:        "the last register of the address space",
+			points:      []PlannedPoint{planned("last", AreaHoldingRegister, 65535, 1, s, nil)},
+			defaultUnit: 1,
+			want:        []shape{{1, AreaHoldingRegister, s, 65535, 1, []string{"last"}}},
+		},
+		{
+			name: "points ending at the top of the address space merge",
+			points: []PlannedPoint{
+				planned("last", AreaHoldingRegister, 65535, 1, s, nil),
+				planned("pair", AreaHoldingRegister, 65534, 2, s, nil),
+			},
+			defaultUnit: 1,
+			want:        []shape{{1, AreaHoldingRegister, s, 65534, 2, []string{"pair", "last"}}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

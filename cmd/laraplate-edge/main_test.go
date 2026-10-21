@@ -135,6 +135,8 @@ func TestConfigValidate(t *testing.T) {
 	}
 	valid := filepath.Join(dir, "valid.yaml")
 	writeFile(t, valid, driversDoc("hr:10"))
+	validJSON := filepath.Join(dir, "valid.json")
+	writeFile(t, validJSON, driversJSONDoc("hr:10"))
 	badAddress := filepath.Join(dir, "bad-address.yaml")
 	writeFile(t, badAddress, driversDoc("hr:70000"))
 
@@ -152,6 +154,12 @@ func TestConfigValidate(t *testing.T) {
 			wantStdout: valid + ": valid\n",
 		},
 		{
+			name:       "the same document as JSON",
+			file:       validJSON,
+			wantCode:   0,
+			wantStdout: validJSON + ": valid\n",
+		},
+		{
 			name:     "a driver refusing its configuration (decision M1)",
 			file:     fixtures + "build.yaml",
 			wantCode: 1,
@@ -160,7 +168,7 @@ func TestConfigValidate(t *testing.T) {
 			},
 		},
 		{
-			name:     "the same document as JSON",
+			name:     "a driver refusing its configuration, as JSON",
 			file:     fixtures + "build.json",
 			wantCode: 1,
 			wantStderr: []string{
@@ -250,6 +258,32 @@ inputs:
           - {signal: speed, address: "` + address + `", type: int16, read: {poll: 1s}}
 outputs:
   - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
+`
+}
+
+// driversJSONDoc is the document of driversDoc written as JSON, the form
+// the laraplate provider delivers.
+func driversJSONDoc(address string) string {
+	return `{
+  "schema": "laraplate-edge-config/1",
+  "inputs": [
+    {
+      "id": "sim", "driver": "simulated",
+      "connection": {"scenario": ` + demoScenario + `},
+      "devices": [{"device": "oven-02", "points": [
+        {"signal": "state", "address": "state", "type": "string", "read": "subscribe"}
+      ]}]
+    },
+    {
+      "id": "plc", "driver": "modbus",
+      "connection": {"transport": "tcp", "host": "plc.example", "port": 1502},
+      "devices": [{"device": "press-07", "points": [
+        {"signal": "speed", "address": "` + address + `", "type": "int16", "read": {"poll": "1s"}}
+      ]}]
+    }
+  ],
+  "outputs": [{"id": "main", "type": "laraplate-http", "url": "http://127.0.0.1:8000", "token": "secret://env/TOKEN"}]
+}
 `
 }
 

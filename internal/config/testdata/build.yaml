@@ -1,4 +1,6 @@
-# A document this build applies: the simulated driver and the laraplate-http output.
+# A document the build check accepts: the simulated driver and the laraplate-http output.
+# config validate still refuses it: the simulated driver does not know the auth key of its
+# connection, kept here for the config tests that read secrets in a connection.
 schema: laraplate-edge-config/1
 version: 3
 inputs:
