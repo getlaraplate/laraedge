@@ -127,11 +127,18 @@ func TestRun(t *testing.T) {
 func TestConfigValidate(t *testing.T) {
 	const fixtures = "../../internal/config/testdata/"
 
-	invalid := filepath.Join(t.TempDir(), "invalid.yaml")
+	dir := t.TempDir()
+	invalid := filepath.Join(dir, "invalid.yaml")
 	doc := "schema: laraplate-edge-config/1\ninputs: []\noutputs:\n  - {id: main, type: laraplate-http, url: 'http://erp.example.com', token: plain-token-value}\n"
 	if err := os.WriteFile(invalid, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	valid := filepath.Join(dir, "valid.yaml")
+	writeFile(t, valid, driversDoc("hr:10"))
+	validJSON := filepath.Join(dir, "valid.json")
+	writeFile(t, validJSON, driversJSONDoc("hr:10"))
+	badAddress := filepath.Join(dir, "bad-address.yaml")
+	writeFile(t, badAddress, driversDoc("hr:70000"))
 
 	tests := []struct {
 		name       string
@@ -142,14 +149,39 @@ func TestConfigValidate(t *testing.T) {
 	}{
 		{
 			name:       "a document this build applies",
-			file:       fixtures + "build.yaml",
+			file:       valid,
 			wantCode:   0,
-			wantStdout: fixtures + "build.yaml: valid\n",
+			wantStdout: valid + ": valid\n",
 		},
 		{
-			name:     "the same document as JSON",
+			name:       "the same document as JSON",
+			file:       validJSON,
+			wantCode:   0,
+			wantStdout: validJSON + ": valid\n",
+		},
+		{
+			name:     "a driver refusing its configuration (decision M1)",
+			file:     fixtures + "build.yaml",
+			wantCode: 1,
+			wantStderr: []string{
+				fixtures + "build.yaml: inputs.0: simulated input \"sim-line\": connection: unknown key auth",
+			},
+		},
+		{
+			name:     "a driver refusing its configuration, as JSON",
 			file:     fixtures + "build.json",
-			wantCode: 0,
+			wantCode: 1,
+			wantStderr: []string{
+				fixtures + "build.json: inputs.0: simulated input \"sim-line\": connection: unknown key auth",
+			},
+		},
+		{
+			name:     "a Modbus address, offline",
+			file:     badAddress,
+			wantCode: 1,
+			wantStderr: []string{
+				badAddress + ": inputs.1: modbus input \"plc\": devices.0.points.0: address: offset: want an integer from 0 to 65535\n",
+			},
 		},
 		{
 			name:     "the spec example refused by the build check",
@@ -194,11 +226,65 @@ func TestConfigValidate(t *testing.T) {
 					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 				}
 			}
-			if strings.Contains(stderr.String(), "plain-token-value") {
-				t.Errorf("stderr echoes a value: %q", stderr.String())
+			for _, value := range []string{"plain-token-value", "plc.example", "1502", "70000"} {
+				if strings.Contains(stderr.String(), value) {
+					t.Errorf("stderr echoes a value: %q", stderr.String())
+				}
 			}
 		})
 	}
+}
+
+// driversDoc is a document with a simulated and a Modbus input, the Modbus
+// point at address. The Modbus factory never connects, so the host need not
+// exist.
+func driversDoc(address string) string {
+	return `schema: laraplate-edge-config/1
+inputs:
+  - id: sim
+    driver: simulated
+    connection:
+      scenario: ` + demoScenario + `
+    devices:
+      - device: oven-02
+        points:
+          - {signal: state, address: state, type: string, read: subscribe}
+  - id: plc
+    driver: modbus
+    connection: {transport: tcp, host: plc.example, port: 1502}
+    devices:
+      - device: press-07
+        points:
+          - {signal: speed, address: "` + address + `", type: int16, read: {poll: 1s}}
+outputs:
+  - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
+`
+}
+
+// driversJSONDoc is the document of driversDoc written as JSON, the form
+// the laraplate provider delivers.
+func driversJSONDoc(address string) string {
+	return `{
+  "schema": "laraplate-edge-config/1",
+  "inputs": [
+    {
+      "id": "sim", "driver": "simulated",
+      "connection": {"scenario": ` + demoScenario + `},
+      "devices": [{"device": "oven-02", "points": [
+        {"signal": "state", "address": "state", "type": "string", "read": "subscribe"}
+      ]}]
+    },
+    {
+      "id": "plc", "driver": "modbus",
+      "connection": {"transport": "tcp", "host": "plc.example", "port": 1502},
+      "devices": [{"device": "press-07", "points": [
+        {"signal": "speed", "address": "` + address + `", "type": "int16", "read": {"poll": "1s"}}
+      ]}]
+    }
+  ],
+  "outputs": [{"id": "main", "type": "laraplate-http", "url": "http://127.0.0.1:8000", "token": "secret://env/TOKEN"}]
+}
+`
 }
 
 // TestRunLogsToStdout checks that run writes its JSON logs to stdout (spec

@@ -2,6 +2,7 @@ package status
 
 import (
 	"bufio"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -380,5 +381,89 @@ func TestFormatValue(t *testing.T) {
 		if _, err := strconv.ParseFloat(formatValue(tt.in), 64); err != nil {
 			t.Errorf("formatValue(%v) does not parse: %v", tt.in, err)
 		}
+	}
+}
+
+// healthStatus is a status with a connected modbus input, a disconnected one
+// that counted errors, a failed one and a simulated input, which does not
+// report.
+func healthStatus() supervisor.Status {
+	up, down := true, false
+
+	return supervisor.Status{
+		Applied: true,
+		Version: 1,
+		Inputs: []supervisor.InputStatus{
+			{ID: "cell", Driver: "modbus", State: supervisor.InputRunning, Connected: &up, ReadErrors: map[string]uint64{}},
+			{ID: "oven", Driver: "modbus", State: supervisor.InputRunning, Connected: &down, ReadErrors: map[string]uint64{"timeout": 4, "decode": 1}},
+			{ID: "line", Driver: "simulated", State: supervisor.InputRunning},
+			{ID: "broken", Driver: "modbus", State: supervisor.StateFailed, LastError: "start: bad connection"},
+		},
+	}
+}
+
+func TestMetricsExposeHealthOfReportingInputsOnly(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(healthStatus())
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+	families := parseExposition(t, body)
+
+	connected := families["laraplate_edge_input_connected"]
+	if connected == nil || connected.typ != "gauge" {
+		t.Fatalf("input_connected = %+v, want a gauge", connected)
+	}
+	wantConnected := map[string]float64{`{input="cell"}`: 1, `{input="oven"}`: 0}
+	if !maps.Equal(connected.samples, wantConnected) {
+		t.Errorf("input_connected = %v, want %v", connected.samples, wantConnected)
+	}
+
+	errs := families["laraplate_edge_input_read_errors_total"]
+	if errs == nil || errs.typ != "counter" {
+		t.Fatalf("input_read_errors_total = %+v, want a counter", errs)
+	}
+	wantErrs := map[string]float64{
+		`{input="cell",kind="timeout"}`:    0,
+		`{input="cell",kind="connection"}`: 0,
+		`{input="cell",kind="exception"}`:  0,
+		`{input="cell",kind="decode"}`:     0,
+		`{input="oven",kind="timeout"}`:    4,
+		`{input="oven",kind="connection"}`: 0,
+		`{input="oven",kind="exception"}`:  0,
+		`{input="oven",kind="decode"}`:     1,
+	}
+	if !maps.Equal(errs.samples, wantErrs) {
+		t.Errorf("input_read_errors_total = %v, want %v", errs.samples, wantErrs)
+	}
+}
+
+func TestMetricsHaveNoHealthFamiliesWithoutAReportingInput(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+
+	for _, name := range []string{"input_connected", "input_read_errors_total"} {
+		if strings.Contains(body, "laraplate_edge_"+name) {
+			t.Errorf("/metrics mentions %s although no input reports its health", name)
+		}
+	}
+}
+
+func TestMetricsHealthFamiliesFollowTransformErrors(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(healthStatus())
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+
+	var order []string
+	for line := range strings.Lines(body) {
+		if name, ok := strings.CutPrefix(line, "# HELP "); ok {
+			name, _, _ = strings.Cut(name, " ")
+			order = append(order, name)
+		}
+	}
+	i := slices.Index(order, "laraplate_edge_transform_errors_total")
+	if i < 0 || i+2 >= len(order) || order[i+1] != "laraplate_edge_input_connected" || order[i+2] != "laraplate_edge_input_read_errors_total" {
+		t.Fatalf("families %q, want the health families right after laraplate_edge_transform_errors_total", order)
 	}
 }

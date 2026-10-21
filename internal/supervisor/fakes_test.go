@@ -57,6 +57,8 @@ type fakeDriver struct {
 	emits  map[string][]func(model.Record)
 	closed []string // ids of every Close of a started input
 	called chan string
+	// health makes the input of an id report its health (input.HealthReporter).
+	health map[string]input.Health
 }
 
 func newFakeDriver() *fakeDriver {
@@ -75,6 +77,7 @@ func newFakeDriver() *fakeDriver {
 		running:      map[string]*fakeInput{},
 		emits:        map[string][]func(model.Record){},
 		called:       make(chan string, 64),
+		health:       map[string]input.Health{},
 	}
 }
 
@@ -86,7 +89,12 @@ func (d *fakeDriver) factory(cfg config.Input, _ clock.Clock) (input.Input, erro
 		return nil, err
 	}
 
-	return &fakeInput{d: d, cfg: cfg}, nil
+	in := &fakeInput{d: d, cfg: cfg}
+	if h, ok := d.health[cfg.ID]; ok {
+		return &reportingInput{fakeInput: in, h: h}, nil
+	}
+
+	return in, nil
 }
 
 func (d *fakeDriver) startCount(id string) int {
@@ -157,6 +165,14 @@ func (d *fakeDriver) waitCalled(t *testing.T, id string) {
 		}
 	}
 }
+
+// reportingInput is a fakeInput that implements input.HealthReporter.
+type reportingInput struct {
+	*fakeInput
+	h input.Health
+}
+
+func (in *reportingInput) Health() input.Health { return in.h }
 
 type fakeInput struct {
 	d       *fakeDriver

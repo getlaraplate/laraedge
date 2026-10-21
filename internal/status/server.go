@@ -299,6 +299,10 @@ type inputDoc struct {
 	State           string `json:"state"`
 	LastError       string `json:"last_error,omitempty"`
 	TransformErrors uint64 `json:"transform_errors"`
+	// Connected and ReadErrors are present only for inputs that report
+	// their health.
+	Connected  *bool             `json:"connected,omitempty"`
+	ReadErrors map[string]uint64 `json:"read_errors,omitempty"`
 }
 
 type outputDoc struct {
@@ -339,10 +343,18 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		Outputs:       make([]outputDoc, 0, len(st.Outputs)),
 	}
 	for _, in := range st.Inputs {
-		doc.Inputs = append(doc.Inputs, inputDoc{
+		d := inputDoc{
 			ID: in.ID, Driver: in.Driver, State: in.State, LastError: in.LastError,
 			TransformErrors: in.TransformErrors,
-		})
+		}
+		if in.Connected != nil {
+			d.Connected = in.Connected
+			d.ReadErrors = make(map[string]uint64)
+			for _, kind := range readErrorKinds(in.ReadErrors) {
+				d.ReadErrors[kind] = in.ReadErrors[kind]
+			}
+		}
+		doc.Inputs = append(doc.Inputs, d)
 	}
 	for _, out := range st.Outputs {
 		dropped := make(map[string]uint64, len(out.Buffer.Dropped))

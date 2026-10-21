@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/getlaraplate/laraedge/internal/buffer"
+	"github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/output"
 	"github.com/getlaraplate/laraedge/internal/supervisor"
@@ -68,6 +69,20 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		w.sample("transform_errors_total", float64(in.TransformErrors), "input", in.ID)
 	}
 
+	if reporting := reportingInputs(st.Inputs); len(reporting) > 0 {
+		w.family("input_connected", "gauge", "1 when the input's connection to the machine is up, 0 when it is down; only inputs that keep a connection.")
+		for _, in := range reporting {
+			w.sample("input_connected", boolValue(*in.Connected), "input", in.ID)
+		}
+
+		w.family("input_read_errors_total", "counter", "Read errors of the input since it was last started, by kind: timeout, connection, exception, decode; reset to 0 when the input restarts after a configuration change or a rollback.")
+		for _, in := range reporting {
+			for _, kind := range readErrorKinds(in.ReadErrors) {
+				w.sample("input_read_errors_total", float64(in.ReadErrors[kind]), "input", in.ID, "kind", kind)
+			}
+		}
+	}
+
 	queues := func(name, help string, value func(buffer.QueueStats) float64) {
 		w.family(name, "gauge", help)
 		for _, out := range running {
@@ -121,6 +136,32 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 	for _, out := range st.Outputs {
 		w.sample("last_error_timestamp_seconds", unixSeconds(out.LastErrorAt), "output", out.ID)
 	}
+}
+
+// reportingInputs are the inputs that report their health.
+func reportingInputs(inputs []supervisor.InputStatus) []supervisor.InputStatus {
+	var out []supervisor.InputStatus
+	for _, in := range inputs {
+		if in.Connected != nil {
+			out = append(out, in)
+		}
+	}
+
+	return out
+}
+
+// readErrorKinds are the kinds exposed for an input: the known ones, at zero
+// before any error so a rate over them never starts from a missing series,
+// then any other kind it reported, sorted.
+func readErrorKinds(counts map[string]uint64) []string {
+	kinds := slices.Clone(input.ReadErrorKinds)
+	for _, kind := range slices.Sorted(maps.Keys(counts)) {
+		if !slices.Contains(kinds, kind) {
+			kinds = append(kinds, kind)
+		}
+	}
+
+	return kinds
 }
 
 // expositionWriter writes the Prometheus text format: a HELP and a TYPE line

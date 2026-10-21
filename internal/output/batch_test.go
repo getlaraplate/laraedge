@@ -1187,21 +1187,35 @@ func TestNextNeverSpinsOnACountWithoutRecords(t *testing.T) {
 	h.open()
 
 	res := h.nextAsync(context.Background())
-	signal := func() {
+	spun := func() {
 		t.Helper()
-
-		select {
-		case pb.changed <- struct{}{}:
-		case <-pb.spun:
-			t.Fatal("Next kept reading an empty buffer instead of waiting for an append")
-		}
+		t.Fatal("Next kept reading an empty buffer instead of waiting for an append")
 	}
 
-	signal() // received only while Next waits for an append
-	h.append(bulk(0))
-	signal()
+	select {
+	case pb.changed <- struct{}{}: // received only while Next waits for an append
+	case <-pb.spun:
+		spun()
+	}
 
-	r := <-res
+	h.append(bulk(0))
+
+	// Next reads after the first wake-up, so it may see the appended record
+	// before this second wake-up is sent and return without ever receiving it.
+	var r nextResult
+
+	select {
+	case pb.changed <- struct{}{}:
+		select {
+		case r = <-res:
+		case <-pb.spun:
+			spun()
+		}
+	case r = <-res:
+	case <-pb.spun:
+		spun()
+	}
+
 	if r.err != nil || r.batch.Len() != 1 {
 		t.Fatalf("Next() = %v, %v; want the appended record", r.batch, r.err)
 	}

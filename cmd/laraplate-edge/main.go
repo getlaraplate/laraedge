@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/getlaraplate/laraedge/internal/bootstrap"
+	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/transform"
@@ -133,8 +135,8 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 }
 
 // runConfigValidate runs "config validate <file>": every validation layer,
-// every message on stderr prefixed by the file name, exit 0 when there is
-// none.
+// the input drivers' own included (decision M1), every message on stderr
+// prefixed by the file name, exit 0 when there is none.
 func runConfigValidate(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 2 || args[0] != "validate" {
 		fmt.Fprint(stderr, usageText)
@@ -142,10 +144,13 @@ func runConfigValidate(args []string, stdout, stderr io.Writer) int {
 	}
 
 	file := args[1]
-	_, msgs, err := loadDocument(file)
+	doc, msgs, err := parseDocument(file)
 	if err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge config validate: %v\n", err)
 		return exitFailure
+	}
+	if len(msgs) == 0 {
+		msgs = append(checkDocument(doc), checkInputs(doc, file)...)
 	}
 	if len(msgs) > 0 {
 		printMessages(stderr, file, msgs)
@@ -162,20 +167,60 @@ func runConfigValidate(args []string, stdout, stderr io.Writer) int {
 // report together. The messages are those of the document; the error is a
 // file that cannot be read or is not a document at all.
 func loadDocument(file string) (config.Document, []string, error) {
+	doc, msgs, err := parseDocument(file)
+	if err != nil {
+		return config.Document{}, nil, err
+	}
+	if len(msgs) == 0 {
+		msgs = checkDocument(doc)
+	}
+
+	return doc, msgs, nil
+}
+
+// parseDocument reads file and parses it (config.Parse): the messages are
+// those of the schema and semantic layers.
+func parseDocument(file string) (config.Document, []string, error) {
 	data, err := readDocument(file)
 	if err != nil {
 		return config.Document{}, nil, err
 	}
 
-	doc, msgs, err := config.Parse(data)
-	if err != nil {
-		return config.Document{}, nil, err
-	}
-	if len(msgs) == 0 {
-		msgs = append(config.CheckBuild(doc), transform.CheckDocument(doc)...)
+	return config.Parse(data)
+}
+
+// checkDocument applies the layers after config.Parse to a parsed document:
+// config.CheckBuild and transform.CheckDocument.
+func checkDocument(doc config.Document) []string {
+	return append(config.CheckBuild(doc), transform.CheckDocument(doc)...)
+}
+
+// checkInputs builds every input of doc through the driver registry of run
+// and reports the factories' errors as the supervisor does, "inputs.<i>:
+// <error>" (decision M1). Factories only validate and never connect (core
+// R47), so this works offline. Relative paths of a connection resolve
+// against the directory of file, as with the file provider. An input whose
+// driver this build lacks is left to config.CheckBuild.
+func checkInputs(doc config.Document, file string) []string {
+	boot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: file}}
+	drivers := inputDrivers(boot, nil)
+
+	var msgs []string
+	for i, cfg := range doc.Inputs {
+		factory := drivers[cfg.Driver]
+		if factory == nil {
+			continue
+		}
+
+		in, err := factory(cfg, clock.Real())
+		if err != nil {
+			msgs = append(msgs, fmt.Sprintf("inputs.%d: %v", i, err))
+			continue
+		}
+		_ = in.Close()
 	}
 
-	return doc, msgs, nil
+	return msgs
 }
 
 // printMessages writes each message on its own line, prefixed by the file.

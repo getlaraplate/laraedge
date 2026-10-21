@@ -39,6 +39,40 @@ type Input interface {
 	Probe(ctx context.Context) ([]model.Sample, error)
 }
 
+// Read error kinds, the values of Health.ReadErrors keys.
+const (
+	// ReadErrorTimeout is a request the device did not answer in time.
+	ReadErrorTimeout = "timeout"
+	// ReadErrorConnection is a connection that failed, closed or could not
+	// be opened.
+	ReadErrorConnection = "connection"
+	// ReadErrorException is a protocol exception the device answered.
+	ReadErrorException = "exception"
+	// ReadErrorDecode is an answer whose bytes do not decode to the point's
+	// type.
+	ReadErrorDecode = "decode"
+)
+
+// ReadErrorKinds lists the read error kinds, in the order they are exposed.
+var ReadErrorKinds = []string{ReadErrorTimeout, ReadErrorConnection, ReadErrorException, ReadErrorDecode}
+
+// Health is the connection state and the read errors of one input.
+type Health struct {
+	// Connected reports whether the connection to the machine is up.
+	Connected bool
+	// ReadErrors counts the read errors since the input was built, by kind
+	// (the ReadError constants).
+	ReadErrors map[string]uint64
+}
+
+// HealthReporter is implemented by the inputs that keep a connection to a
+// machine. The supervisor reports it in the status endpoint; an input that
+// does not implement it (simulated) has no connection state and no series.
+// Health is called from any goroutine.
+type HealthReporter interface {
+	Health() Health
+}
+
 // Factory builds the input of cfg. It only validates and prepares: nothing
 // may open a connection or a device before Start, so the supervisor can build every new input of a
 // document and refuse the document without touching the running ones.

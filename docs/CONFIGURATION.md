@@ -42,7 +42,7 @@ laraplate-edge config validate config.yaml
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | input id |
-| `driver` | yes | | `simulated` in this build. The schema also knows `opcua`, `modbus`, `mqtt`, `serial`, `file` and `plugin:<id>`. |
+| `driver` | yes | | `simulated` or `modbus` in this build. The schema also knows `opcua`, `mqtt`, `serial`, `file` and `plugin:<id>`. |
 | `connection` | no | `{}` | driver settings, an object the schema does not interpret (see the secret rule below) |
 | `death_tolerance` | no | `30s` | how long without a successful read before the input reports its devices dead; `birth` follows at the next successful read |
 | `devices` | yes | | at least one device |
@@ -90,6 +90,181 @@ The scenario (at most 1 MiB, unknown keys refused; see `examples/simulated/scena
 | `cycle_time` | | `{mean, stddev}`, durations; `mean` is required when a state produces, from the tick to 24 h. A part completes when its drawn cycle time has elapsed, at most one per tick. |
 | `scrap_rate` | `0` | probability, 0 to 1, that a part is scrap (`scrap_count`), else good (`good_count`) |
 | `measurements` | | `{signal, mean, stddev, unit}` drawn once per completed part; the name is not `state`, `good_count` or `scrap_count`; `unit` is informative (the point's `unit` is reported) |
+
+### The `modbus` driver
+
+Reads coils, discrete inputs, input registers and holding registers from a Modbus device or gateway, by
+polling. The driver is read-only: it sends only the four read functions (1, 2, 3, 4), never a write.
+`examples/modbus` is a complete document.
+
+**Connection.** An unknown field is an error here, unlike in other drivers' `connection`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `transport` | | required: `tcp` (Modbus TCP), `rtu` (RTU framing on a serial port) or `rtuovertcp` (RTU framing over TCP, for serial-to-Ethernet gateways) |
+| `host` | | `tcp` and `rtuovertcp`: required, host name or address of the device |
+| `port` | `502` | `tcp` and `rtuovertcp`: 1 to 65535 |
+| `device` | | `rtu`: required, the serial port path (`/dev/ttyUSB0`, `COM3`) |
+| `baud` | | `rtu`: required, no default |
+| `data_bits` | `8` | `rtu`: 5, 6, 7 or 8 |
+| `parity` | `none` | `rtu`: `none`, `even` or `odd` |
+| `stop_bits` | `1` | `rtu`: 1 or 2 |
+| `timeout` | `1s` | how long one request may take, a positive duration |
+| `unit_id` | `1` | the unit (slave id) the points are read from, 0 to 255; a point may override it (`@unit`). Unit 0 is accepted: some TCP devices answer on it. On an RTU bus it is the broadcast address, and a read of it gets no answer. |
+| `rate_limit` | `20` | requests per second, a positive integer |
+
+The serial fields are refused on `tcp` and `rtuovertcp` (`only for rtu`), and `host` and `port` on `rtu`.
+There is one connection per input and one request in flight on it; the driver sets the unit before each
+request. Put every device of a serial line in one input: a serial port belongs to one input. Stopping an
+input, for a reload or a shutdown, waits for its request in flight, so a very long `timeout` delays a
+reload by as much.
+
+**Points.** `read` must be `{poll: <duration>}`: `subscribe` and `event` are refused. `type` is required.
+`unit` and `priority` work as for any driver. The `address` is
+`<area>:<offset>[#<registers>][@<unit>]`:
+
+| Part | Meaning |
+|---|---|
+| `<area>` | `hr` holding registers (function 3), `ir` input registers (4), `co` coils (1), `di` discrete inputs (2) |
+| `<offset>` | 0 to 65535, **zero-based**: the offset is what travels on the wire |
+| `#<registers>` | the length of a `string` in registers, 1 to 125; only for `string`, and required there |
+| `@<unit>` | 0 to 255, overrides the connection's `unit_id` for this point |
+
+Documentation and vendor tools often use the legacy five-digit notation, which is one-based and carries
+the area in its first digit. Convert it by dropping that digit and subtracting 1: `40011` is `hr:10`,
+`30001` is `ir:0`, `00001` is `co:0`, `10001` is `di:0`. A device manual that already gives the offset
+"on the wire" or "protocol address" gives the number to use as is. The driver does not accept the legacy
+form (`address: want <area>:<offset>[#<registers>][@<unit>]`).
+
+**Types.** The point's `type` fixes the registers it occupies; the point must fit before offset 65535.
+
+| `type` | Area | Registers | Value |
+|---|---|---|---|
+| `bool` | `co`, `di` only | 1 bit | boolean |
+| `int16`, `uint16` | `hr`, `ir` | 1 | integer |
+| `int32`, `uint32` | `hr`, `ir` | 2 | integer |
+| `float32` | `hr`, `ir` | 2 | float |
+| `int64`, `uint64` | `hr`, `ir` | 4 | integer |
+| `float64` | `hr`, `ir` | 4 | float |
+| `string` | `hr`, `ir` | the `#n` of the address | string |
+
+A signed type sign-extends (`0xFFFB` as `int16` is -5). A `uint64` above 9223372036854775807 cannot be
+carried (integer values are 64-bit signed) and a float that is not finite (NaN, infinity) is no value:
+each is a `bad` sample (read error kind `decode`). A `string` is the register bytes, high byte first
+within each register, up to the first NUL; invalid UTF-8 is a `bad` sample too. Its `byte_order` is
+ignored.
+
+**Byte order.** `byte_order` is `ABCD` (the default), `CDAB`, `BADC` or `DCBA`. Read a 32-bit number as
+its four bytes A (the most significant) to D; the name is the order in which the device sends them. It is
+two independent swaps:
+
+| `byte_order` | Bytes inside each register | Register order | Meaning |
+|---|---|---|---|
+| `ABCD` | as sent | high word first | big-endian, the Modbus default |
+| `CDAB` | as sent | low word first | words swapped, common on PLCs |
+| `BADC` | swapped | high word first | bytes swapped inside each word |
+| `DCBA` | swapped | low word first | little-endian |
+
+A 16-bit type is one register, so only the byte swap matters (`BADC` and `DCBA` swap its two bytes, `ABCD`
+and `CDAB` keep them). For 64 bits, low word first reverses all four registers. If a value is wrong by
+a huge factor or looks like noise, try the other orders: the `float32` 21.5 is the registers
+`0x41AC 0x0000` in `ABCD` and `0x0000 0x41AC` in `CDAB`.
+
+**Blocks.** The driver does not read point by point. The points of one input with the same unit, area and
+`poll` interval are sorted by offset and merged into one request when their addresses are strictly
+contiguous or overlap. A gap of even one address starts a new block, so an address no point names is never
+read. A block holds at most 125 registers (`hr`, `ir`) or 2000 bits (`co`, `di`); a point that would
+cross the limit starts the next block and a point is never split. Points that overlap with different types
+(`float32` and its two `uint16`) share a block and are decoded from the same reply. Points with different
+intervals are read by different requests, at their own interval.
+
+Because a block is one request, one unmapped address fails the whole block: the device answers an
+exception and every point of the block is `bad` (below). Keep the points around an address the device does
+not map in separate blocks: leave a gap, or give them another interval.
+
+**Errors.** What the driver does with each answer, and whether the device counts as alive for
+`death_tolerance` (a successful exchange keeps it alive; `connected` and `read_errors` are in the health
+below):
+
+| Answer | Samples | Device | `read_errors` kind |
+|---|---|---|---|
+| values | `good` | alive | |
+| value that does not decode (`uint64` above the range, non-finite float, invalid UTF-8 string) | `bad` for that point, the others `good` | alive | `decode` |
+| exception 1, 2, 3, 4 or 8 (illegal function or address or value, device failure, parity error) | `bad` for every point of the block, carrying the zero of the point's kind (`false`, `""`, `0`) | alive: the device answered | `exception` |
+| exception 5 or 6 (acknowledge, device busy) | none; the block is read again at its next poll | alive | `exception` |
+| an exception code the driver does not know | none; the block is read again at its next poll | alive: the device answered | `exception` |
+| exception 10 or 11 (a gateway cannot reach the device) | none; the connection is kept | counts toward death: no successful read | `exception` |
+| no answer within `timeout` | none; the connection is kept and the next block is read on it | counts toward death | `timeout` |
+| on `rtu` and `rtuovertcp`, a frame that is not valid (bad CRC, another unit, short frame, protocol error) | none; the frame is dropped (after a bad CRC, a short frame or a header that cannot be read, the line is flushed), and the connection is kept | counts toward death | `connection` |
+| on `tcp`, an answer of another unit | none; the frame, read whole, is dropped and the connection is kept | counts toward death | `connection` |
+| on `tcp`, a short frame or a protocol error (a length the header cannot carry, an answer that does not match the request) | none; the rest of the frame may still be on the connection, so it is closed and opened again | counts toward death | `connection` |
+| connection refused, reset or closed, a write that fails, a serial port that fails | none; the connection is closed and opened again | counts toward death | `connection` |
+
+On `tcp`, a frame of another transaction (a late answer to an earlier request) or of another protocol is
+skipped without an error, and the driver keeps waiting for its own answer.
+
+The connection is closed and opened again only on such an I/O error, on a `tcp` short frame or protocol
+error, or when nothing has answered on it (no unit, not even a gateway exception) for `death_tolerance`: a
+dead gateway or a connection the network dropped without closing it. Reconnection waits an exponential
+backoff with jitter, from 1 second up to 1 minute. The wait starts again from 1 second after an answer of
+the device: values or an exception other than 10 and 11, which come from the gateway and leave the backoff
+as it is. An unreachable device is never a failing start: the agent starts, the input runs, and once
+`death_tolerance` passes without a successful read the devices of the input are reported dead; at the
+first successful read afterwards they are born again (a `birth` with their signals, then the samples). A
+device that always answers busy (5 or 6) counts as alive, so it is never reported dead.
+
+Requests are spaced by `rate_limit` (at most that many a second, across all blocks). The block that has
+waited longest is read first. When the reads fall behind their intervals, a block is read once and its
+next read is one interval after that read: no backlog builds up.
+
+**Shared line or gateway.** On a serial line, or behind a gateway, several units share the input's one
+connection. A unit that does not answer only times out its own blocks: the other units keep being read at
+their intervals, and only the silent unit's devices are reported dead after `death_tolerance`. The
+connection is reopened only on an I/O error (on `tcp` also a short frame or a protocol error) or when no
+unit has answered for `death_tolerance`. Meanwhile `connected` stays true and `read_errors` `timeout`
+grows by one at every poll of each block of the silent unit. Each of those polls holds the line for
+`timeout`, which delays the reads of the other units: on a shared line keep `timeout` short, but on `rtu`
+and `rtuovertcp` never below the limit that follows.
+
+**Choosing `timeout`.** `timeout` covers the whole exchange: the request, the device's turnaround and the
+answer.
+
+- On `tcp` it can be short: an answer that arrives after `timeout` is recognised by its transaction id and
+  skipped. A timeout that cuts an answer in the middle leaves its rest on the connection, which is kept:
+  the next exchange then usually ends in a protocol error, which reopens it, or nothing answers until
+  `death_tolerance` reopens it.
+- On `rtu` and `rtuovertcp` set `timeout` above the slowest unit's answer time for its largest block, at
+  the line's baud rate. RTU frames carry no transaction id, and the line is not flushed before a request
+  nor after a timeout: an answer that arrives after `timeout` stays on the line (the serial port, or the
+  gateway's TCP connection for `rtuovertcp`) and is read as the answer of the next request. When that
+  request goes to the same unit with the same function and length, nothing detects it: the block gets
+  the late values of the previous one, and a unit that is always that slow shifts its values by one
+  request at every poll. Any other mismatch is dropped and counted under `connection`.
+- The arithmetic: a byte takes 10 or 11 bit times on the line (start, 8 data, parity or a second stop bit
+  when set, stop); count 11, about 1.15 ms a byte at 9600 baud. A full block of 125 registers is answered
+  in 255 bytes, about 290 ms at 9600 baud (145 ms at 19200), to which add the 8-byte request (about 9 ms
+  at 9600 baud) and the device's turnaround from its manual. The default `1s` covers a full block at 9600
+  baud with a turnaround of up to about 700 ms.
+
+**Serial port.** For `rtu` the port is opened when the input starts, as the one local resource the driver
+needs: a port that cannot be opened (wrong path, no permission) fails the start with `cannot open the
+serial port` (the path is not repeated), so the document is `rolled_back` and the previous one keeps
+running. On Linux the user running the agent usually needs the `dialout` group (or the group that owns
+the device). A port that fails later is opened again in the background, like a lost network connection.
+`config validate` checks the serial fields but cannot open the port; `probe` opens it itself: stop the
+agent before probing an `rtu` input, because both would read the same port and corrupt each other's
+frames (on Windows the second open is refused). For the same reason two inputs must never name the same
+`device`: on Linux both opens succeed and the two inputs corrupt each other's frames. A real serial port
+is not exercised by the automated tests (see "Known limits of this build"); `rtuovertcp` is.
+
+**Health.** `/status` shows, for the input, `connected` (true while the connection to the device is up)
+and `read_errors` (the counts since the input was last started, always the four kinds `timeout`,
+`connection`, `exception` and `decode`, at 0 until the first error). The counts restart from 0 when the
+input is started again: when its configuration changes, or when a rollback restores the previous
+document; the Prometheus functions `rate()` and `increase()` handle such counter resets. The metrics are
+`laraplate_edge_input_connected` and `laraplate_edge_input_read_errors_total`
+([USAGE.md](USAGE.md#metrics)). Values and connection settings (host, port, device path) are never
+written to the logs at `info` and above.
 
 ## Transforms
 
@@ -323,7 +498,7 @@ Outcomes, as reported to Laraplate:
 
 | Part | Comes with |
 |---|---|
-| drivers other than `simulated` | the driver plans, in the design's order: `opcua` and `modbus`, then `mqtt`, `serial` and `file` |
+| drivers other than `simulated` and `modbus` | the driver plans, in the design's order: `opcua`, then `mqtt`, `serial` and `file` |
 | output types other than `laraplate-http` | the MQTT output plan (`laraplate-mqtt`) and the plugin plan (`plugin:<id>`) |
 | `plugins`, `plugin:<id>` drivers and outputs | the plugin plan (design section 8) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
@@ -383,6 +558,14 @@ is exact, but its `ts` range can span records that are still in the buffer.
 
 ## Known limits of this build
 
+- A real serial port is not exercised by the automated tests: the `modbus` `rtu` transport is covered
+  through a fake client, and the RTU framing through `rtuovertcp` against a test server. Try a new serial
+  line with `probe` before relying on it.
+- On `modbus` `rtu` and `rtuovertcp`, an answer that arrives after `timeout` stays on the line and is read
+  by the next request; when that request goes to the same unit with the same function and length, the
+  late values are taken as its answer and nothing detects it. Keep `timeout` above the slowest unit's
+  answer time for its largest block (about 290 ms for 125 registers at 9600 baud, plus the device's
+  turnaround; "Choosing `timeout`" under the `modbus` driver).
 - No custom CA bundle: HTTPS trusts the system roots only, so a network that inspects TLS cannot be
   used yet.
 - A component left `failed` by a rollback is not retried until a new document is applied.

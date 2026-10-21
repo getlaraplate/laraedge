@@ -16,6 +16,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/input/modbus"
 	"github.com/getlaraplate/laraedge/internal/input/simulated"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/provider"
@@ -170,6 +171,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 func inputDrivers(boot bootstrap.File, extra map[string]input.Factory) map[string]input.Factory {
 	drivers := map[string]input.Factory{
 		config.DriverSimulated: simulated.Factory(configBaseDir(boot)),
+		config.DriverModbus:    modbus.Factory(),
 	}
 	maps.Copy(drivers, extra)
 

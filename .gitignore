@@ -12,6 +12,7 @@ coverage.*
 # Local runtime data (data_dir, bootstrap with secret references)
 /data/
 /examples/simulated/data/
+/examples/modbus/data/
 /bootstrap.local.yaml
 
 # Environment and secrets

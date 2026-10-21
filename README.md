@@ -14,11 +14,11 @@ Shop-floor edge agent for the Laraplate MES. It reads machines, probes, operator
 measurement files, and delivers their samples to Laraplate over the `laraplate-machine/1` protocol
 (HTTP or MQTT) without losing data across network outages, restarts or power loss.
 
-The agent core is built: the `simulated` input driver, the `laraplate-http` output, a durable disk
-buffer per output with loss markers, versioned configuration from a local file or from Laraplate, a
+The agent core is built: the `simulated` and `modbus` (TCP, RTU, RTU over TCP) input drivers, the
+`laraplate-http` output, a durable disk buffer per output with loss markers, versioned configuration from a local file or from Laraplate, a
 local status endpoint with Prometheus metrics, JSON logs and the systemd watchdog. The level-1
-transforms of points are built too, with `probe` and `config test` to try them offline. Real drivers,
-derived signals, the MQTT output, plugins and packages come with later plans. The design lives in the
+transforms of points are built too, with `probe` and `config test` to try them offline. The other real
+drivers, derived signals, the MQTT output, plugins and packages come with later plans. The design lives in the
 Laraplate stack: `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
 - [docs/USAGE.md](docs/USAGE.md): build, run, bootstrap file, signals, `probe` and `config test`, status
