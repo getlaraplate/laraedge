@@ -37,10 +37,18 @@ type Options struct {
 	Expired bool
 	// Bulk is the number of Int32 variables in the folder Bulk (none when 0).
 	Bulk int
+	// Proxied puts a TCP proxy in front of the server: URL is then the
+	// proxy's address, and Down, Up and Drop simulate a lost network. The
+	// server advertises the proxy's URL among its endpoints, as a server
+	// behind a NAT does: it answers endpoint discovery only for the URL the
+	// client dialled.
+	Proxied bool
 }
 
 // Server is a running test server with the policies None and Basic256Sha256
-// (Sign and SignAndEncrypt) and anonymous authentication. Its nodes, in
+// (Sign and SignAndEncrypt) and anonymous authentication. SetValue changes a
+// variable; with Options.Proxied, Drop, Down and Up simulate a lost network.
+// Its nodes, in
 // Namespace below the namespace's Objects folder:
 //
 //	temp   Double variable
@@ -61,6 +69,10 @@ type Server struct {
 	Thumbprint string
 	// NamespaceIndex is the index of Namespace on the server.
 	NamespaceIndex uint16
+
+	ns    *server.NodeNameSpace
+	proxy *proxy
+	port  int
 }
 
 // SilenceLibraryLogs discards the standard log package output, through which
@@ -140,7 +152,7 @@ func Start(t testing.TB, opts Options) *Server {
 	port := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
 
-	srv := server.New(
+	serverOpts := []server.Option{
 		server.EnableSecurity("None", ua.MessageSecurityModeNone),
 		server.EnableSecurity("Basic256Sha256", ua.MessageSecurityModeSign),
 		server.EnableSecurity("Basic256Sha256", ua.MessageSecurityModeSignAndEncrypt),
@@ -148,7 +160,21 @@ func Start(t testing.TB, opts Options) *Server {
 		server.EndPoint("127.0.0.1", port),
 		server.PrivateKey(keys.key),
 		server.Certificate(cert),
-	)
+	}
+
+	var front *proxy
+	if opts.Proxied {
+		if front, err = newProxy(); err != nil {
+			t.Fatalf("opcuatest: proxy: %v", err)
+		}
+
+		front.setTarget(addr(port))
+		t.Cleanup(front.close)
+
+		serverOpts = append(serverOpts, server.EndPoint("127.0.0.1", front.port()))
+	}
+
+	srv := server.New(serverOpts...)
 
 	root, err := srv.Namespace(0)
 	if err != nil {
@@ -171,12 +197,74 @@ func Start(t testing.TB, opts Options) *Server {
 		cancel()
 	})
 
+	endpoint := port
+	if front != nil {
+		endpoint = front.port()
+	}
+
 	return &Server{
-		URL:            "opc.tcp://127.0.0.1:" + strconv.Itoa(port),
+		URL:            "opc.tcp://127.0.0.1:" + strconv.Itoa(endpoint),
 		Cert:           cert,
 		Thumbprint:     hex.EncodeToString(uapolicy.Thumbprint(cert)),
 		NamespaceIndex: ns.ID(),
+		ns:             ns,
+		proxy:          front,
+		port:           port,
 	}
+}
+
+// SetValue changes the value of the variable name of Namespace and notifies
+// its subscribers. Its Go type must be the variable's (float64 for a
+// Double, int32 for an Int32, string, bool).
+func (s *Server) SetValue(t testing.TB, name string, value any) {
+	t.Helper()
+
+	id := ua.NewStringNodeID(s.ns.ID(), name)
+	if status := s.ns.SetAttribute(id, ua.AttributeIDValue, server.DataValueFromValue(value)); status != ua.StatusOK {
+		t.Fatalf("opcuatest: set %s: %v", name, status)
+	}
+}
+
+// Drop closes every live connection through the proxy; new ones are still
+// accepted. It needs Options.Proxied.
+func (s *Server) Drop(t testing.TB) {
+	t.Helper()
+
+	if s.proxy == nil {
+		t.Fatal("opcuatest: Drop needs Options.Proxied")
+	}
+
+	s.proxy.drop()
+}
+
+// Down makes the server unreachable through the proxy: the live connections
+// are dropped and the new ones closed at once, as a server that stopped. It
+// needs Options.Proxied.
+func (s *Server) Down(t testing.TB) {
+	t.Helper()
+
+	if s.proxy == nil {
+		t.Fatal("opcuatest: Down needs Options.Proxied")
+	}
+
+	closed, err := freePort()
+	if err != nil {
+		t.Fatalf("opcuatest: free port: %v", err)
+	}
+
+	s.proxy.setTarget(addr(closed))
+	s.proxy.drop()
+}
+
+// Up makes the server reachable again after Down.
+func (s *Server) Up(t testing.TB) {
+	t.Helper()
+
+	if s.proxy == nil {
+		t.Fatal("opcuatest: Up needs Options.Proxied")
+	}
+
+	s.proxy.setTarget(addr(s.port))
 }
 
 func buildNodes(ns *server.NodeNameSpace, opts Options) {
