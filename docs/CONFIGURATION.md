@@ -210,11 +210,13 @@ needs: a port that cannot be opened (wrong path, no permission) fails the start 
 previous one keeps running. On Linux the user running the agent usually needs the `dialout` group (or
 the group that owns the device). A port that fails later is opened again in the background, like a lost
 network connection. `config validate` checks the serial fields but cannot open the port; `probe` opens it
-itself, so while a running agent holds the port the probe fails. A real serial port is not exercised by
+itself: stop the agent before probing an `rtu` input, because both would read the same port and corrupt each
+other's frames (on Windows the second open is refused). A real serial port is not exercised by
 the automated tests (see "Known limits of this build"); `rtuovertcp` is.
 
 **Health.** `/status` shows, for the input, `connected` (true while the connection to the device is up) and
-`read_errors` (the counts by kind since the agent started, omitted until the first error). The metrics are
+`read_errors` (the counts since the agent started, always the four kinds `timeout`, `connection`, `exception`
+and `decode`, at 0 until the first error). The metrics are
 `laraplate_edge_input_connected` and `laraplate_edge_input_read_errors_total` ([USAGE.md](USAGE.md#metrics)).
 Values and connection settings (host, port, device path) are never written to the logs at `info` and above.
 
