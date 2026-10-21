@@ -13,5 +13,6 @@ require (
 
 require (
 	github.com/goburrow/serial v0.1.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )
