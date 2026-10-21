@@ -195,18 +195,23 @@ below):
 | an exception code the driver does not know | none; the block is read again at its next poll | alive: the device answered | `exception` |
 | exception 10 or 11 (a gateway cannot reach the device) | none; the connection is kept | counts toward death: no successful read | `exception` |
 | no answer within `timeout` | none; the connection is kept and the next block is read on it | counts toward death | `timeout` |
-| a frame that is not valid (bad CRC, wrong unit or transaction, short frame, protocol error) | none; the frame is skipped or the line flushed, and the connection is kept | counts toward death | `connection` |
+| on `rtu` and `rtuovertcp`, a frame that is not valid (bad CRC, another unit, short frame, protocol error) | none; the frame is dropped (after a bad CRC, a short frame or a header that cannot be read, the line is flushed), and the connection is kept | counts toward death | `connection` |
+| on `tcp`, an answer of another unit | none; the frame, read whole, is dropped and the connection is kept | counts toward death | `connection` |
+| on `tcp`, a short frame or a protocol error (a length the header cannot carry, an answer that does not match the request) | none; the rest of the frame may still be on the connection, so it is closed and opened again | counts toward death | `connection` |
 | connection refused, reset or closed, a write that fails, a serial port that fails | none; the connection is closed and opened again | counts toward death | `connection` |
 
-The connection is closed and opened again only on such an I/O error, or when nothing has answered on it
-(no unit, not even a gateway exception) for `death_tolerance`: a dead gateway or a connection the network
-dropped without closing it. Reconnection waits an exponential backoff with jitter, from 1 second up to 1
-minute. The wait starts again from 1 second after an answer of the device: values or an exception other
-than 10 and 11, which come from the gateway and leave the backoff as it is. An unreachable device is
-never a failing start: the agent starts, the input runs, and once `death_tolerance` passes without a
-successful read the devices of the input are reported dead; at the first successful read afterwards they
-are born again (a `birth` with their signals, then the samples). A device that always answers busy (5 or
-6) counts as alive, so it is never reported dead.
+On `tcp`, a frame of another transaction (a late answer to an earlier request) or of another protocol is
+skipped without an error, and the driver keeps waiting for its own answer.
+
+The connection is closed and opened again only on such an I/O error, on a `tcp` short frame or protocol
+error, or when nothing has answered on it (no unit, not even a gateway exception) for `death_tolerance`: a
+dead gateway or a connection the network dropped without closing it. Reconnection waits an exponential
+backoff with jitter, from 1 second up to 1 minute. The wait starts again from 1 second after an answer of
+the device: values or an exception other than 10 and 11, which come from the gateway and leave the backoff
+as it is. An unreachable device is never a failing start: the agent starts, the input runs, and once
+`death_tolerance` passes without a successful read the devices of the input are reported dead; at the
+first successful read afterwards they are born again (a `birth` with their signals, then the samples). A
+device that always answers busy (5 or 6) counts as alive, so it is never reported dead.
 
 Requests are spaced by `rate_limit` (at most that many a second, across all blocks). The block that has
 waited longest is read first. When the reads fall behind their intervals, a block is read once and its
@@ -215,10 +220,31 @@ next read is one interval after that read: no backlog builds up.
 **Shared line or gateway.** On a serial line, or behind a gateway, several units share the input's one
 connection. A unit that does not answer only times out its own blocks: the other units keep being read at
 their intervals, and only the silent unit's devices are reported dead after `death_tolerance`. The
-connection is reopened only on an I/O error or when no unit has answered for `death_tolerance`. Meanwhile
-`connected` stays true and `read_errors` `timeout` grows by one at every poll of each block of the silent
-unit. Each of those polls holds the line for `timeout`, which delays the reads of the other units: on a
-shared line keep `timeout` short (a few hundred milliseconds is usually enough for a serial device).
+connection is reopened only on an I/O error (on `tcp` also a short frame or a protocol error) or when no
+unit has answered for `death_tolerance`. Meanwhile `connected` stays true and `read_errors` `timeout`
+grows by one at every poll of each block of the silent unit. Each of those polls holds the line for
+`timeout`, which delays the reads of the other units: on a shared line keep `timeout` short, but on `rtu`
+and `rtuovertcp` never below the limit that follows.
+
+**Choosing `timeout`.** `timeout` covers the whole exchange: the request, the device's turnaround and the
+answer.
+
+- On `tcp` it can be short: an answer that arrives after `timeout` is recognised by its transaction id and
+  skipped. A timeout that cuts an answer in the middle leaves its rest on the connection, which is kept:
+  the next exchange then usually ends in a protocol error, which reopens it, or nothing answers until
+  `death_tolerance` reopens it.
+- On `rtu` and `rtuovertcp` set `timeout` above the slowest unit's answer time for its largest block, at
+  the line's baud rate. RTU frames carry no transaction id, and the line is not flushed before a request
+  nor after a timeout: an answer that arrives after `timeout` stays on the line (the serial port, or the
+  gateway's TCP connection for `rtuovertcp`) and is read as the answer of the next request. When that
+  request goes to the same unit with the same function and length, nothing detects it: the block gets
+  the late values of the previous one, and a unit that is always that slow shifts its values by one
+  request at every poll. Any other mismatch is dropped and counted under `connection`.
+- The arithmetic: a byte takes 10 or 11 bit times on the line (start, 8 data, parity or a second stop bit
+  when set, stop); count 11, about 1.15 ms a byte at 9600 baud. A full block of 125 registers is answered
+  in 255 bytes, about 290 ms at 9600 baud (145 ms at 19200), to which add the 8-byte request (about 9 ms
+  at 9600 baud) and the device's turnaround from its manual. The default `1s` covers a full block at 9600
+  baud with a turnaround of up to about 700 ms.
 
 **Serial port.** For `rtu` the port is opened when the input starts, as the one local resource the driver
 needs: a port that cannot be opened (wrong path, no permission) fails the start with `cannot open the
@@ -535,6 +561,11 @@ is exact, but its `ts` range can span records that are still in the buffer.
 - A real serial port is not exercised by the automated tests: the `modbus` `rtu` transport is covered
   through a fake client, and the RTU framing through `rtuovertcp` against a test server. Try a new serial
   line with `probe` before relying on it.
+- On `modbus` `rtu` and `rtuovertcp`, an answer that arrives after `timeout` stays on the line and is read
+  by the next request; when that request goes to the same unit with the same function and length, the
+  late values are taken as its answer and nothing detects it. Keep `timeout` above the slowest unit's
+  answer time for its largest block (about 290 ms for 125 registers at 9600 baud, plus the device's
+  turnaround; "Choosing `timeout`" under the `modbus` driver).
 - No custom CA bundle: HTTPS trusts the system roots only, so a network that inspects TLS cannot be
   used yet.
 - A component left `failed` by a rollback is not retried until a new document is applied.
