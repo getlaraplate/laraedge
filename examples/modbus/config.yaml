@@ -1,0 +1,64 @@
+# Configuration document of the Modbus demo: one modbus input reading a PLC
+# over Modbus TCP, sent to a Laraplate running on this machine. The token is
+# read from the environment of the agent: export LARAPLATE_EDGE_TOKEN before
+# running it. Adjust host, port, unit_id and every address to your device:
+# offsets are zero-based (docs/CONFIGURATION.md, "The modbus driver").
+#
+# Check it offline, then read every point once from the real device:
+#   laraplate-edge config validate config.yaml
+#   laraplate-edge probe plc-line --config config.yaml
+
+schema: laraplate-edge-config/1
+version: 1
+
+inputs:
+  - id: plc-line
+    driver: modbus
+    # No successful read for this long and the devices are reported dead; the
+    # first successful read after that is a birth.
+    death_tolerance: 15s
+    connection:
+      transport: tcp          # tcp, rtu or rtuovertcp
+      host: 192.168.10.20
+      port: 502               # default
+      unit_id: 1              # default unit of the points
+      timeout: 1s             # one request, default 1s
+      rate_limit: 20          # requests per second, default 20
+      # For a serial line use instead:
+      #   transport: rtu
+      #   device: /dev/ttyUSB0
+      #   baud: 19200          # required for rtu
+      #   parity: even         # none (default), even or odd
+    devices:
+      - device: press-07
+        points:
+          # <area>:<offset>[#<registers>][@<unit>]. hr is holding registers
+          # (legacy 4xxxx), ir input registers (3xxxx), co coils (0xxxx), di
+          # discrete inputs (1xxxx). Legacy 40011 is hr:10.
+          - {signal: state_word, address: "hr:0", type: uint16, read: {poll: 1s}, priority: critical}
+          # Two registers: a float32 whose device sends the low word first.
+          - {signal: press_force, address: "ir:100", type: float32, byte_order: CDAB, unit: kN, read: {poll: 500ms}, priority: bulk}
+          # The same registers, scaled from kN to N, sent only when the force
+          # moves by at least 2000 N (the deadband is applied to the scaled value).
+          - signal: press_force_n
+            address: "ir:100"
+            type: float32
+            byte_order: CDAB
+            unit: N
+            read: {poll: 500ms}
+            priority: bulk
+            transforms: [{scale: 1000}, {deadband: 2000}]
+          # Four registers of text, two characters each, up to the first NUL.
+          - {signal: recipe, address: "hr:20#4", type: string, read: {poll: 10s}, priority: critical}
+          # A coil.
+          - {signal: running, address: "co:0", type: bool, read: {poll: 1s}, priority: critical}
+      - device: furnace-02
+        points:
+          # The same input, another unit of the gateway: @2 overrides unit_id.
+          - {signal: temperature, address: "ir:0@2", type: int16, unit: C, read: {poll: 2s}, priority: bulk}
+
+outputs:
+  - id: laraplate
+    type: laraplate-http
+    url: http://127.0.0.1:8000
+    token: secret://env/LARAPLATE_EDGE_TOKEN

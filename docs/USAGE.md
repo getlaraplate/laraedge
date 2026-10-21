@@ -4,10 +4,10 @@ This guide is for whoever builds, installs and runs the agent. The configuration
 outputs, buffer) is described in [CONFIGURATION.md](CONFIGURATION.md). The design is in the stack:
 `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
-What this build provides: the `simulated` input driver, the level-1 transforms of points, the
+What this build provides: the `simulated` and `modbus` input drivers, the level-1 transforms of points, the
 `laraplate-http` output, the disk buffer with loss markers, the `file` and `laraplate` configuration
 providers, the `probe` and `config test` commands, the status endpoint, JSON logs and the systemd
-watchdog. Real drivers, derived signals (CEL), the MQTT output, plugins, the OS keystore and packages
+watchdog. The other real drivers, derived signals (CEL), the MQTT output, plugins, the OS keystore and packages
 come with later plans (see "What this build refuses" in CONFIGURATION.md).
 
 ## Build
@@ -191,6 +191,13 @@ response time: 3µs
   `float`, `string`), quality; then the total response time. `probe` never starts the input, an output or
   the status endpoint. It opens its own connection to the machine, beside a running agent's.
 - `--record <file>` also writes the samples, as a sample file (below), atomically.
+- A `modbus` input is probed through a connection of its own, beside a running agent's: it reads every
+  block once and prints one line per point. A `bad` sample appears for the points of a block the device
+  refused with exceptions 1 to 4 (an unmapped address, for one) and for a value that does not decode.
+  The probe stops with an error, and exit code 1, when the device cannot be reached, does not answer
+  within `timeout`, answers busy (exception 5 or 6) or sits behind a gateway that fails (10 or 11);
+  try again for a busy device. On `rtu` the probe opens the serial port itself, so it fails while a
+  running agent holds it: stop the agent first.
 - An input id the document does not have exits 1 with the ids it has.
 
 **`config test <file> --input <samples.jsonl>`** replays recorded samples through the transform chains
@@ -240,7 +247,7 @@ Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
 |---|---|
 | `/healthz` | `200 ok` while the process serves; never needs the token |
 | `/readyz` | `200 {"ready":true}` once a configuration is applied and every input runs; otherwise `503 {"ready":false,"reason":"..."}` |
-| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds`, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
+| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`, and for an input that reports its health, such as `modbus`, `connected` and `read_errors`, the counts by kind since the agent started, left out until the first error) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds`, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
 | `/metrics` | Prometheus text format 0.0.4, below |
 
 With `status_token` set, every path but `/healthz` needs `Authorization: Bearer <token>`. The endpoint
@@ -256,6 +263,8 @@ Every name starts with `laraplate_edge_`.
 |---|---|---|---|
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
+| `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down |
+| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the agent started, by `kind`: `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception), `decode` (a value that does not decode); all four series exist from the start, at 0 |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_buffer_records` | gauge | `output`, `priority` | records not yet confirmed |
 | `laraplate_edge_buffer_bytes` | gauge | `output`, `priority` | bytes of the queue on disk |
@@ -267,7 +276,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_clock_offset_seconds` | gauge | `output` | backend clock minus agent clock, from the `Date` header of the last response |
 | `laraplate_edge_last_error_timestamp_seconds` | gauge | `output` | Unix time of the output's last error, 0 when none; the text is in `/status` |
 
-The buffer series and the drop counters exist only for outputs that run (a `failed` output has no open
+The connection and read error series exist only for inputs that report their health (`modbus`, not `simulated`). The buffer series and the drop counters exist only for outputs that run (a `failed` output has no open
 buffer). Counters restart from 0 when the agent restarts.
 
 ## Logs
@@ -346,6 +355,10 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `WARN` "the agent clock differs from the backend's; check NTP" | offset above 2 seconds | fix NTP on the gateway; `laraplate_edge_clock_offset_seconds` shows the offset |
 | `WARN` "the backend refused the agent token or its permissions" (provider) | `401`/`403` on the configuration route | as for the output; the provider tries again at the next poll |
 | `INFO` "the backend has no active configuration for this agent" | `404`: nothing published for the source | publish a configuration on the source page in Laraplate |
+| `/status` `connected` false for a `modbus` input, `read_errors` `connection` or `timeout` growing, devices reported dead after `death_tolerance` | the agent cannot reach the device or gets no answer | check from the gateway: the `host` and `port` (the device may use another port than 502), the cable and the firewall between the two, that no other master holds a device that accepts one TCP client (many PLCs do), and the `unit_id`; for a serial-to-Ethernet gateway, its serial settings and the `unit_id` of the device behind it. Try `probe` for the exact failure. The agent reconnects on its own with backoff up to 1 minute and reports the devices born again at the first successful read. |
+| a `modbus` block always `bad`, `read_errors` `exception` growing | the device refuses the request with exception 1 to 4: usually one address of the block is not mapped, or the area is wrong (`hr` for `ir`) | a block is one request, so a single unmapped address fails all its points. Split the points around the unmapped address (leave a gap of at least one address between them, or give them another `poll` interval) and check the area and the offset in the device manual. `probe` shows which points are `bad`. |
+| a `modbus` value is wrong, a huge number or noise | the byte order or the offset is wrong | try the other `byte_order` values (a `float32` from a PLC is often `CDAB`); offsets are zero-based, so the legacy `40011` is `hr:10`; a point read one register off pairs unrelated words. Check with `probe`. A `decode` error is a value that cannot be carried (`uint64` above 9223372036854775807, NaN or infinity, a string that is not UTF-8). |
+| the document is `rolled_back` with `cannot open the serial port` | the `rtu` input could not open the port: wrong `device` path, the port is in use (another process, or `probe` or another agent), or the user has no permission | check the path (`ls -l /dev/ttyUSB0`, adapters change number when replugged: prefer `/dev/serial/by-id/...`), and that the agent's user belongs to the group that owns the port (`dialout` on most Linux distributions). |
 | `/readyz` `503` "input ... is failed" | an input could not start again during a rollback | see its `last_error`; it is retried only when a new document is applied |
 | start fails with `data_dir ... has format N, newer than this agent supports` | the data directory was written by a newer agent | run the newer agent; an older one never rewrites a newer layout |
 | `ERROR` "buffer: corrupt record inside a segment, dropped the rest of the segment" (or "... inside an evicted segment ..."), `corrupt_records` grows | a record of the output buffer failed its checksum or could not be read back: a disk fault, bit rot, a file changed by hand. It is found at start or while the agent runs. | nothing for the agent: it drops the rest of that segment (at most 16 MiB of that queue), counts it and keeps sending; the log line names the queue, the segment and the offset, never a value. The gap has no loss marker (the protocol has no reason for it), so the backend does not see it: check the disk (kernel log, SMART, file system). |
@@ -388,7 +401,11 @@ left), the `laraplate` provider applying version 1, then version 2, reporting bo
 `press_force`), whose samples are checked against companion points without a chain and whose births
 announce the chains' data types. It checks that `source_seq` has no gap and is never reused, that every
 resend is byte-identical, that the simulated counters arrive as 0, 1, 2, ... with nothing lost or
-repeated, and that the four status endpoints answer. It is not part of `go test ./...`; CI runs it in
+repeated, and that the four status endpoints answer. A separate run has a `modbus` input read the Modbus TCP server
+of the Go library, started by the test: it checks the decoded values (a `float32` in byte order `CDAB`, a
+negative `int16`, a string, a coil, a unit override, a transform chain), the births, that no write is ever
+sent, the death of both devices after the death tolerance when the server stops, `connected` and
+`read_errors` in `/status` and the metrics, and the births and data again when the server is back. It is not part of `go test ./...`; CI runs it in
 its own job on Linux amd64.
 
 ## Running against a local Laraplate
