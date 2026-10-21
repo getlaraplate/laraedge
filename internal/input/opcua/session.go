@@ -112,10 +112,12 @@ func (t timings) watchdog(deathTolerance time.Duration) time.Duration {
 }
 
 // Limits of O5: limitUnknown when the server's limit is unreadable,
-// limitCap for "no limit" and as the upper bound of any limit.
+// limitCap for "no limit" and as the upper bound of any limit (ruling R6: a
+// larger request can exceed the server's maximum message size, which is a
+// ServiceFault).
 const (
 	limitUnknown = 100
-	limitCap     = 10000
+	limitCap     = 1000
 )
 
 // notifyBuffer is the size of the library's notification channel and of the
@@ -175,8 +177,14 @@ type dialDeps struct {
 	// Password resolves the password reference; called at every dial with a
 	// user name.
 	Password func(ctx context.Context) (string, error)
-	// OnLost is called once, from its own goroutine, when a dialled session
-	// loses its connection or its subscription; never after Close.
+	// OnLost is called at most once per session, from its own goroutine,
+	// when a dialled session loses its connection or its subscription; never
+	// for a dial that failed, and never for a loss detected after Close began.
+	// A loss detected just before or while Close runs may still call OnLost
+	// shortly after Close returned (Close does not wait for it: OnLost may
+	// itself call Close). So OnLost must not block, and the caller binds it to
+	// the session it dialled (a per-dial closure carrying a generation, say)
+	// and ignores a call for a session it already replaced.
 	OnLost func()
 	// Log receives the warning of O1 and debug details; nil discards.
 	Log *slog.Logger
@@ -385,7 +393,8 @@ func discoverWith(ctx context.Context, conn Connection, t timings, log *slog.Log
 // lossWatcher turns the library's states into one OnLost call. A loss counts
 // once the client was Connected and is reported once dial armed the watcher,
 // so a dial that fails reports nothing; Close sets closing first, so a
-// deliberate close reports nothing either.
+// deliberate close reports nothing either. A loss reported before closing was
+// set may still reach OnLost after Close returned (see dialDeps.OnLost).
 type lossWatcher struct {
 	onLost func()
 
@@ -422,13 +431,18 @@ func (w *lossWatcher) arm() {
 
 // fire calls OnLost on its own goroutine, at most once: the library calls
 // the state function from its own goroutines, which must never block on the
-// driver.
+// driver. The goroutine checks closing again, which narrows, but cannot
+// close, the window in which OnLost runs after Close.
 func (w *lossWatcher) fire() {
 	if !w.armed.Load() || w.closing.Load() || !w.fired.CompareAndSwap(false, true) {
 		return
 	}
 	if w.onLost != nil {
-		go w.onLost()
+		go func() {
+			if !w.closing.Load() {
+				w.onLost()
+			}
+		}()
 	}
 }
 
@@ -639,21 +653,29 @@ func connect(ctx context.Context, conn Connection, deps dialDeps, opts []opcua.O
 	return s, nil
 }
 
-// readLimits reads MaxNodesPerRead and MaxMonitoredItemsPerCall in one Read.
+// readLimits reads MaxNodesPerRead and MaxMonitoredItemsPerCall with one
+// single-node Read each (ruling R6: a server whose MaxNodesPerRead is 1 would
+// fault a two-node Read on every connect).
 func (s *uaSession) readLimits(ctx context.Context) error {
-	res, err := s.read(ctx, "read the limits", &ua.ReadRequest{
-		TimestampsToReturn: ua.TimestampsToReturnNeither,
-		NodesToRead: []*ua.ReadValueID{
-			{NodeID: ua.NewNumericNodeID(0, id.Server_ServerCapabilities_OperationLimits_MaxNodesPerRead), AttributeID: ua.AttributeIDValue},
-			{NodeID: ua.NewNumericNodeID(0, id.Server_ServerCapabilities_OperationLimits_MaxMonitoredItemsPerCall), AttributeID: ua.AttributeIDValue},
-		},
-	})
-	if err != nil {
-		return err
+	limits := make([]int, 2)
+
+	for i, nodeID := range []uint32{
+		id.Server_ServerCapabilities_OperationLimits_MaxNodesPerRead,
+		id.Server_ServerCapabilities_OperationLimits_MaxMonitoredItemsPerCall,
+	} {
+		res, err := s.read(ctx, "read the limits", &ua.ReadRequest{
+			TimestampsToReturn: ua.TimestampsToReturnNeither,
+			NodesToRead:        []*ua.ReadValueID{{NodeID: ua.NewNumericNodeID(0, nodeID), AttributeID: ua.AttributeIDValue}},
+		})
+		if err != nil {
+			return err
+		}
+
+		// read checked that there is one result per node.
+		limits[i] = limitValue(res.Results[0])
 	}
 
-	// read checked that there is one result per node.
-	s.maxRead, s.maxMonitored = limitValue(res.Results[0]), limitValue(res.Results[1])
+	s.maxRead, s.maxMonitored = limits[0], limits[1]
 
 	return nil
 }

@@ -483,8 +483,8 @@ func TestLimitsAreReadAfterConnect(t *testing.T) {
 	if maxRead, maxMonitored := s.Limits(); maxRead != 32 || maxMonitored != limitUnknown {
 		t.Fatalf("Limits() = %d, %d; want 32 (the server's MaxNodesPerRead) and %d (MaxMonitoredItemsPerCall is not on the test server)", maxRead, maxMonitored, limitUnknown)
 	}
-	if reads, _ := cc.sizes(); !slices.Equal(reads, []int{2}) {
-		t.Fatalf("limits read sizes = %v, want one request of two nodes", reads)
+	if reads, _ := cc.sizes(); !slices.Equal(reads, []int{1, 1}) {
+		t.Fatalf("limits read sizes = %v, want two single-node requests (ruling R6)", reads)
 	}
 }
 
@@ -793,6 +793,232 @@ func TestCloseDoesNotCallOnLost(t *testing.T) {
 	}
 }
 
+// stalledRead makes deps build the library client inside a wrapper that
+// signals each Read before sending it.
+func stalledRead(deps *dialDeps) <-chan struct{} {
+	started := make(chan struct{}, 16)
+	deps.newClient = func(endpoint string, opts []opcua.Option, onState func(opcua.ConnState)) (uaClient, error) {
+		inner, err := newLibraryClient(endpoint, opts, onState)
+		if err != nil {
+			return nil, err
+		}
+
+		return readSignal{uaClient: inner, started: started}, nil
+	}
+
+	return started
+}
+
+type readSignal struct {
+	uaClient
+
+	started chan struct{}
+}
+
+func (c readSignal) Read(ctx context.Context, req *ua.ReadRequest) (*ua.ReadResponse, error) {
+	select {
+	case c.started <- struct{}{}:
+	default:
+	}
+
+	return c.uaClient.Read(ctx, req)
+}
+
+func TestCloseWhileAReadIsInFlight(t *testing.T) {
+	srv := startTestServer(t)
+	deps, _ := testDeps(t)
+	slow := productionTimings
+	slow.Request = time.Minute // only Close can end the stalled Read
+	slow.Close = 200 * time.Millisecond
+	deps.timing = &slow
+	lost := newLossCounter(&deps)
+	started := stalledRead(&deps)
+
+	s := mustDial(t, noneConnection(srv.URL), deps)
+
+	ctx, cancel := context.WithTimeout(context.Background(), guard)
+	defer cancel()
+
+	ch, _, err := s.Subscribe(ctx, 50*time.Millisecond, []item{{Handle: 1, Node: srv.NodeID(nodeTemp), Sub: config.Subscribe{Sampling: config.SamplingDefault}}})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	for len(started) > 0 {
+		<-started
+	}
+
+	srv.Proxy.Stall()
+	defer srv.Proxy.Resume()
+
+	readErr := make(chan error, 1)
+
+	go func() {
+		_, err := s.Read(context.Background(), []*ua.NodeID{srv.NodeID(nodeTemp)})
+		readErr <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(guard):
+		t.Fatal("the Read did not start")
+	}
+
+	closed := make(chan struct{})
+
+	go func() {
+		s.Close()
+		close(closed)
+	}()
+
+	select {
+	case <-closed:
+	case <-time.After(guard):
+		t.Fatal("Close did not return while a Read was in flight")
+	}
+
+	select {
+	case err := <-readErr:
+		if !errors.Is(err, errClosed) {
+			t.Fatalf("in-flight Read = %v, want errClosed", err)
+		}
+	case <-time.After(guard):
+		t.Fatal("the in-flight Read did not return after Close")
+	}
+
+	timeout := time.After(guard)
+
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				if n := lost.calls.Load(); n != 0 {
+					t.Fatalf("OnLost called %d times by Close", n)
+				}
+
+				return
+			}
+		case <-timeout:
+			t.Fatal("the drain goroutine did not end: notification channel still open")
+		}
+	}
+}
+
+func TestOnLostNeverForAFailedDial(t *testing.T) {
+	deps, _ := testDeps(t)
+	lost := newLossCounter(&deps)
+	withFake(&deps, &fakeClient{lossOnConnect: true, failLimits: true})
+
+	ctx, cancel := context.WithTimeout(context.Background(), guard)
+	defer cancel()
+
+	if _, err := dial(ctx, noneConnection("opc.tcp://fake:4840"), deps); err == nil {
+		t.Fatal("dial succeeded with a failing limits read")
+	}
+
+	// The watcher is never armed, so no OnLost goroutine exists to wait for.
+	if n := lost.calls.Load(); n != 0 {
+		t.Fatalf("OnLost called %d times for a failed dial", n)
+	}
+}
+
+func TestOnLostAtMostOncePerSession(t *testing.T) {
+	deps, _ := testDeps(t)
+	lost := newLossCounter(&deps)
+	f := &fakeClient{}
+	withFake(&deps, f)
+
+	s := mustDial(t, noneConnection("opc.tcp://fake:4840"), deps)
+
+	ctx, cancel := context.WithTimeout(context.Background(), guard)
+	defer cancel()
+
+	ch, _, err := s.Subscribe(ctx, time.Second, fakeItems)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	f.publish(t, &opcua.PublishNotificationData{Value: &ua.StatusChangeNotification{Status: ua.StatusBadTimeout}})
+	lost.wait(t)
+
+	f.publish(t, &opcua.PublishNotificationData{Error: ua.StatusBadSubscriptionIDInvalid})
+	f.onState(opcua.Disconnected)
+	f.onState(opcua.Closed)
+
+	// The data change follows the second loss message, so both were handled.
+	f.publish(t, &opcua.PublishNotificationData{Value: &ua.DataChangeNotification{
+		MonitoredItems: []*ua.MonitoredItemNotification{{ClientHandle: 1, Value: &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(float64(3))}}},
+	}})
+	nextNotification(t, ch, 1, float64(3))
+
+	if n := lost.calls.Load(); n != 1 {
+		t.Fatalf("OnLost called %d times, want once per session", n)
+	}
+}
+
+// TestLateOnLostIsBoundToItsSession shows the documented window: a loss
+// detected before Close reaches OnLost after Close returned, and the caller
+// tells it apart by the generation its per-dial closure carries.
+func TestLateOnLostIsBoundToItsSession(t *testing.T) {
+	type call struct{ generation int }
+
+	calls := make(chan call, 4)
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+
+	onLost := func(generation int, hold bool) func() {
+		return func() {
+			if hold {
+				close(entered)
+				<-gate
+			}
+			calls <- call{generation: generation}
+		}
+	}
+
+	depsA, _ := testDeps(t)
+	depsA.OnLost = onLost(1, true)
+	fakeA := &fakeClient{}
+	withFake(&depsA, fakeA)
+	a := mustDial(t, noneConnection("opc.tcp://fake:4840"), depsA)
+
+	fakeA.onState(opcua.Disconnected)
+
+	select {
+	case <-entered:
+	case <-time.After(guard):
+		t.Fatal("OnLost of the first session did not start")
+	}
+
+	a.Close()
+
+	depsB, _ := testDeps(t)
+	depsB.OnLost = onLost(2, false)
+	withFake(&depsB, &fakeClient{})
+	mustDial(t, noneConnection("opc.tcp://fake:4840"), depsB)
+	current := 2
+
+	close(gate)
+
+	select {
+	case c := <-calls:
+		if c.generation == current {
+			t.Fatalf("the late OnLost carries the current generation %d", current)
+		}
+		if c.generation != 1 {
+			t.Fatalf("late OnLost generation = %d, want 1", c.generation)
+		}
+	case <-time.After(guard):
+		t.Fatal("the late OnLost never ran")
+	}
+
+	select {
+	case c := <-calls:
+		t.Fatalf("unexpected OnLost of generation %d", c.generation)
+	default:
+	}
+}
+
 func TestCurrentTimeTimesOutWhenTheProxyStalls(t *testing.T) {
 	srv := startTestServer(t)
 	deps, _ := testDeps(t)
@@ -823,6 +1049,10 @@ func TestCurrentTimeTimesOutWhenTheProxyStalls(t *testing.T) {
 type fakeClient struct {
 	panicAt string
 	onState func(opcua.ConnState)
+	// lossOnConnect reports Disconnected right after Connected; failLimits
+	// fails the limits read with a service error.
+	lossOnConnect bool
+	failLimits    bool
 
 	mu     sync.Mutex
 	notify chan<- *opcua.PublishNotificationData
@@ -833,6 +1063,9 @@ func (f *fakeClient) Connect(context.Context) error {
 		panic("injected connect panic")
 	}
 	f.onState(opcua.Connected)
+	if f.lossOnConnect {
+		f.onState(opcua.Disconnected)
+	}
 
 	return nil
 }
@@ -859,6 +1092,9 @@ func (f *fakeClient) Read(_ context.Context, req *ua.ReadRequest) (*ua.ReadRespo
 
 	if f.panicAt == "read" && !limits {
 		panic("injected read panic")
+	}
+	if f.failLimits && limits {
+		return nil, ua.StatusBadCommunicationError
 	}
 
 	return res, nil
@@ -1037,8 +1273,9 @@ func TestLimitValue(t *testing.T) {
 		{name: "uint32", dv: good(uint32(32)), want: 32},
 		{name: "int32", dv: good(int32(500)), want: 500},
 		{name: "uint16", dv: good(uint16(7)), want: 7},
-		{name: "zero is no limit", dv: good(uint32(0)), want: limitCap},
-		{name: "above the cap", dv: good(uint32(1_000_000)), want: limitCap},
+		{name: "zero is no limit", dv: good(uint32(0)), want: 1000},
+		{name: "above the cap", dv: good(uint32(1_000_000)), want: 1000},
+		{name: "at the cap", dv: good(uint32(1000)), want: 1000},
 		{name: "negative", dv: good(int32(-1)), want: limitUnknown},
 		{name: "float", dv: good(float64(32)), want: limitUnknown},
 		{name: "string", dv: good("32"), want: limitUnknown},
