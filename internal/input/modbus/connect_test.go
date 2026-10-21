@@ -23,6 +23,10 @@ type fakeLink struct {
 	openErr error
 	// readErrs are returned by the next reads, one each, before the values.
 	readErrs []error
+	// errsAt makes every read covering an address return its error.
+	errsAt map[uint16]error
+	// served lists the start address of every read that reached the link.
+	served []uint16
 	// gate, when set, makes Open wait until it is closed.
 	gate    chan struct{}
 	clients []*fakeClient
@@ -32,7 +36,7 @@ type fakeLink struct {
 }
 
 func newFakeLink() *fakeLink {
-	return &fakeLink{holding: map[uint16]uint16{}, opening: make(chan struct{}, 64)}
+	return &fakeLink{holding: map[uint16]uint16{}, errsAt: map[uint16]error{}, opening: make(chan struct{}, 64)}
 }
 
 func (l *fakeLink) newClient(Connection) (client, error) {
@@ -43,6 +47,14 @@ func (l *fakeLink) newClient(Connection) (client, error) {
 	l.clients = append(l.clients, c)
 
 	return c, nil
+}
+
+// servedAddrs returns the start addresses of the reads served so far.
+func (l *fakeLink) servedAddrs() []uint16 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return append([]uint16(nil), l.served...)
 }
 
 // built returns the clients built so far.
@@ -109,11 +121,15 @@ func (c *fakeClient) ReadRegisters(addr, quantity uint16, regType mbus.RegType) 
 		c.link.readErrs = c.link.readErrs[1:]
 		return nil, err
 	}
+	c.link.served = append(c.link.served, addr)
 	if regType != mbus.HOLDING_REGISTER {
 		return nil, mbus.ErrIllegalFunction
 	}
 	out := make([]uint16, 0, quantity)
 	for a := int(addr); a < int(addr)+int(quantity); a++ {
+		if err, ok := c.link.errsAt[uint16(a)]; ok {
+			return nil, err
+		}
 		v, ok := c.link.holding[uint16(a)]
 		if !ok {
 			return nil, mbus.ErrIllegalDataAddress

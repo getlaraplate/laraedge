@@ -15,24 +15,30 @@ import (
 
 // rtuServer serves a testDevice with RTU framing (unit, function, data,
 // CRC-16/Modbus) over TCP on a loopback port, as a serial-to-Ethernet gateway
-// does (decision M6): the library's server speaks Modbus TCP only. It serves
-// the four read functions; any other function code counts as a write and
-// ends the connection, since the server cannot frame it. Held requests of
-// the device are not supported: stop waits for the connections.
+// does (decision M6): the library's server speaks Modbus TCP only. With mbap
+// set it frames the same exchanges as Modbus TCP (MBAP header, no CRC)
+// instead. It serves the four read functions; any other function code counts
+// as a write and ends the connection, since the server cannot frame it. A
+// silenced unit never answers, as a unit that is off or missing on a shared
+// line, and the requests of the other units are still answered. Held
+// requests of the device are not supported: stop waits for the connections.
 type rtuServer struct {
 	t    *testing.T
 	dev  *testDevice
 	l    net.Listener
 	host string
 	port uint16
+	mbap bool
 
-	// badCRC corrupts the CRC of every answer while it is set.
+	// badCRC corrupts the CRC of every answer while it is set (RTU
+	// framing only).
 	badCRC atomic.Bool
 	// accepted counts the connections the server accepted.
 	accepted atomic.Int32
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
+	silent map[uint8]bool
 	closed bool
 	wg     sync.WaitGroup
 }
@@ -42,22 +48,54 @@ type rtuServer struct {
 func startRTUServer(t *testing.T, dev *testDevice) *rtuServer {
 	t.Helper()
 
+	return startRawServer(t, dev, false)
+}
+
+// startMBAPServer starts a Modbus TCP server for dev, framed by the test
+// itself so that a unit can be silenced, on a free loopback port; it is
+// stopped when the test ends.
+func startMBAPServer(t *testing.T, dev *testDevice) *rtuServer {
+	t.Helper()
+
+	return startRawServer(t, dev, true)
+}
+
+func startRawServer(t *testing.T, dev *testDevice, mbap bool) *rtuServer {
+	t.Helper()
+
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := &rtuServer{
-		t:     t,
-		dev:   dev,
-		l:     l,
-		host:  "127.0.0.1",
-		port:  uint16(l.Addr().(*net.TCPAddr).Port),
-		conns: map[net.Conn]struct{}{},
+		t:      t,
+		dev:    dev,
+		l:      l,
+		host:   "127.0.0.1",
+		port:   uint16(l.Addr().(*net.TCPAddr).Port),
+		mbap:   mbap,
+		conns:  map[net.Conn]struct{}{},
+		silent: map[uint8]bool{},
 	}
 	s.wg.Go(s.accept)
 	t.Cleanup(s.stop)
 
 	return s
+}
+
+// silence makes unit stop answering (on) or answer again (off).
+func (s *rtuServer) silence(unit uint8, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.silent[unit] = on
+}
+
+func (s *rtuServer) isSilent(unit uint8) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.silent[unit]
 }
 
 func (s *rtuServer) accept() {
@@ -88,19 +126,20 @@ func (s *rtuServer) serve(conn net.Conn) {
 		_ = conn.Close()
 	}()
 
-	// A read request is unit, function, address, quantity and CRC.
-	frame := make([]byte, 8)
 	for {
-		if _, err := io.ReadFull(conn, frame); err != nil {
+		header, pdu, err := s.readRequest(conn)
+		if err != nil {
 			return
 		}
-		if crc16(frame[:6]) != binary.LittleEndian.Uint16(frame[6:]) {
-			// A device stays silent on a corrupted request.
+		if pdu == nil {
 			continue
 		}
 
-		unit, function := frame[0], frame[1]
-		addr, quantity := binary.BigEndian.Uint16(frame[2:]), binary.BigEndian.Uint16(frame[4:])
+		unit, function := pdu[0], pdu[1]
+		if s.isSilent(unit) {
+			continue
+		}
+		addr, quantity := binary.BigEndian.Uint16(pdu[2:]), binary.BigEndian.Uint16(pdu[4:])
 		data, err := s.read(unit, function, addr, quantity)
 		if errors.Is(err, errNotARead) {
 			s.dev.set(func(d *testDevice) { d.writes++ })
@@ -113,14 +152,53 @@ func (s *rtuServer) serve(conn net.Conn) {
 		} else {
 			answer = append(append(answer, byte(len(data))), data...)
 		}
-		answer = binary.LittleEndian.AppendUint16(answer, crc16(answer))
-		if s.badCRC.Load() {
-			answer[len(answer)-1] ^= 0xFF
-		}
-		if _, err := conn.Write(answer); err != nil {
+		if _, err := conn.Write(s.frame(header, answer)); err != nil {
 			return
 		}
 	}
+}
+
+// readRequest reads one read request and returns its unit, function,
+// address and quantity (6 bytes) and, for MBAP, the transaction and
+// protocol identifiers to echo. A request with a bad CRC gives a nil pdu: a
+// device stays silent on it.
+func (s *rtuServer) readRequest(conn net.Conn) (header, pdu []byte, err error) {
+	if s.mbap {
+		// Transaction, protocol, length, then unit and the PDU.
+		frame := make([]byte, 12)
+		if _, err := io.ReadFull(conn, frame); err != nil {
+			return nil, nil, err
+		}
+
+		return frame[:4], frame[6:], nil
+	}
+
+	frame := make([]byte, 8)
+	if _, err := io.ReadFull(conn, frame); err != nil {
+		return nil, nil, err
+	}
+	if crc16(frame[:6]) != binary.LittleEndian.Uint16(frame[6:]) {
+		return nil, nil, nil
+	}
+
+	return nil, frame[:6], nil
+}
+
+// frame wraps an answer (unit, function, data) in the server's framing.
+func (s *rtuServer) frame(header, answer []byte) []byte {
+	if s.mbap {
+		out := append([]byte(nil), header...)
+		out = binary.BigEndian.AppendUint16(out, uint16(len(answer)))
+
+		return append(out, answer...)
+	}
+
+	out := binary.LittleEndian.AppendUint16(answer, crc16(answer))
+	if s.badCRC.Load() {
+		out[len(out)-1] ^= 0xFF
+	}
+
+	return out
 }
 
 var errNotARead = errors.New("not a read function")
@@ -218,10 +296,14 @@ func (s *rtuServer) stop() {
 	s.wg.Wait()
 }
 
-// connection is the JSON connection of an rtuovertcp input reaching the
-// server.
+// connection is the JSON connection of an input reaching the server:
+// rtuovertcp, or tcp with MBAP framing.
 func (s *rtuServer) connection(extra string) []byte {
-	conn := `{"transport":"rtuovertcp","host":"` + s.host + `","port":` + strconv.Itoa(int(s.port))
+	transport := "rtuovertcp"
+	if s.mbap {
+		transport = "tcp"
+	}
+	conn := `{"transport":"` + transport + `","host":"` + s.host + `","port":` + strconv.Itoa(int(s.port))
 	if extra != "" {
 		conn += "," + extra
 	}

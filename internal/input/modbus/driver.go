@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -245,10 +246,14 @@ func probeError(o outcome) error {
 	switch o {
 	case outcomeBusy:
 		return errors.New("the device is busy (exception 5 or 6); try again")
+	case outcomeUnknownException:
+		return errors.New("the device answered an exception code the driver does not know")
 	case outcomeUnavailable:
 		return errors.New("the gateway did not reach the device (exception 10 or 11)")
 	case outcomeTimeout:
 		return errors.New("the device did not answer in time")
+	case outcomeGarbled:
+		return errors.New("the answer of the device could not be read (bad CRC or protocol error)")
 	case outcomeConnection:
 		return errors.New("the connection to the device failed")
 	default:
@@ -257,10 +262,12 @@ func probeError(o outcome) error {
 }
 
 // poll is the input's goroutine: it connects with backoff, unless Start
-// handed it the open client c, then reads each block when its interval comes
-// due, through the rate limiter, until ctx is done. A timeout or a
-// connection error closes the client and reconnects after the backoff
-// (ruling R8). The blocks are first due at start.
+// handed it the open client c, then reads the blocks as their intervals come
+// due, the one due the longest first, through the rate limiter, until ctx is
+// done. The blocks are first due at start. A unit that does not answer only
+// times out its own blocks (ruling R13): the connection is closed and
+// reopened after the backoff on an I/O error, or when nothing answered on it
+// for the death tolerance.
 func (in *Input) poll(ctx context.Context, c client, emit func(model.Record), life *input.Lifecycle, start time.Time) {
 	defer func() {
 		if c != nil {
@@ -274,47 +281,74 @@ func (in *Input) poll(ctx context.Context, c client, emit func(model.Record), li
 
 	backoff := driverkit.NewBackoff(in.clk, in.jitter)
 	limiter := driverkit.NewRateLimiter(in.clk, in.conn.RateLimit)
+	tolerance := in.cfg.DeathTolerance
+	if tolerance <= 0 {
+		tolerance = config.DefaultDeathTolerance
+	}
 	next := make([]time.Time, len(in.blocks))
 	for i := range next {
 		next[i] = start
 	}
+	// answered is the last time anything answered on the connection c, or
+	// the time c was opened.
+	answered := start
 
 	for {
 		if c == nil {
 			if c = in.connect(ctx, backoff); c == nil {
 				return
 			}
+			answered = in.clk.Now()
 		}
-		if !in.sleepUntil(ctx, slices.MinFunc(next, func(a, b time.Time) int { return a.Compare(b) })) {
+
+		i := earliest(next)
+		if !in.sleepUntil(ctx, next[i]) {
+			return
+		}
+		if limiter.Wait(ctx) != nil {
 			return
 		}
 
+		b := &in.blocks[i]
+		r := in.exchange(c, b)
+		if ctx.Err() != nil {
+			return
+		}
+		// Read after the rate limit wait and the exchange, both of which
+		// take time: a block that fell behind is due again one interval
+		// after it was actually served.
 		now := in.clk.Now()
-		for i := range in.blocks {
-			if next[i].After(now) {
+		next[i] = nextDue(next[i], b.Interval, now)
+
+		switch in.apply(r, in.devices[i], emit, life, backoff) {
+		case linkAnswered:
+			answered = now
+			continue
+		case linkSilent:
+			if now.Sub(answered) < tolerance {
 				continue
 			}
-			if limiter.Wait(ctx) != nil {
-				return
-			}
+		}
 
-			b := &in.blocks[i]
-			next[i] = nextDue(next[i], b.Interval, now)
-			r := in.exchange(c, b)
-			if ctx.Err() != nil {
-				return
-			}
-			if !in.apply(r, in.devices[i], emit, life, backoff) {
-				in.disconnect(c)
-				c = nil
-				if backoff.Wait(ctx) != nil {
-					return
-				}
-
-				break
-			}
+		in.disconnect(c)
+		c = nil
+		if backoff.Wait(ctx) != nil {
+			return
 		}
 	}
+}
+
+// earliest returns the index of the block due first; between blocks due at
+// the same time, the first in plan order.
+func earliest(next []time.Time) int {
+	first := 0
+	for i := range next {
+		if next[i].Before(next[first]) {
+			first = i
+		}
+	}
+
+	return first
 }
 
 // nextDue returns the next time a block read at due is due again: one
@@ -400,21 +434,37 @@ func (in *Input) disconnect(c client) {
 	in.health.SetConnected(false)
 }
 
+// link is what one exchange tells of the connection.
+type link int
+
+const (
+	// linkAnswered: a device or a gateway answered, the connection works.
+	linkAnswered link = iota
+	// linkSilent: nothing usable came back (a timeout, a garbled answer);
+	// the library resynchronises by itself, so the connection is kept.
+	linkSilent
+	// linkBroken: an I/O error; the connection must be reopened.
+	linkBroken
+)
+
 // apply counts the result of one exchange and, when the device answered,
-// records the read of the block's devices and emits the samples (ruling R8).
-// It reports whether the connection is still usable.
-func (in *Input) apply(r result, devices []string, emit func(model.Record), life *input.Lifecycle, backoff *driverkit.Backoff) bool {
+// records the read of the block's devices and emits the samples (rulings R8,
+// R13 and R15). It reports what the exchange tells of the connection.
+func (in *Input) apply(r result, devices []string, emit func(model.Record), life *input.Lifecycle, backoff *driverkit.Backoff) link {
 	switch r.outcome {
 	case outcomeTimeout:
 		in.health.CountError(input.ReadErrorTimeout)
-		return false
+		return linkSilent
+	case outcomeGarbled:
+		in.health.CountError(input.ReadErrorConnection)
+		return linkSilent
 	case outcomeConnection:
 		in.health.CountError(input.ReadErrorConnection)
-		return false
+		return linkBroken
 	case outcomeUnavailable:
 		in.health.CountError(input.ReadErrorException)
-		return true
-	case outcomeRefused, outcomeBusy:
+		return linkAnswered
+	case outcomeRefused, outcomeBusy, outcomeUnknownException:
 		in.health.CountError(input.ReadErrorException)
 	}
 	for range r.decodeErrors {
@@ -429,7 +479,7 @@ func (in *Input) apply(r result, devices []string, emit func(model.Record), life
 		emit(model.SampleRecord(s))
 	}
 
-	return true
+	return linkAnswered
 }
 
 // outcome is how a device answered one read request.
@@ -444,20 +494,31 @@ const (
 	// outcomeBusy is exceptions 5 and 6: the device answered, retry at
 	// the next poll.
 	outcomeBusy
+	// outcomeUnknownException is an exception code the library does not
+	// know (ruling R15): the device answered, like exceptions 5 and 6.
+	outcomeUnknownException
 	// outcomeUnavailable is exceptions 10 and 11: a gateway answered for
 	// a device it could not reach.
 	outcomeUnavailable
 	// outcomeTimeout is a request without an answer in time.
 	outcomeTimeout
-	// outcomeConnection is a connection that failed, or an answer that
-	// cannot be trusted to be in sync with the request.
+	// outcomeGarbled is an answer that cannot be used: a bad CRC, a short
+	// frame, a protocol error, another unit or transaction. The library
+	// skips or flushes it, so the connection stays usable.
+	outcomeGarbled
+	// outcomeConnection is an I/O error: the connection failed.
 	outcomeConnection
 )
 
-// classify maps a library error to its outcome. Anything not recognised
-// (I/O errors, protocol errors, a bad unit id or CRC, an unknown exception
-// code) is a connection error: the stream may be out of sync, so the
-// connection is reopened.
+// unknownExceptionPrefix starts the error the library returns for an
+// exception code it does not map, a plain fmt.Errorf("unknown exception code
+// (%v)") with no error value to match (simonvetter/modbus v1.6.4, modbus.go
+// line 88, mapExceptionCodeToError).
+const unknownExceptionPrefix = "unknown exception code ("
+
+// classify maps a library error to its outcome. Anything not recognised is
+// an I/O error (EOF, reset, refused, a write failure, a closed port), and
+// the connection is reopened.
 func classify(err error) outcome {
 	var netErr net.Error
 	switch {
@@ -469,10 +530,15 @@ func classify(err error) outcome {
 		return outcomeRefused
 	case errors.Is(err, mbus.ErrAcknowledge), errors.Is(err, mbus.ErrServerDeviceBusy):
 		return outcomeBusy
+	case strings.HasPrefix(err.Error(), unknownExceptionPrefix):
+		return outcomeUnknownException
 	case errors.Is(err, mbus.ErrGWPathUnavailable), errors.Is(err, mbus.ErrGWTargetFailedToRespond):
 		return outcomeUnavailable
 	case errors.Is(err, mbus.ErrRequestTimedOut), errors.As(err, &netErr) && netErr.Timeout():
 		return outcomeTimeout
+	case errors.Is(err, mbus.ErrBadCRC), errors.Is(err, mbus.ErrShortFrame), errors.Is(err, mbus.ErrProtocolError),
+		errors.Is(err, mbus.ErrBadUnitId), errors.Is(err, mbus.ErrBadTransactionId), errors.Is(err, mbus.ErrUnknownProtocolId):
+		return outcomeGarbled
 	default:
 		return outcomeConnection
 	}

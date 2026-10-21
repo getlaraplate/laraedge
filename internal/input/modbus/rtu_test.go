@@ -118,9 +118,10 @@ func TestRTUOverTCPExceptionIsADeviceAnswer(t *testing.T) {
 	}
 }
 
-// TestRTUOverTCPBadCRCIsNeverData: an answer whose CRC does not match is a
-// connection error (ruling R8): no sample, the connection is closed and
-// reopened after the backoff, and the data comes back once the CRC is good.
+// TestRTUOverTCPBadCRCIsNeverData: an answer whose CRC does not match is
+// never data and counts as a connection error, but the library flushes the
+// line after it, so the connection is kept (ruling R13); the data comes back
+// on it once the CRC is good.
 func TestRTUOverTCPBadCRCIsNeverData(t *testing.T) {
 	dev := newTestDevice()
 	dev.set(func(d *testDevice) { d.holding[0] = 11 })
@@ -137,29 +138,24 @@ func TestRTUOverTCPBadCRCIsNeverData(t *testing.T) {
 		t.Fatalf("records for an answer with a bad CRC: %+v", got)
 	}
 	health := h.in.Health()
-	if health.Connected {
-		t.Error("connected after a bad CRC")
+	if !health.Connected {
+		t.Error("a bad CRC closed the connection")
 	}
 	if health.ReadErrors[input.ReadErrorConnection] != 1 || len(health.ReadErrors) != 1 {
 		t.Errorf("ReadErrors = %v, want one connection error", health.ReadErrors)
 	}
 
 	srv.badCRC.Store(false)
-	var records []model.Record
-	for range 10 {
-		h.step(time.Second)
-		if records = h.take(); len(records) > 0 {
-			break
-		}
-	}
+	h.step(time.Second)
+	records := h.take()
 	if got := readings(t, records); len(got) != 1 || got[0].value != model.IntValue(11) || got[0].quality != model.Good {
 		t.Fatalf("samples after the CRC is good again = %+v", got)
 	}
-	if n := srv.accepted.Load(); n != 2 {
-		t.Errorf("connections = %d, want 2 (closed and reopened)", n)
+	if n := srv.accepted.Load(); n != 1 {
+		t.Errorf("connections = %d, want 1 (kept)", n)
 	}
 	if !h.in.Health().Connected {
-		t.Error("not connected after the reconnect")
+		t.Error("not connected once the CRC is good")
 	}
 }
 

@@ -468,7 +468,12 @@ func TestServerStopsAndRestarts(t *testing.T) {
 	}
 }
 
-func TestTimeoutCountsTowardDeathAndReconnects(t *testing.T) {
+// TestTimeoutKeepsTheConnectionUntilTheDeathTolerance (ruling R13): a
+// timeout counts toward death but keeps the connection. The held request
+// blocks the library server's connection, so nothing answers on it: once the
+// death tolerance passed without an answer, the connection is closed and
+// reopened after the backoff, and the data comes back on the new one.
+func TestTimeoutKeepsTheConnectionUntilTheDeathTolerance(t *testing.T) {
 	dev := newTestDevice()
 	dev.set(func(d *testDevice) { d.holding[0] = 11 })
 	release := dev.holdAt(0)
@@ -481,24 +486,29 @@ func TestTimeoutCountsTowardDeathAndReconnects(t *testing.T) {
 	}))
 	h.start()
 
-	if got := h.take(); len(got) != 0 {
-		t.Fatalf("records after a timeout: %+v", got)
-	}
-	health := h.in.Health()
-	if health.Connected || health.ReadErrors[input.ReadErrorTimeout] != 1 {
-		t.Fatalf("Health = %+v, want disconnected after one timeout", health)
+	for i, want := range []uint64{1, 2} {
+		if i > 0 {
+			h.step(time.Second)
+		}
+		if got := h.take(); len(got) != 0 {
+			t.Fatalf("records after a timeout: %+v", got)
+		}
+		health := h.in.Health()
+		if !health.Connected || health.ReadErrors[input.ReadErrorTimeout] != want || len(health.ReadErrors) != 1 {
+			t.Fatalf("Health = %+v, want connected after %d timeouts", health, want)
+		}
 	}
 
-	var records []model.Record
-	for range 2 {
-		h.step(time.Second)
-		records = append(records, h.take()...)
-	}
-	if got := events(records); !slices.Equal(got, []string{"death press-07"}) {
+	h.step(time.Second)
+	if got := events(h.take()); !slices.Equal(got, []string{"death press-07"}) {
 		t.Fatalf("events = %v, want one death", got)
+	}
+	if health := h.in.Health(); health.Connected || health.ReadErrors[input.ReadErrorTimeout] != 3 {
+		t.Fatalf("Health = %+v, want disconnected after 3 timeouts over the death tolerance", health)
 	}
 
 	release()
+	var records []model.Record
 	for range 120 {
 		h.step(time.Second)
 		records = h.take()
