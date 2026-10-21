@@ -1,11 +1,13 @@
 package supervisor
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/getlaraplate/laraedge/internal/buffer"
+	"github.com/getlaraplate/laraedge/internal/input"
 )
 
 // Status is a snapshot of the supervisor (spec 6.8, 10.3).
@@ -33,6 +35,13 @@ type InputStatus struct {
 	// TransformErrors counts the runtime errors of the input's transform
 	// chains since the agent started, across the restarts of the input.
 	TransformErrors uint64
+	// Connected reports whether the input's connection to the machine is
+	// up; nil when the input does not report its health (input.HealthReporter)
+	// or failed.
+	Connected *bool
+	// ReadErrors counts the input's read errors by kind; nil when Connected
+	// is nil.
+	ReadErrors map[string]uint64
 }
 
 // OutputStatus describes one output.
@@ -64,10 +73,19 @@ func (s *Supervisor) Status() Status {
 	st := Status{Applied: s.applied, Version: s.version}
 
 	for id, ri := range s.inputs {
-		st.Inputs = append(st.Inputs, InputStatus{
+		is := InputStatus{
 			ID: id, Driver: ri.cfg.Driver, State: InputRunning,
 			TransformErrors: s.transformErrors[id] + ri.proc.Errors(),
-		})
+		}
+		if hr, ok := ri.in.(input.HealthReporter); ok {
+			h := hr.Health()
+			is.Connected = &h.Connected
+			is.ReadErrors = maps.Clone(h.ReadErrors)
+			if is.ReadErrors == nil {
+				is.ReadErrors = map[string]uint64{}
+			}
+		}
+		st.Inputs = append(st.Inputs, is)
 	}
 	for id, f := range s.failedIn {
 		st.Inputs = append(st.Inputs, InputStatus{

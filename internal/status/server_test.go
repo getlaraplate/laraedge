@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -517,5 +518,44 @@ func TestServeStopsOnCancel(t *testing.T) {
 	if conn, err := net.Dial("tcp", addr); err == nil {
 		conn.Close()
 		t.Fatal("the listener is still open after Serve returned")
+	}
+}
+
+func TestStatusJSONReportsHealthOfReportingInputsOnly(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(healthStatus())
+
+	_, _, body := h.get(t, http.MethodGet, "/status", "")
+
+	var doc struct {
+		Inputs []map[string]any `json:"inputs"`
+	}
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("body is not JSON: %v\n%s", err, body)
+	}
+
+	byID := map[string]map[string]any{}
+	for _, in := range doc.Inputs {
+		byID[in["id"].(string)] = in
+	}
+
+	zero := map[string]any{"timeout": 0.0, "connection": 0.0, "exception": 0.0, "decode": 0.0}
+	oven := map[string]any{"timeout": 4.0, "connection": 0.0, "exception": 0.0, "decode": 1.0}
+	for id, want := range map[string]struct {
+		connected any
+		errors    any
+	}{
+		"cell":   {true, zero},
+		"oven":   {false, oven},
+		"line":   {nil, nil},
+		"broken": {nil, nil},
+	} {
+		in := byID[id]
+		if got := in["connected"]; !reflect.DeepEqual(got, want.connected) {
+			t.Errorf("input %s connected = %v, want %v", id, got, want.connected)
+		}
+		if got := in["read_errors"]; !reflect.DeepEqual(got, want.errors) {
+			t.Errorf("input %s read_errors = %v, want %v", id, got, want.errors)
+		}
 	}
 }

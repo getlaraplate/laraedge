@@ -268,6 +268,30 @@ const (
 	birthOven  = "birth oven-02 [state count]"
 )
 
+func TestStatusReportsTheHealthOfAReportingInput(t *testing.T) {
+	f := newFixture(t)
+	f.drv.health["probe"] = input.Health{Connected: true, ReadErrors: map[string]uint64{"timeout": 2}}
+	f.drv.health["bare"] = input.Health{}
+	f.mustApply(f.document(1,
+		[]inSpec{{id: "line", devices: []string{"press-07"}}, {id: "probe", devices: []string{"oven-02"}}, {id: "bare", devices: []string{"cell-03"}}},
+		[]outSpec{{id: "main"}}))
+
+	byID := map[string]InputStatus{}
+	for _, in := range f.sup.Status().Inputs {
+		byID[in.ID] = in
+	}
+
+	if in := byID["line"]; in.Connected != nil || in.ReadErrors != nil {
+		t.Errorf("input without health: Connected=%v ReadErrors=%v, want nil nil", in.Connected, in.ReadErrors)
+	}
+	if in := byID["probe"]; in.Connected == nil || !*in.Connected || !reflect.DeepEqual(in.ReadErrors, map[string]uint64{"timeout": 2}) {
+		t.Errorf("reporting input: Connected=%v ReadErrors=%v, want true and timeout 2", in.Connected, in.ReadErrors)
+	}
+	if in := byID["bare"]; in.Connected == nil || *in.Connected || in.ReadErrors == nil || len(in.ReadErrors) != 0 {
+		t.Errorf("reporting input without errors: Connected=%v ReadErrors=%#v, want false and an empty map", in.Connected, in.ReadErrors)
+	}
+}
+
 func TestApplyStartsTheDocument(t *testing.T) {
 	f := newFixture(t)
 	doc := f.document(1, []inSpec{{id: "line", devices: []string{"press-07", "oven-02"}}}, []outSpec{{id: "main"}})
