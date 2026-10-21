@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
-	"github.com/getlaraplate/laraplate-edge/internal/transform"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
 // chainDocument returns a document with one point of decoding type pointType

@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/input"
-	"github.com/getlaraplate/laraplate-edge/internal/input/simulated"
-	"github.com/getlaraplate/laraplate-edge/internal/logging"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/input/simulated"
+	"github.com/getlaraplate/laraedge/internal/logging"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 const (

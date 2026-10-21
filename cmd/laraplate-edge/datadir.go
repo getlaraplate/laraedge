@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
+	"github.com/getlaraplate/laraedge/internal/atomicfile"
 )
 
 // dataDirFormat is the data_dir layout this agent writes and reads (spec

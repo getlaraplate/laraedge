@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/getlaraplate/laraplate-edge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/config"
 )
 
 func TestStoreLastValidWhenNothingSaved(t *testing.T) {

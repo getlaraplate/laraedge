@@ -13,8 +13,8 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 
-	"github.com/getlaraplate/laraplate-edge/internal/docrules"
-	"github.com/getlaraplate/laraplate-edge/schema"
+	"github.com/getlaraplate/laraedge/internal/docrules"
+	"github.com/getlaraplate/laraedge/schema"
 )
 
 // compiledSchema compiles the embedded schema once; the result is never

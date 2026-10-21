@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // MaxSampleLine is the longest line of a sample file ReadSamples accepts, in

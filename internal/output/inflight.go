@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/atomicfile"
-	"github.com/getlaraplate/laraplate-edge/internal/buffer"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/atomicfile"
+	"github.com/getlaraplate/laraedge/internal/buffer"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 const (

@@ -3,7 +3,7 @@ package transform
 import (
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // NewChain builds a Chain from ready steps, bypassing the catalogue, so tests

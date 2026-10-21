@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/transform"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
 const simulatedExample = "../../examples/simulated/config.yaml"

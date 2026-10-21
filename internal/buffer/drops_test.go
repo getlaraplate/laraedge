@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // logLines is a JSON log sink safe for the sync goroutine and the test.

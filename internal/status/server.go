@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/buffer"
-	"github.com/getlaraplate/laraplate-edge/internal/clock"
-	"github.com/getlaraplate/laraplate-edge/internal/supervisor"
+	"github.com/getlaraplate/laraedge/internal/buffer"
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/supervisor"
 )
 
 const (

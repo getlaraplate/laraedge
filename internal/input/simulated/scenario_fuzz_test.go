@@ -3,7 +3,7 @@ package simulated
 import (
 	"testing"
 
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // FuzzParseScenario checks that ParseScenario never panics, and that a

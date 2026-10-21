@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/model"
-	"github.com/getlaraplate/laraplate-edge/internal/transform"
+	"github.com/getlaraplate/laraedge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
 // kinds is the kindOf of the sample file tests.

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/supervisor"
+	"github.com/getlaraplate/laraedge/internal/supervisor"
 )
 
 var (

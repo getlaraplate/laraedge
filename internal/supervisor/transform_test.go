@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/config"
-	"github.com/getlaraplate/laraplate-edge/internal/model"
-	"github.com/getlaraplate/laraplate-edge/internal/transform"
+	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
 // tpoint is a point of device a1 with its transform chain, each step a

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getlaraplate/laraplate-edge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 func TestFloatValueRefusesNonFinite(t *testing.T) {
