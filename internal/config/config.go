@@ -35,6 +35,8 @@ const MaxDocumentSize = 4 << 20
 const (
 	// DriverSimulated is the simulated input driver.
 	DriverSimulated = "simulated"
+	// DriverModbus is the Modbus input driver.
+	DriverModbus = "modbus"
 	// OutputLaraplateHTTP is the HTTP output to the Laraplate ingest route.
 	OutputLaraplateHTTP = "laraplate-http"
 )
