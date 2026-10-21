@@ -161,7 +161,7 @@ func TestConfigTestFailures(t *testing.T) {
 		},
 		{
 			name:       "a document the build does not provide",
-			doc:        strings.Replace(chainDoc(`[{scale: 2}]`), "driver: simulated", "driver: modbus", 1),
+			doc:        strings.Replace(chainDoc(`[{scale: 2}]`), "driver: simulated", "driver: opcua", 1),
 			samples:    good,
 			wantCode:   exitFailure,
 			wantStderr: []string{"config.yaml:", "not available in this build"},

@@ -59,6 +59,30 @@ func TestInputDriversRegisterSimulatedWithTheConfigFileDirectory(t *testing.T) {
 	}
 }
 
+func TestInputDriversRegisterModbus(t *testing.T) {
+	boot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderLaraplate}}
+	factory := inputDrivers(boot, nil)[config.DriverModbus]
+	if factory == nil {
+		t.Fatal("modbus is not registered")
+	}
+
+	cfg := config.Input{
+		ID:         "plc",
+		Driver:     config.DriverModbus,
+		Connection: []byte(`{"transport":"tcp","host":"127.0.0.1","port":1}`),
+		Devices: []config.Device{{Device: "press-07", Points: []config.Point{
+			{Signal: "speed", Address: "hr:10", Type: "int16", Read: config.Read{Mode: config.ReadPoll, Interval: time.Second}},
+		}}},
+	}
+	in, err := factory(cfg, clock.NewFake(time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)))
+	if err != nil {
+		t.Fatalf("modbus factory: %v", err)
+	}
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInputDriversLetExtraFactoriesReplaceBuiltIns(t *testing.T) {
 	called := false
 	extra := map[string]input.Factory{config.DriverSimulated: func(config.Input, clock.Clock) (input.Input, error) {
