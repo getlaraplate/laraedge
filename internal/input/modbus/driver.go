@@ -120,10 +120,13 @@ func planPoint(device string, p config.Point) (PlannedPoint, error) {
 	return PlannedPoint{Device: device, Signal: p.Signal, Point: p, Addr: addr, Size: size}, nil
 }
 
-// Start starts the poll goroutine and the device lifecycle and returns: the
+// Start starts the poll goroutine and the device lifecycle and returns. For
+// rtu it first opens the serial port, a local resource, and fails when it
+// cannot (core R47, ruling R2); a port failing later is reopened in the
+// background like a network connection. For tcp and rtuovertcp the
 // connection is opened in the background, so an unreachable device is death
-// after the death tolerance, never a failing Start (core R47). The goroutines
-// stop when ctx is done or on Close.
+// after the death tolerance, never a failing Start. The goroutines stop when
+// ctx is done or on Close.
 func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("modbus input %q: start: %w", in.cfg.ID, err)
@@ -139,6 +142,20 @@ func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 		return fmt.Errorf("modbus input %q: already started", in.cfg.ID)
 	}
 
+	var port client
+	if in.conn.Transport == TransportRTU {
+		c, err := in.newClient(in.conn)
+		if err != nil {
+			return fmt.Errorf("modbus input %q: start: %w", in.cfg.ID, err)
+		}
+		// The library's error names the device: the text is fixed.
+		if err := c.Open(); err != nil {
+			return fmt.Errorf("modbus input %q: start: cannot open the serial port", in.cfg.ID)
+		}
+		in.health.SetConnected(true)
+		port = c
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	in.cancel = cancel
 	in.started = true
@@ -146,15 +163,16 @@ func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 	life := input.NewLifecycle(in.cfg, in.clk, emit)
 	start := in.clk.Now()
 	in.wg.Go(func() { life.Run(runCtx) })
-	in.wg.Go(func() { in.poll(runCtx, emit, life, start) })
+	in.wg.Go(func() { in.poll(runCtx, port, emit, life, start) })
 
 	return nil
 }
 
 // Close stops the input and waits for its goroutines. A request in flight
-// ends within the connection timeout and its answer is dropped; the
-// library's connection attempt is bounded by the library itself. It is safe
-// on an input never started and when called twice.
+// ends within the connection timeout and its answer is dropped. A connection
+// attempt is not waited for (ruling R10): it ends on its own and the client
+// it may open is closed unused. It is safe on an input never started and
+// when called twice.
 func (in *Input) Close() error {
 	in.mu.Lock()
 	in.closed = true
@@ -238,11 +256,17 @@ func probeError(o outcome) error {
 	}
 }
 
-// poll is the input's goroutine: it connects with backoff, then reads each
-// block when its interval comes due, through the rate limiter, until ctx is
-// done. A timeout or a connection error closes the client and reconnects
-// after the backoff (ruling R8). The blocks are first due at start.
-func (in *Input) poll(ctx context.Context, emit func(model.Record), life *input.Lifecycle, start time.Time) {
+// poll is the input's goroutine: it connects with backoff, unless Start
+// handed it the open client c, then reads each block when its interval comes
+// due, through the rate limiter, until ctx is done. A timeout or a
+// connection error closes the client and reconnects after the backoff
+// (ruling R8). The blocks are first due at start.
+func (in *Input) poll(ctx context.Context, c client, emit func(model.Record), life *input.Lifecycle, start time.Time) {
+	defer func() {
+		if c != nil {
+			in.disconnect(c)
+		}
+	}()
 	if len(in.blocks) == 0 {
 		<-ctx.Done()
 		return
@@ -254,13 +278,6 @@ func (in *Input) poll(ctx context.Context, emit func(model.Record), life *input.
 	for i := range next {
 		next[i] = start
 	}
-
-	var c client
-	defer func() {
-		if c != nil {
-			in.disconnect(c)
-		}
-	}()
 
 	for {
 		if c == nil {
@@ -324,12 +341,13 @@ func (in *Input) sleepUntil(ctx context.Context, t time.Time) bool {
 // succeeds or ctx is done (nil).
 func (in *Input) connect(ctx context.Context, backoff *driverkit.Backoff) client {
 	for ctx.Err() == nil {
-		c, err := in.newClient(in.conn)
+		c, err := in.open(ctx)
 		if err == nil {
-			if err = c.Open(); err == nil {
-				in.health.SetConnected(true)
-				return c
-			}
+			in.health.SetConnected(true)
+			return c
+		}
+		if ctx.Err() != nil {
+			return nil
 		}
 
 		in.health.CountError(input.ReadErrorConnection)
@@ -339,6 +357,42 @@ func (in *Input) connect(ctx context.Context, backoff *driverkit.Backoff) client
 	}
 
 	return nil
+}
+
+// open builds a client and opens it in a goroutine of its own, waiting for
+// it or for ctx (ruling R10): the library dials with a fixed timeout that
+// nothing cancels, and Close must not wait for it. When ctx is done first,
+// open returns at once and the goroutine closes the client if its Open
+// succeeds late. The goroutine never touches the health nor emits.
+func (in *Input) open(ctx context.Context) (client, error) {
+	c, err := in.newClient(in.conn)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unbuffered: the result is handed over only to a waiting open, so
+	// exactly one side owns the client.
+	opened := make(chan error)
+	go func() {
+		err := c.Open()
+		select {
+		case opened <- err:
+		case <-ctx.Done():
+			if err == nil {
+				_ = c.Close()
+			}
+		}
+	}()
+
+	select {
+	case err := <-opened:
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (in *Input) disconnect(c client) {
