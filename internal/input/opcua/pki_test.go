@@ -408,7 +408,8 @@ func TestTrustStore(t *testing.T) {
 	t.Run("list ignores foreign names and reports a damaged file by name", func(t *testing.T) {
 		trusted := filepath.Join(store.Dir, "trusted")
 		writeFile(t, filepath.Join(trusted, "README.txt"), []byte("hello"))
-		writeFile(t, filepath.Join(trusted, strings.ToUpper(thumbA)+".der"), []byte("ignored"))
+		// Not thumbA in upper case: on case-insensitive file systems (Windows) that name is the real certificate file.
+		writeFile(t, filepath.Join(trusted, strings.Repeat("CD", 20)+".der"), []byte("ignored"))
 		writeFile(t, filepath.Join(trusted, thumbA+".der.tmp"), []byte("ignored"))
 
 		infos, err := store.List()
