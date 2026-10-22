@@ -422,9 +422,9 @@ samples).
 
 **Limits of the server.** After connecting, the agent reads the server's `MaxNodesPerRead` and
 `MaxMonitoredItemsPerCall` and chunks its requests at them. 0, which means no limit, and any value above
-1000 count as 1000; a limit the server does not report (a Bad status, or not a number) counts as 100. A
-request that exceeds the server's limits is answered with a service fault, which tears the library client down,
-so the driver never sends one, nor an empty one.
+1000 count as 1000; a limit the server does not report (a Bad status, or not a number) and a negative one
+count as 100. A request that exceeds the server's limits is answered with a service fault, which tears the
+library client down, so the driver never sends one, nor an empty one.
 
 **Fixed timing.** There are no settings for these:
 
@@ -434,6 +434,7 @@ so the driver never sends one, nor an empty one.
 | each request | 5 s; discovery and the connection are each bounded by both |
 | requested session timeout | 60 s |
 | subscription keep-alive count | 10 |
+| subscription lifetime count | `max(30, 60s / publishing_interval)` (at least three keep-alive counts): a server drops the subscription of a lost session after about a minute |
 | watchdog | `min(5s, death_tolerance / 3)`, at least 1 s |
 | the request that closes a session | 1 s |
 
