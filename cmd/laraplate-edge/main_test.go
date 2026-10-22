@@ -139,6 +139,8 @@ func TestConfigValidate(t *testing.T) {
 	writeFile(t, validJSON, driversJSONDoc("hr:10"))
 	badAddress := filepath.Join(dir, "bad-address.yaml")
 	writeFile(t, badAddress, driversDoc("hr:70000"))
+	opcuaOffline := filepath.Join(dir, "opcua.yaml")
+	writeFile(t, opcuaOffline, opcuaDoc)
 
 	tests := []struct {
 		name       string
@@ -184,12 +186,22 @@ func TestConfigValidate(t *testing.T) {
 			},
 		},
 		{
+			name:     "OPC UA addresses and authentication, offline",
+			file:     opcuaOffline,
+			wantCode: 1,
+			wantStderr: []string{
+				opcuaOffline + ": inputs.0: opcua input \"press\": devices.0.points.1: address: namespace index: want an integer from 0 to 65535\n",
+				opcuaOffline + ": inputs.1: opcua input \"oven\": connection.auth: user and password need a security_policy other than None\n",
+			},
+		},
+		{
 			name:     "the spec example refused by the build check",
 			file:     fixtures + "spec-5.3.yaml",
 			wantCode: 1,
 			wantStderr: []string{
-				fixtures + "spec-5.3.yaml: inputs.0.driver: not available in this build\n",
+				fixtures + "spec-5.3.yaml: inputs.0.connection.auth.password: not available in this build\n",
 				fixtures + "spec-5.3.yaml: plugins.0: not available in this build\n",
+				fixtures + "spec-5.3.yaml: inputs.0: opcua input \"press-line\": devices.0.points.0: type: required\n",
 			},
 		},
 		{
@@ -234,6 +246,33 @@ func TestConfigValidate(t *testing.T) {
 		})
 	}
 }
+
+// opcuaDoc is a document with two OPC UA inputs the driver refuses offline:
+// a NodeId with a namespace index out of syntax, and a user name over an
+// unprotected connection. The endpoint host never resolves.
+const opcuaDoc = `schema: laraplate-edge-config/1
+inputs:
+  - id: press
+    driver: opcua
+    connection: {endpoint: 'opc.tcp://plc.example:4840'}
+    devices:
+      - device: press-07
+        points:
+          - {signal: state, address: "ns=3;s=Machine.State", type: string, read: subscribe}
+          - {signal: speed, address: "ns=x;s=Speed", type: float64, read: {poll: 1s}}
+  - id: oven
+    driver: opcua
+    connection:
+      endpoint: 'opc.tcp://plc.example:4840'
+      security_policy: None
+      auth: {user: mes, password: secret://env/OPCUA_PASSWORD}
+    devices:
+      - device: oven-02
+        points:
+          - {signal: temp, address: "ns=2;i=7", type: float64, read: subscribe}
+outputs:
+  - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
+`
 
 // driversDoc is a document with a simulated and a Modbus input, the Modbus
 // point at address. The Modbus factory never connects, so the host need not

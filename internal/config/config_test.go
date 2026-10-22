@@ -99,10 +99,10 @@ func TestParseSpecExample(t *testing.T) {
 	}
 
 	points := in.Devices[0].Points
-	wantReads := []config.Read{{Mode: config.ReadSubscribe}, {Mode: config.ReadPoll, Interval: time.Second}, {Mode: config.ReadPoll, Interval: time.Second}}
+	wantReads := []config.Read{{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: -1}}, {Mode: config.ReadPoll, Interval: time.Second}, {Mode: config.ReadPoll, Interval: time.Second}}
 	wantPriorities := []model.Priority{model.Critical, model.Critical, model.Bulk}
 	for i, p := range points {
-		if p.Read != wantReads[i] || p.Priority != wantPriorities[i] {
+		if !reflect.DeepEqual(p.Read, wantReads[i]) || p.Priority != wantPriorities[i] {
 			t.Errorf("point %d read/priority = %+v/%v, want %+v/%v", i, p.Read, p.Priority, wantReads[i], wantPriorities[i])
 		}
 	}
@@ -139,7 +139,6 @@ func TestCheckBuildRefusesExactlyTheSpecExampleNonBuildParts(t *testing.T) {
 
 	got := config.CheckBuild(doc)
 	want := []string{
-		"inputs.0.driver: not available in this build",
 		"inputs.0.connection.auth.password: not available in this build",
 		"inputs.0.devices.0.derived: not available in this build",
 		"outputs.0.token: not available in this build",
@@ -166,7 +165,7 @@ func TestParseBuildDocument(t *testing.T) {
 	}
 
 	wantPoints := []config.Point{
-		{Signal: "state", Address: "state", Read: config.Read{Mode: config.ReadSubscribe}, Priority: model.Critical, Type: "int16"},
+		{Signal: "state", Address: "state", Read: config.Read{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: -1}}, Priority: model.Critical, Type: "int16"},
 		{Signal: "good_count", Address: "counters.good", Read: config.Read{Mode: config.ReadPoll, Interval: 500 * time.Millisecond}, Priority: model.Critical, Type: "uint32", ByteOrder: "CDAB", Unit: "pcs"},
 		{Signal: "door_open", Address: "door", Read: config.Read{Mode: config.ReadEvent}, Priority: model.Bulk, Type: "bool"},
 	}
@@ -270,6 +269,20 @@ func TestParseRefusals(t *testing.T) {
 		{"duration overflow", edit(t, base, "read: subscribe", "read: {poll: 99999999999h}"), []string{"inputs.0.devices.0.points.0.read.poll: is too large"}},
 		{"unknown read mode", edit(t, base, "read: subscribe", "read: sometimes"), []string{"inputs.0.devices.0.points.0.read: must be one of subscribe, event"}},
 		{"read object without poll", edit(t, base, "read: subscribe", "read: {every: 1s}"), []string{"inputs.0.devices.0.points.0.read.poll: is required", "inputs.0.devices.0.points.0.read.every: unknown key"}},
+		{"subscribe unknown key", edit(t, base, "read: subscribe", "read: {subscribe: {rate: 1s}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.rate: unknown key"}},
+		{"subscribe sampling zero", edit(t, base, "read: subscribe", "read: {subscribe: {sampling: 0s}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.sampling: must be greater than zero"}},
+		{"subscribe sampling negative", edit(t, base, "read: subscribe", "read: {subscribe: {sampling: -1s}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.sampling: must be a duration such as"}},
+		{"subscribe sampling overflow", edit(t, base, "read: subscribe", "read: {subscribe: {sampling: 99999999999h}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.sampling: is too large"}},
+		{"subscribe queue zero", edit(t, base, "read: subscribe", "read: {subscribe: {queue: 0}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.queue: must be at least 1"}},
+		{"subscribe queue fractional", edit(t, base, "read: subscribe", "read: {subscribe: {queue: 1.5}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.queue: must be integer"}},
+		{"subscribe queue above uint32", edit(t, base, "read: subscribe", "read: {subscribe: {queue: 4294967296}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.queue: must be at most 4294967295"}},
+		{"subscribe deadband word", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: x}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.deadband: must be a non-negative number or a percentage"}},
+		{"subscribe deadband negative text", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: '-1'}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.deadband: must be a non-negative number or a percentage"}},
+		{"subscribe deadband negative number", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: -1}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.deadband: must be at least 0"}},
+		{"subscribe deadband above 100 percent", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: 101%}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.deadband: must be at most 100%"}},
+		{"subscribe deadband beyond float64", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: '1"+strings.Repeat("0", 400)+"'}}"), []string{"inputs.0.devices.0.points.0.read.subscribe.deadband: is too large"}},
+		{"subscribe with poll", edit(t, base, "read: subscribe", "read: {poll: 1s, subscribe: {}}"), []string{"inputs.0.devices.0.points.0.read.poll: is not allowed"}},
+		{"subscribe object of the wrong type", edit(t, base, "read: subscribe", "read: {subscribe: yes}"), []string{"inputs.0.devices.0.points.0.read.subscribe: must be object"}},
 		{"unknown driver", edit(t, base, "driver: simulated", "driver: s7"), []string{"inputs.0.driver: unknown driver"}},
 		{"plugin driver without id", edit(t, base, "driver: simulated", "driver: 'plugin:'"), []string{"inputs.0.driver: unknown driver"}},
 		{"unknown output type", edit(t, base, "type: laraplate-http", "type: kafka"), []string{"outputs.0.type: unknown output type"}},
@@ -496,6 +509,10 @@ func TestParseNeverEchoesValues(t *testing.T) {
 			"decoding type":          edit(t, base, "read: subscribe", "read: subscribe\n            type: "+secret),
 			"duration":               edit(t, base, "read: subscribe", "read: {poll: "+secret+"}"),
 			"size":                   edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    buffer: {max_size: "+secret+"}"),
+			"subscribe sampling":     edit(t, base, "read: subscribe", "read: {subscribe: {sampling: "+secret+"}}"),
+			"subscribe queue":        edit(t, base, "read: subscribe", "read: {subscribe: {queue: "+secret+"}}"),
+			"subscribe deadband":     edit(t, base, "read: subscribe", "read: {subscribe: {deadband: "+secret+"}}"),
+			"subscribe object":       edit(t, base, "read: subscribe", "read: {subscribe: "+secret+"}"),
 			"url credentials":        edit(t, base, "https://erp.example.com", "https://"+secret+":x@erp.example.com"),
 			"url scheme":             edit(t, base, "https://erp.example.com", secret+"://erp.example.com"),
 			"route":                  edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    route: {include: ['["+secret+"']}"),
@@ -524,6 +541,7 @@ func TestParseNeverEchoesValues(t *testing.T) {
 	keyDocs := map[string]string{
 		"id":                 edit(t, base, "id: main", "id: "+oddShape),
 		"unknown key":        edit(t, base, "read: subscribe", "read: subscribe\n            "+oddShape+": 1"),
+		"subscribe key":      edit(t, base, "read: subscribe", "read: {subscribe: {"+oddShape+": 1}}"),
 		"transform name":     edit(t, base, "read: subscribe", "read: subscribe\n            transforms: [{"+oddShape+": 1}]"),
 		"yaml duplicate key": edit(t, base, "scenario: s.json", oddShape+": 1\n      "+oddShape+": 2"),
 		"json duplicate key": `{"` + oddShape + `": 1, "` + oddShape + `": 2}`,
@@ -570,7 +588,7 @@ func TestCheckBuild(t *testing.T) {
 		{"simulated and laraplate-http", base, nil},
 		{"env and file references", edit(t, base, "scenario: s.json", "scenario: s.json\n      password: secret://file/etc/p\n      token: secret://env/T"), nil},
 		{"modbus", edit(t, base, "driver: simulated", "driver: modbus"), nil},
-		{"opcua", edit(t, base, "driver: simulated", "driver: opcua"), []string{"inputs.0.driver: not available in this build"}},
+		{"opcua", edit(t, base, "driver: simulated", "driver: opcua"), nil},
 		{"plugin driver", edit(t, base, "driver: simulated", "driver: 'plugin:fanuc'"), []string{"inputs.0.driver: not available in this build"}},
 		{"mqtt output", edit(t, base, "type: laraplate-http", "type: laraplate-mqtt"), []string{"outputs.0.type: not available in this build"}},
 		{"plugin output", edit(t, base, "type: laraplate-http", "type: 'plugin:kafka'"), []string{"outputs.0.type: not available in this build"}},
@@ -912,5 +930,61 @@ func TestBufferMaxSizeAtTheMinimum(t *testing.T) {
 		if got := doc.Outputs[0].Buffer.MaxSize; got < config.MinBufferMaxSize {
 			t.Errorf("max_size %s parsed as %d, below the minimum", size, got)
 		}
+	}
+}
+
+// TestDeadbandNumbersReachDriversInDecimal: a number YAML or JSON writes
+// with an exponent, or that encoding/json renders with one, is plain decimal
+// text in the document.
+func TestDeadbandNumbersReachDriversInDecimal(t *testing.T) {
+	const jsonDoc = `{"schema": "laraplate-edge-config/1", "version": 3,
+"inputs": [{"id": "sim-line", "driver": "simulated", "connection": {"scenario": "s.json"},
+  "devices": [{"device": "press-07", "points": [{"signal": "state", "address": "state", "read": {"subscribe": {"deadband": %s}}}]}]}],
+"outputs": [{"id": "main", "type": "laraplate-http", "url": "https://erp.example.com", "token": "secret://env/TOKEN"}]}`
+
+	tests := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"YAML small", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: 0.0000001}}"), "0.0000001"},
+		{"YAML large", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: 1e21}}"), "1000000000000000000000"},
+		{"JSON small", fmt.Sprintf(jsonDoc, "0.0000001"), "0.0000001"},
+		{"JSON large", fmt.Sprintf(jsonDoc, "1e21"), "1000000000000000000000"},
+		{"JSON exponent", fmt.Sprintf(jsonDoc, "2.5E-3"), "0.0025"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := mustParse(t, []byte(tt.doc))
+			if got := doc.Inputs[0].Devices[0].Points[0].Read.Subscribe.Deadband; got != tt.want {
+				t.Errorf("deadband = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseSubscribeLongForm(t *testing.T) {
+	tests := []struct {
+		name string
+		read string
+		want config.Read
+	}{
+		{"string form", "subscribe", config.Read{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: -1}}},
+		{"empty long form", "{subscribe: {}}", config.Read{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: -1}}},
+		{"all keys", "{subscribe: {sampling: 250ms, queue: 5, deadband: 2%}}", config.Read{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: 250 * time.Millisecond, Queue: 5, Deadband: "2%"}}},
+		{"percent at the cap", "{subscribe: {deadband: 100%}}", config.Read{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: -1, Deadband: "100%"}}},
+		{"absolute number", "{subscribe: {deadband: 0.5}}", config.Read{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: -1, Deadband: "0.5"}}},
+		{"absolute text", "{subscribe: {deadband: '3'}}", config.Read{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: -1, Deadband: "3"}}},
+		{"queue only", "{subscribe: {queue: 4294967295}}", config.Read{Mode: config.ReadSubscribe, Subscribe: &config.Subscribe{Sampling: -1, Queue: 4294967295}}},
+		{"poll leaves Subscribe nil", "{poll: 2s}", config.Read{Mode: config.ReadPoll, Interval: 2 * time.Second}},
+		{"event leaves Subscribe nil", "event", config.Read{Mode: config.ReadEvent}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := mustParse(t, []byte(edit(t, base, "read: subscribe", "read: "+tt.read)))
+			if got := doc.Inputs[0].Devices[0].Points[0].Read; !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("read = %+v (subscribe %+v), want %+v (subscribe %+v)", got, got.Subscribe, tt.want, tt.want.Subscribe)
+			}
+		})
 	}
 }

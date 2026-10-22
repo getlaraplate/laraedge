@@ -141,15 +141,44 @@
       }
     },
     "read": {
-      "description": "subscribe, event, or a polling interval.",
+      "description": "subscribe, event, a polling interval, or subscribe with its settings.",
       "if": { "type": "string" },
       "then": { "enum": ["subscribe", "event"] },
       "else": {
         "type": "object",
-        "required": ["poll"],
         "additionalProperties": false,
-        "properties": { "poll": { "$ref": "#/$defs/duration" } }
+        "properties": {
+          "poll": { "$ref": "#/$defs/duration" },
+          "subscribe": { "$ref": "#/$defs/readSubscribe" }
+        },
+        "if": { "required": ["subscribe"] },
+        "then": { "properties": { "poll": false } },
+        "else": { "required": ["poll"] }
       }
+    },
+    "readSubscribe": {
+      "description": "The settings of a point read by subscription. A driver that does not subscribe ignores them; a driver that does uses what its protocol has room for.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sampling": {
+          "description": "How often the source samples the value; absent means the source's own publishing interval.",
+          "$ref": "#/$defs/duration"
+        },
+        "queue": {
+          "description": "How many values the source queues between two publications; absent means the driver's default.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "deadband": { "$ref": "#/$defs/readDeadband" }
+      }
+    },
+    "readDeadband": {
+      "description": "The change a value needs to be reported: a non-negative number (absolute), or a percentage up to 100 (\"5%\") of the range the source reports for the value.",
+      "if": { "type": "string" },
+      "then": { "pattern": "^[0-9]+(\\.[0-9]+)?%?$" },
+      "else": { "type": "number", "minimum": 0 }
     },
     "transform": {
       "description": "One step of the transform chain: an object with a single key naming a transform of the catalogue, whose value holds the transform's parameters.",

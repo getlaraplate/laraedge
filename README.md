@@ -14,7 +14,8 @@ Shop-floor edge agent for the Laraplate MES. It reads machines, probes, operator
 measurement files, and delivers their samples to Laraplate over the `laraplate-machine/1` protocol
 (HTTP or MQTT) without losing data across network outages, restarts or power loss.
 
-The agent core is built: the `simulated` and `modbus` (TCP, RTU, RTU over TCP) input drivers, the
+The agent core is built: the `simulated`, `modbus` (TCP, RTU, RTU over TCP) and `opcua` (subscribe or poll, signed and
+encrypted sessions with explicitly trusted server certificates) input drivers, the
 `laraplate-http` output, a durable disk buffer per output with loss markers, versioned configuration from a local file or from Laraplate, a
 local status endpoint with Prometheus metrics, JSON logs and the systemd watchdog. The level-1
 transforms of points are built too, with `probe` and `config test` to try them offline. The other real
@@ -37,7 +38,7 @@ cd examples/simulated && LARAPLATE_EDGE_TOKEN=... ../../laraplate-edge run --boo
 ```
 
 Commands: `run --bootstrap <path>`, `config validate <file>`, `config test <file> --input <samples.jsonl>`,
-`probe <input>`, `status [--listen addr]`, `version`.
+`probe <input>`, `browse <input>`, `opcua trust <input>`, `status [--listen addr]`, `version`.
 
 Tests:
 
