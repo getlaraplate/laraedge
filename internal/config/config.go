@@ -691,11 +691,15 @@ func (b *builder) subscribe(p path, raw json.RawMessage) *Subscribe {
 }
 
 // deadband returns the text of a deadband and refuses a percentage above 100.
-// A text the schema refused is left to the schema's message.
+// A text the schema refused is left to the schema's message. A JSON number is
+// written in plain decimal, never with an exponent: YAML 0.0000001 reaches
+// here as 1e-07, which drivers read as decimal text only.
 func (b *builder) deadband(p path, raw json.RawMessage) string {
 	var text string
+	isNumber := false
 	if err := json.Unmarshal(raw, &text); err != nil {
 		text = strings.TrimSpace(string(raw))
+		isNumber = true
 	}
 	number, percent := strings.CutSuffix(text, "%")
 	value, err := strconv.ParseFloat(number, 64)
@@ -704,6 +708,8 @@ func (b *builder) deadband(p path, raw json.RawMessage) string {
 		b.add(p, "is too large")
 	case err == nil && percent && value > 100:
 		b.add(p, "must be at most 100%")
+	case err == nil && isNumber:
+		text = strconv.FormatFloat(value, 'f', -1, 64)
 	}
 	return text
 }

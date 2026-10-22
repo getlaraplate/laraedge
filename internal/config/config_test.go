@@ -933,6 +933,36 @@ func TestBufferMaxSizeAtTheMinimum(t *testing.T) {
 	}
 }
 
+// TestDeadbandNumbersReachDriversInDecimal: a number YAML or JSON writes
+// with an exponent, or that encoding/json renders with one, is plain decimal
+// text in the document.
+func TestDeadbandNumbersReachDriversInDecimal(t *testing.T) {
+	const jsonDoc = `{"schema": "laraplate-edge-config/1", "version": 3,
+"inputs": [{"id": "sim-line", "driver": "simulated", "connection": {"scenario": "s.json"},
+  "devices": [{"device": "press-07", "points": [{"signal": "state", "address": "state", "read": {"subscribe": {"deadband": %s}}}]}]}],
+"outputs": [{"id": "main", "type": "laraplate-http", "url": "https://erp.example.com", "token": "secret://env/TOKEN"}]}`
+
+	tests := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"YAML small", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: 0.0000001}}"), "0.0000001"},
+		{"YAML large", edit(t, base, "read: subscribe", "read: {subscribe: {deadband: 1e21}}"), "1000000000000000000000"},
+		{"JSON small", fmt.Sprintf(jsonDoc, "0.0000001"), "0.0000001"},
+		{"JSON large", fmt.Sprintf(jsonDoc, "1e21"), "1000000000000000000000"},
+		{"JSON exponent", fmt.Sprintf(jsonDoc, "2.5E-3"), "0.0025"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := mustParse(t, []byte(tt.doc))
+			if got := doc.Inputs[0].Devices[0].Points[0].Read.Subscribe.Deadband; got != tt.want {
+				t.Errorf("deadband = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseSubscribeLongForm(t *testing.T) {
 	tests := []struct {
 		name string
