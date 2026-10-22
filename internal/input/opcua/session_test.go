@@ -77,6 +77,7 @@ func testDeps(t *testing.T) (dialDeps, *syncBuffer) {
 		Trust:    &TrustStore{Dir: PKIDir(t.TempDir())},
 		Rejected: &rejectedSet{},
 		Log:      logging.New(logs, slog.LevelDebug),
+		timing:   &testTimings,
 	}, logs
 }
 
@@ -827,7 +828,7 @@ func (c readSignal) Read(ctx context.Context, req *ua.ReadRequest) (*ua.ReadResp
 func TestCloseWhileAReadIsInFlight(t *testing.T) {
 	srv := startTestServer(t)
 	deps, _ := testDeps(t)
-	slow := productionTimings
+	slow := testTimings
 	slow.Request = time.Minute // only Close can end the stalled Read
 	slow.Close = 200 * time.Millisecond
 	deps.timing = &slow
@@ -1022,7 +1023,7 @@ func TestLateOnLostIsBoundToItsSession(t *testing.T) {
 func TestCurrentTimeTimesOutWhenTheProxyStalls(t *testing.T) {
 	srv := startTestServer(t)
 	deps, _ := testDeps(t)
-	short := productionTimings
+	short := testTimings
 	short.Request = 200 * time.Millisecond
 	short.Close = 200 * time.Millisecond
 	deps.timing = &short
@@ -1060,6 +1061,8 @@ type fakeClient struct {
 
 	mu     sync.Mutex
 	notify chan<- *opcua.PublishNotificationData
+	// params are the parameters of the last Subscribe.
+	params opcua.SubscriptionParameters
 	// dataTypeReads are the sizes of the DataType reads.
 	dataTypeReads []int
 }
@@ -1128,13 +1131,14 @@ func (f *fakeClient) BrowseNext(_ context.Context, req *ua.BrowseNextRequest) (*
 	return f.browseNextFn(req)
 }
 
-func (f *fakeClient) Subscribe(_ context.Context, _ *opcua.SubscriptionParameters, ch chan<- *opcua.PublishNotificationData) (uaSubscription, error) {
+func (f *fakeClient) Subscribe(_ context.Context, p *opcua.SubscriptionParameters, ch chan<- *opcua.PublishNotificationData) (uaSubscription, error) {
 	if f.panicAt == "subscribe" {
 		panic("injected subscribe panic")
 	}
 
 	f.mu.Lock()
 	f.notify = ch
+	f.params = *p
 	f.mu.Unlock()
 
 	return fakeSubscription{f: f}, nil
@@ -1384,5 +1388,66 @@ func TestTimingsWatchdog(t *testing.T) {
 		if got := productionTimings.watchdog(tt.deathTolerance); got != tt.want {
 			t.Fatalf("watchdog(%v) = %v, want %v", tt.deathTolerance, got, tt.want)
 		}
+	}
+}
+
+// TestSubscriptionLifetime: at least three keep-alive counts, otherwise a
+// minute of publishing intervals.
+func TestSubscriptionLifetime(t *testing.T) {
+	tests := []struct {
+		interval time.Duration
+		want     uint32
+	}{
+		{interval: time.Second, want: 60},
+		{interval: 50 * time.Millisecond, want: 1200},
+		{interval: 7 * time.Second, want: 30},
+		{interval: time.Minute, want: 30},
+		{interval: 40 * time.Second, want: 30},
+		{interval: 2300 * time.Microsecond, want: 26087},
+	}
+
+	for _, tt := range tests {
+		if got := productionTimings.lifetime(tt.interval); got != tt.want {
+			t.Errorf("lifetime(%v) = %d, want %d", tt.interval, got, tt.want)
+		}
+	}
+}
+
+// TestSubscribeRequestsTheLifetime: the subscription request carries the
+// derived lifetime count, or the one of the timings when set.
+func TestSubscribeRequestsTheLifetime(t *testing.T) {
+	tests := []struct {
+		name   string
+		timing timings
+		want   uint32
+	}{
+		{name: "production", timing: productionTimings, want: 1200},
+		{name: "tests", timing: testTimings, want: 1 << 30},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps, _ := testDeps(t)
+			deps.timing = &tt.timing
+			f := &fakeClient{}
+			withFake(&deps, f)
+
+			s := mustDial(t, noneConnection("opc.tcp://fake:4840"), deps)
+
+			ctx, cancel := context.WithTimeout(context.Background(), guard)
+			defer cancel()
+
+			if _, _, err := s.Subscribe(ctx, 50*time.Millisecond, fakeItems); err != nil {
+				t.Fatalf("Subscribe: %v", err)
+			}
+
+			f.mu.Lock()
+			got := f.params
+			f.mu.Unlock()
+
+			if got.LifetimeCount != tt.want || got.MaxKeepAliveCount != productionTimings.MaxKeepAliveCount {
+				t.Fatalf("lifetime %d, keep-alive %d; want %d, %d", got.LifetimeCount, got.MaxKeepAliveCount, tt.want, productionTimings.MaxKeepAliveCount)
+			}
+		})
 	}
 }

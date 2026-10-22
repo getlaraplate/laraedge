@@ -88,6 +88,10 @@ type timings struct {
 	Session time.Duration
 	// MaxKeepAliveCount is the subscription's keep-alive count.
 	MaxKeepAliveCount uint32
+	// LifetimeCount is the subscription's lifetime count; 0 derives it from
+	// the publishing interval (subscriptionLifetime). Tests set a huge value:
+	// see sharedTestServer.
+	LifetimeCount uint32
 	// WatchdogMax and WatchdogMin bound the watchdog read interval.
 	WatchdogMax time.Duration
 	WatchdogMin time.Duration
@@ -103,6 +107,37 @@ var productionTimings = timings{
 	WatchdogMax:       5 * time.Second,
 	WatchdogMin:       time.Second,
 	Close:             time.Second,
+}
+
+// lifetimeWindow is how long a server keeps a subscription whose session
+// was lost: past it, the server deletes the subscription instead of keeping
+// it for a client that is not coming back.
+const lifetimeWindow = time.Minute
+
+// lifetime is the subscription's lifetime count for interval: LifetimeCount
+// when set, otherwise subscriptionLifetime.
+func (t timings) lifetime(interval time.Duration) uint32 {
+	if t.LifetimeCount != 0 {
+		return t.LifetimeCount
+	}
+
+	return subscriptionLifetime(interval, t.MaxKeepAliveCount)
+}
+
+// subscriptionLifetime is max(3 x maxKeepAlive, ceil(lifetimeWindow /
+// interval)): OPC UA requires a lifetime count of at least three keep-alive
+// counts, and a lost session's subscription then expires within about
+// lifetimeWindow. The library's default (10000 publishing intervals) keeps
+// it 2.8 hours at one second.
+func subscriptionLifetime(interval time.Duration, maxKeepAlive uint32) uint32 {
+	floor := uint64(3) * uint64(maxKeepAlive)
+	count := uint64(1)
+
+	if interval > 0 {
+		count = uint64((lifetimeWindow + interval - 1) / interval)
+	}
+
+	return uint32(min(max(floor, count), math.MaxUint32))
 }
 
 // watchdog is the interval of the CurrentTime read: min(WatchdogMax,
@@ -936,7 +971,7 @@ func (s *uaSession) Subscribe(ctx context.Context, interval time.Duration, items
 	var sub uaSubscription
 
 	err := contain(func() (err error) {
-		sub, err = s.client.Subscribe(ctx, &opcua.SubscriptionParameters{Interval: interval, MaxKeepAliveCount: s.t.MaxKeepAliveCount}, in)
+		sub, err = s.client.Subscribe(ctx, &opcua.SubscriptionParameters{Interval: interval, MaxKeepAliveCount: s.t.MaxKeepAliveCount, LifetimeCount: s.t.lifetime(interval)}, in)
 
 		return err
 	})

@@ -84,6 +84,7 @@ func newHarness(t *testing.T, cfg config.Input) *harness {
 		t.Fatalf("New: %v", err)
 	}
 	in.jitter = func() float64 { return 0 }
+	in.timing = &testTimings
 
 	return &harness{t: t, clk: clk, in: in, dataDir: dataDir, logs: logs}
 }
@@ -1039,7 +1040,7 @@ func TestWatchdogFailureReconnects(t *testing.T) {
 	h := newHarness(t, opcuaInput(noneConn(srv.URL), 3*time.Second, device("press-07",
 		subscribed("temp", srv.address(nodeTemp), "float64"),
 	)))
-	short := productionTimings
+	short := testTimings
 	short.Request = 200 * time.Millisecond
 	short.Close = 200 * time.Millisecond
 	h.in.timing = &short

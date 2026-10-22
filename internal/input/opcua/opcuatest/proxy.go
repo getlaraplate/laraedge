@@ -133,6 +133,7 @@ func (p *proxy) pipe(dst, src net.Conn) {
 	defer func() {
 		_ = dst.Close()
 		_ = src.Close()
+		p.forget(dst, src)
 	}()
 
 	buf := make([]byte, 32<<10)
@@ -148,6 +149,17 @@ func (p *proxy) pipe(dst, src net.Conn) {
 		if err != nil {
 			return
 		}
+	}
+}
+
+// forget removes ended connections from the map, so a long run does not
+// keep every connection it ever made.
+func (p *proxy) forget(conns ...net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, c := range conns {
+		delete(p.conns, c)
 	}
 }
 

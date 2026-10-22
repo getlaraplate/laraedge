@@ -26,6 +26,16 @@ import (
 // guard, never a timing assertion (ruling R3).
 const guard = 10 * time.Second
 
+// testTimings are productionTimings with a lifetime count no test run
+// reaches (see sharedTestServer). 1<<30, not MaxUint32: the library server
+// compares its counter with int(RevisedLifetimeCount), which is -1 on 386.
+var testTimings = func() timings {
+	t := productionTimings
+	t.LifetimeCount = 1 << 30
+
+	return t
+}()
+
 // testNamespace is the namespace URI of the test server's own nodes.
 const testNamespace = "urn:laraplate:test"
 
@@ -175,6 +185,16 @@ var shared struct {
 
 // sharedTestServer returns the binary's shared server; tests must not drop
 // or stall its proxy, nor assume the value of nodeChanging.
+//
+// Library trap: the library server ignores CloseSession's
+// DeleteSubscriptions (server/session_service.go), so every closed test
+// session leaves its subscription behind. An orphan that reaches its
+// lifetime deletes itself from its own goroutine, which deadlocks against a
+// concurrent CreateMonitoredItems (MonitoredItemService.Mu and
+// SubscriptionService.Mu taken in opposite orders), and the server, which
+// serves every request on one goroutine, then answers nothing: every later
+// dial of the binary times out (seen under -race -count=30). Tests therefore
+// subscribe with testTimings, whose lifetime no run reaches.
 func sharedTestServer(t *testing.T) *testServer {
 	t.Helper()
 	loadFixtures(t)
@@ -530,6 +550,7 @@ func (p *tcpProxy) pipe(dst, src net.Conn) {
 	defer func() {
 		_ = dst.Close()
 		_ = src.Close()
+		p.forget(dst, src)
 	}()
 
 	buf := make([]byte, 32<<10)
@@ -547,6 +568,17 @@ func (p *tcpProxy) pipe(dst, src net.Conn) {
 		if err != nil {
 			return
 		}
+	}
+}
+
+// forget removes ended connections from the map, so a long run does not
+// keep every connection it ever made.
+func (p *tcpProxy) forget(conns ...net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, c := range conns {
+		delete(p.conns, c)
 	}
 }
 
