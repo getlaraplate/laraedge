@@ -6,6 +6,9 @@ Amended 2026-10-20 after delivery to match the shipped behaviour (rulings R5-R17
 `modbus` delivered (2026-10-21) by `../plans/2026-10-20-modbus.md`: where it differs from section 5 (a timeout
 keeps the connection; byte orders for 1- and 4-register types) and from D6 (the serial port is exclusive on Windows
 only), its Delivery status and rulings R7, R12, R13 and R19 describe the shipped behaviour.
+`opcua` delivered (2026-10-22) by `../plans/2026-10-21-opcua.md`: its Delivery status and rulings describe how the
+shipped driver handles the library's limits (explicit trust, request chunking, subscription lifetime) and the
+fixed timing section 6 leaves open.
 
 **Date:** 2026-10-19
 
