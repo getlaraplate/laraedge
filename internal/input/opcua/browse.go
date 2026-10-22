@@ -15,9 +15,9 @@ import (
 
 // The browse command walks the address space of a server to help a technician
 // write point addresses. It is a read-only tool: it sends Browse, BrowseNext
-// and Read requests only, never a request that can fault (a Read of the data
-// types is chunked at the server's MaxNodesPerRead, an empty one is never
-// sent) and never reads a value.
+// and Read requests only, never a request that can fault (the Read of the
+// data types and access levels is chunked at the server's MaxNodesPerRead, an
+// empty one is never sent) and never reads a value.
 const (
 	// BrowseMaxNodes is the number of nodes browse prints at most.
 	BrowseMaxNodes = 1000
@@ -46,6 +46,10 @@ type BrowseEntry struct {
 	// DataType is the data type name of a variable (Double, Int32, ...), the
 	// NodeId of an unknown one; empty for other nodes and when unreadable.
 	DataType string
+	// Access is what a variable's AccessLevel allows on its value: "r"
+	// (CurrentRead), "w" (CurrentWrite), "rw", or "-" for neither; empty for
+	// other nodes and when unreadable.
+	Access string
 }
 
 // Browse connects like Probe (own certificate, trust check included: an
@@ -54,8 +58,9 @@ type BrowseEntry struct {
 // (the zero Node means the Objects folder, i=85) and calls emit for each
 // node, at most BrowseMaxNodes; truncated tells the walk stopped there. depth
 // counts the levels printed below the start node (1 prints its children
-// only). A node reached twice is printed once and expanded once. Values are
-// not read.
+// only). A node reached twice is printed once and expanded once; a node the
+// server refuses to browse (a Bad status) is printed and not expanded, an
+// error only for the start node. Values are not read.
 func (in *Input) Browse(ctx context.Context, start Node, depth int, emit func(BrowseEntry)) (truncated bool, err error) {
 	if depth < 1 || depth > MaxBrowseDepth {
 		return false, fmt.Errorf("opcua input %q: browse: depth must be from 1 to %d", in.cfg.ID, MaxBrowseDepth)
@@ -112,13 +117,20 @@ type candidate struct {
 	key      string
 	foreign  bool
 	dataType string
+	access   string
 }
 
 // visit prints the children of node, found at level, and recurses into
-// them. It returns when the walk is done or the node cap was reached.
+// them. It returns when the walk is done or the node cap was reached. A
+// node below the start node that the server refuses to browse stays
+// unexpanded; any other error ends the walk.
 func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 	refs, err := w.s.Browse(ctx, node)
 	if err != nil {
+		if level > 0 && errors.Is(err, errBrowse) {
+			return nil
+		}
+
 		return err
 	}
 
@@ -144,7 +156,7 @@ func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 		cands = append(cands, c)
 	}
 
-	if err := w.readDataTypes(ctx, cands[:min(len(cands), remaining)]); err != nil {
+	if err := w.readAttributes(ctx, cands[:min(len(cands), remaining)]); err != nil {
 		return err
 	}
 
@@ -177,9 +189,9 @@ func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 	return nil
 }
 
-// readDataTypes sets the data type of the variables of cands with one
-// batched Read (chunked by the session).
-func (w *walker) readDataTypes(ctx context.Context, cands []*candidate) error {
+// readAttributes sets the data type and the access level of the variables
+// of cands with one batched Read (chunked by the session).
+func (w *walker) readAttributes(ctx context.Context, cands []*candidate) error {
 	var (
 		ids   []*ua.NodeID
 		which []*candidate
@@ -196,13 +208,14 @@ func (w *walker) readDataTypes(ctx context.Context, cands []*candidate) error {
 		return nil
 	}
 
-	values, err := w.s.DataTypes(ctx, ids)
+	values, err := w.s.VariableAttributes(ctx, ids)
 	if err != nil {
 		return err
 	}
 
-	for i, dv := range values {
-		which[i].dataType = w.dataTypeName(dv)
+	for i, attrs := range values {
+		which[i].dataType = w.dataTypeName(attrs.DataType)
+		which[i].access = accessText(attrs.AccessLevel)
 	}
 
 	return nil
@@ -214,6 +227,7 @@ func (w *walker) entry(c *candidate, level int) BrowseEntry {
 		NodeID:   Printable(formatNodeID(c.ref.NodeID.NodeID, c.ref.NodeID.NamespaceURI, w.namespaces)),
 		Class:    strings.TrimPrefix(c.ref.NodeClass.String(), "NodeClass"),
 		DataType: Printable(c.dataType),
+		Access:   c.access,
 	}
 	if c.ref.BrowseName != nil {
 		e.Name = Printable(c.ref.BrowseName.Name)
@@ -245,6 +259,32 @@ func (w *walker) dataTypeName(dv *ua.DataValue) string {
 	}
 
 	return formatNodeID(nodeID, "", w.namespaces)
+}
+
+// accessText renders an AccessLevel attribute as r, w, rw or -; empty when
+// unreadable.
+func accessText(dv *ua.DataValue) string {
+	if dv == nil || uint32(dv.Status)>>30 != 0 || dv.Value == nil {
+		return ""
+	}
+
+	level, ok := dv.Value.Value().(uint8)
+	if !ok {
+		return ""
+	}
+
+	text := ""
+	if level&uint8(ua.AccessLevelTypeCurrentRead) != 0 {
+		text += "r"
+	}
+	if level&uint8(ua.AccessLevelTypeCurrentWrite) != 0 {
+		text += "w"
+	}
+	if text == "" {
+		return "-"
+	}
+
+	return text
 }
 
 // formatNodeID writes a NodeId in the nsu=<uri>;<id> form when it is outside

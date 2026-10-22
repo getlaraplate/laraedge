@@ -57,7 +57,7 @@ type Options struct {
 //	  speed  Double variable
 //	  state  String variable
 //	  Cell   folder
-//	    deep   Boolean variable
+//	    deep   Boolean variable, read only (every other variable is rw)
 //	    Line1  a reference back to the folder Line1 (a loop)
 //	Bulk   folder of Options.Bulk Int32 variables v0, v1, ... (when asked)
 type Server struct {
@@ -270,23 +270,26 @@ func (s *Server) Up(t testing.TB) {
 func buildNodes(ns *server.NodeNameSpace, opts Options) {
 	objects := ns.Objects()
 
-	variable := func(parent *server.Node, name string, dataType uint32, value any) {
+	rw := byte(ua.AccessLevelTypeCurrentRead | ua.AccessLevelTypeCurrentWrite)
+
+	variable := func(parent *server.Node, name string, dataType uint32, access byte, value any) {
 		n := ns.AddNewVariableStringNode(name, value)
 		_ = n.SetAttribute(ua.AttributeIDDataType, server.DataValueFromValue(ua.NewNumericNodeID(0, dataType)))
+		_ = n.SetAttribute(ua.AttributeIDAccessLevel, server.DataValueFromValue(access))
 		parent.AddRef(n, id.HasComponent, true)
 	}
 
-	variable(objects, "temp", id.Double, float64(20))
-	variable(objects, "count", id.Int32, int32(1))
+	variable(objects, "temp", id.Double, rw, float64(20))
+	variable(objects, "count", id.Int32, rw, int32(1))
 
 	line := folder(ns, "Line1")
 	cell := folder(ns, "Cell")
 
 	objects.AddRef(line, id.HasComponent, true)
-	variable(line, "speed", id.Double, float64(1.5))
-	variable(line, "state", id.String, "idle")
+	variable(line, "speed", id.Double, rw, float64(1.5))
+	variable(line, "state", id.String, rw, "idle")
 	line.AddRef(cell, id.HasComponent, true)
-	variable(cell, "deep", id.Boolean, true)
+	variable(cell, "deep", id.Boolean, byte(ua.AccessLevelTypeCurrentRead), true)
 	cell.AddRef(line, id.HasComponent, true)
 
 	if opts.Bulk > 0 {
@@ -294,7 +297,7 @@ func buildNodes(ns *server.NodeNameSpace, opts Options) {
 		objects.AddRef(bulk, id.HasComponent, true)
 
 		for i := range opts.Bulk {
-			variable(bulk, "v"+strconv.Itoa(i), id.Int32, int32(i))
+			variable(bulk, "v"+strconv.Itoa(i), id.Int32, rw, int32(i))
 		}
 	}
 }

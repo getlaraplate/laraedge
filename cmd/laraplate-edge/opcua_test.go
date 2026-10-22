@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/input/opcua"
 	"github.com/getlaraplate/laraedge/internal/input/opcua/opcuatest"
 )
 
@@ -180,6 +181,39 @@ func TestOPCUATrustWithTheRightThumbprintDoesNotAsk(t *testing.T) {
 
 	if !fileExists(env.trusted(env.srv.Thumbprint)) {
 		t.Fatal("the certificate was not trusted")
+	}
+}
+
+// A thumbprint copied from a server's administration, in colon-separated
+// upper-case pairs, is the same thumbprint.
+func TestOPCUATrustAcceptsAColonSeparatedThumbprint(t *testing.T) {
+	env := newOPCUAEnv(t, opcuatest.Options{})
+
+	var pairs []string
+	for i := 0; i < len(env.srv.Thumbprint); i += 2 {
+		pairs = append(pairs, strings.ToUpper(env.srv.Thumbprint[i:i+2]))
+	}
+
+	r := env.trust(t, "", "--thumbprint", strings.Join(pairs, ":"))
+	if r.code != exitOK || !strings.Contains(r.stdout, "Trusted "+env.srv.Thumbprint+"\n") {
+		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", r.code, r.stdout, r.stderr)
+	}
+}
+
+// A --thumbprint that is not a SHA-1 after normalisation is a usage error,
+// found before any connection.
+func TestOPCUATrustRefusesAMalformedThumbprint(t *testing.T) {
+	env := newOPCUAEnv(t, opcuatest.Options{})
+
+	for _, value := range []string{"ab", strings.Repeat("ab", 20) + "a", strings.Repeat("zz", 20), strings.Repeat("ab", 19) + "-ab"} {
+		r := env.trust(t, "y\n", "--thumbprint", value)
+		if r.code != exitUsage || !strings.Contains(r.stderr, "--thumbprint: want 40 hexadecimal characters") || strings.Contains(r.stdout, "Thumbprint:") {
+			t.Errorf("--thumbprint %q: exit code = %d, stdout = %q, stderr = %q", value, r.code, r.stdout, r.stderr)
+		}
+	}
+
+	if entries, _ := os.ReadDir(filepath.Dir(env.trusted(env.srv.Thumbprint))); len(entries) != 0 {
+		t.Fatalf("trusted/ holds %d files", len(entries))
 	}
 }
 
@@ -405,7 +439,7 @@ func browseLines(t *testing.T, env opcuaEnv, args ...string) []string {
 	return strings.Split(strings.TrimSuffix(r.stdout, "\n"), "\n")
 }
 
-func TestBrowseFromANodeIndentsByDepthAndNamesDataTypes(t *testing.T) {
+func TestBrowseFromANodeIndentsByDepthAndNamesDataTypesAndAccess(t *testing.T) {
 	env := newOPCUAEnv(t, opcuatest.Options{})
 	env.trustServer(t)
 
@@ -414,10 +448,10 @@ func TestBrowseFromANodeIndentsByDepthAndNamesDataTypes(t *testing.T) {
 
 	got := browseLines(t, env, "--node", line1, "--depth", "3")
 	want := []string{
-		prefix + "s=speed  speed  Variable  Double",
-		prefix + "s=state  state  Variable  String",
+		prefix + "s=speed  speed  Variable  Double  rw",
+		prefix + "s=state  state  Variable  String  rw",
 		prefix + "s=Cell  Cell  Object",
-		"  " + prefix + "s=deep  deep  Variable  Boolean",
+		"  " + prefix + "s=deep  deep  Variable  Boolean  r",
 		// The reference back to the start node is printed once, and what is
 		// below it was printed already.
 		"  " + line1 + "  Line1  Object",
@@ -443,6 +477,24 @@ func TestBrowseFromANodeIndentsByDepthAndNamesDataTypes(t *testing.T) {
 	}
 }
 
+func TestBrowseLineMarksAnUnreadableAttribute(t *testing.T) {
+	tests := []struct {
+		entry opcua.BrowseEntry
+		want  string
+	}{
+		{opcua.BrowseEntry{NodeID: "i=85", Name: "Objects", Class: "Object"}, "i=85  Objects  Object"},
+		{opcua.BrowseEntry{Depth: 1, NodeID: "ns=1;s=a", Name: "a", Class: "Variable", DataType: "Double", Access: "-"}, "  ns=1;s=a  a  Variable  Double  -"},
+		{opcua.BrowseEntry{NodeID: "ns=1;s=a", Name: "a", Class: "Variable", DataType: "Double"}, "ns=1;s=a  a  Variable  Double  ?"},
+		{opcua.BrowseEntry{NodeID: "ns=1;s=a", Name: "a", Class: "Variable", Access: "rw"}, "ns=1;s=a  a  Variable  ?  rw"},
+	}
+
+	for _, tt := range tests {
+		if got := browseLine(tt.entry); got != tt.want {
+			t.Errorf("browseLine(%+v) = %q, want %q", tt.entry, got, tt.want)
+		}
+	}
+}
+
 func TestBrowseStartsAtTheObjectsFolder(t *testing.T) {
 	env := newOPCUAEnv(t, opcuatest.Options{})
 	env.trustServer(t)
@@ -465,7 +517,7 @@ func TestBrowseStopsAfterThousandNodes(t *testing.T) {
 		t.Fatalf("%d lines, want 1000 nodes and the note", len(got))
 	}
 
-	if got[0] != "nsu="+testNS+";s=v0  v0  Variable  Int32" || got[1000] != "... stopped after 1000 nodes" {
+	if got[0] != "nsu="+testNS+";s=v0  v0  Variable  Int32  rw" || got[1000] != "... stopped after 1000 nodes" {
 		t.Fatalf("first line %q, last line %q", got[0], got[1000])
 	}
 }

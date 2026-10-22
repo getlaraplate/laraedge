@@ -290,8 +290,10 @@ Trusted 4d8f0c5e1b9a7d3c62e4f1a08b5c9d2e7f3a6b10
   trusted` and exits 1. The certificate is stored in `data_dir/opcua/pki/trusted/<thumbprint>.der`.
 - The server presented that certificate on a channel that proves nothing, so compare the thumbprint with the
   one the server's own administration shows before answering yes. In a script give it: `--thumbprint
-  <hex>` (40 hexadecimal characters, no colons, any letter case) trusts without asking when it equals the
-  server's, and exits 1, storing nothing, when it does not.
+  <hex>` (40 hexadecimal characters in any letter case; colons, spaces and tabs between them are ignored, so
+  `4D:8F:0C:...` works) trusts without asking when it equals the server's, and exits 1, storing nothing, when
+  it does not. A value that is not 40 hexadecimal characters is a usage error (exit 2), before any
+  connection.
 - A certificate already trusted prints `Already trusted <thumbprint>` and exits 0.
 - A running agent picks the new certificate up at its next connection attempt, without a restart: at most
   a minute later, the longest wait of its backoff.
@@ -312,19 +314,24 @@ laraplate-edge browse ua-server --config config.yaml --bootstrap bootstrap.yaml 
 
 ```
 nsu=urn:vendor:press;s=Press07  Press07  Object
-  nsu=urn:vendor:press;s=Press07.Running  Running  Variable  Boolean
-  nsu=urn:vendor:press;s=Press07.Force  Force  Variable  Double
+  nsu=urn:vendor:press;s=Press07.Running  Running  Variable  Boolean  r
+  nsu=urn:vendor:press;s=Press07.Force  Force  Variable  Double  rw
 ```
 
 - It connects like `probe` (the trust check included), walks the hierarchical references depth first from
   the Objects folder (`i=85`), or from `--node <nodeid>` (any address form of the driver, `nsu=` included), and
   prints one line per node, indented two spaces per level: the NodeId, the browse name, the node class
-  and, for a variable, the name of its data type. The start node itself is not printed.
+  and, for a variable, the name of its data type and its access level, `<NodeId>  <BrowseName>  <NodeClass>[
+  <DataType>  <access>]`. The access level tells what the server allows on the value: `r` (read), `w`
+  (write), `rw`, or `-` for neither; a point needs `r`. An attribute the server does not answer prints as `?`.
+  The start node itself is not printed.
 - `--depth` is the number of levels printed below the start node, 1 (its children only) to 10, 2 by default.
 - A NodeId whose namespace is not 0 is printed in the `nsu=<uri>;...` form when the server's
   `NamespaceArray` names the namespace, in the `ns=<n>;...` form otherwise: paste the line's NodeId as the
   point's `address`. The `nsu=` form survives the server renumbering its namespaces.
-- A node reached twice is printed once. The walk stops after 1000 nodes with `... stopped after 1000 nodes`
+- A node reached twice is printed once. A node the server refuses to browse (a Bad status, such as
+  `BadUserAccessDenied`) is printed without what is below it, and the walk goes on; refused at the start
+  node, `browse` fails. The walk stops after 1000 nodes with `... stopped after 1000 nodes`
   on stdout: narrow it with `--node` and `--depth`.
 - No value is read. Like `probe`, it opens a session of its own.
 

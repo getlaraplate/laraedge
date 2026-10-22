@@ -54,7 +54,7 @@ commands:
                              show the certificate an OPC UA server presents and
                              trust it after a yes on stdin, or without asking
                              when --thumbprint equals the server's
-  opcua trust --list (--config <file> | --bootstrap <path>)
+  opcua trust --list --bootstrap <path>
                              list the trusted certificates
   status [--listen addr]     query a running agent (default ` + defaultListen + `);
                              the token, if any, from ` + statusTokenEnv + `

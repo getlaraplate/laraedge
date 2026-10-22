@@ -878,7 +878,7 @@ func (f *fakeSession) CurrentTime(context.Context) error { return errClosed }
 func (f *fakeSession) Browse(context.Context, *ua.NodeID) ([]*ua.ReferenceDescription, error) {
 	return nil, errClosed
 }
-func (f *fakeSession) DataTypes(context.Context, []*ua.NodeID) ([]*ua.DataValue, error) {
+func (f *fakeSession) VariableAttributes(context.Context, []*ua.NodeID) ([]variableAttributes, error) {
 	return nil, errClosed
 }
 func (f *fakeSession) Namespaces() []string { return nil }

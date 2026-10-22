@@ -1063,8 +1063,8 @@ type fakeClient struct {
 	notify chan<- *opcua.PublishNotificationData
 	// params are the parameters of the last Subscribe.
 	params opcua.SubscriptionParameters
-	// dataTypeReads are the sizes of the DataType reads.
-	dataTypeReads []int
+	// attributeReads are the sizes of the reads of variable attributes.
+	attributeReads []int
 }
 
 func (f *fakeClient) Connect(context.Context) error {
@@ -1089,13 +1089,24 @@ func (f *fakeClient) Read(_ context.Context, req *ua.ReadRequest) (*ua.ReadRespo
 	res := &ua.ReadResponse{}
 	limits := false
 
-	if len(req.NodesToRead) > 0 && req.NodesToRead[0].AttributeID == ua.AttributeIDDataType {
+	if len(req.NodesToRead) > 0 && req.NodesToRead[0].AttributeID != ua.AttributeIDValue {
 		f.mu.Lock()
-		f.dataTypeReads = append(f.dataTypeReads, len(req.NodesToRead))
+		f.attributeReads = append(f.attributeReads, len(req.NodesToRead))
 		f.mu.Unlock()
 	}
 
 	for _, rv := range req.NodesToRead {
+		switch {
+		case rv.AttributeID == ua.AttributeIDDataType:
+			res.Results = append(res.Results, &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(ua.NewNumericNodeID(0, rv.NodeID.IntID()))})
+
+			continue
+		case rv.AttributeID == ua.AttributeIDAccessLevel:
+			res.Results = append(res.Results, &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(uint8(rv.NodeID.IntID()))})
+
+			continue
+		}
+
 		switch rv.NodeID.IntID() {
 		case id.Server_ServerCapabilities_OperationLimits_MaxNodesPerRead, id.Server_ServerCapabilities_OperationLimits_MaxMonitoredItemsPerCall:
 			limits = true

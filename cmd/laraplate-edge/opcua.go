@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -115,6 +116,14 @@ func runOPCUATrust(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return exitUsage
 	}
 
+	want := ""
+	if *thumbprint != "" {
+		if want, ok = normalizeThumbprint(*thumbprint); !ok {
+			fmt.Fprintf(stderr, "%s--thumbprint: want 40 hexadecimal characters (colons and spaces are ignored)\n", prefix)
+			return exitUsage
+		}
+	}
+
 	target, code, ok := openOPCUAInput("opcua trust", stderr, *configFile, *bootstrapPath, positional[0])
 	if !ok {
 		return code
@@ -154,8 +163,8 @@ func runOPCUATrust(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 
 	fmt.Fprintf(stdout, "Subject: %s\nThumbprint: %s\nExpires: %s\n", cert.Subject, cert.Thumbprint, expires)
 
-	if *thumbprint != "" && !strings.EqualFold(*thumbprint, cert.Thumbprint) {
-		fmt.Fprintf(stderr, "%sthumbprint mismatch: want %s, server presents %s\n", prefix, *thumbprint, cert.Thumbprint)
+	if want != "" && want != cert.Thumbprint {
+		fmt.Fprintf(stderr, "%sthumbprint mismatch: want %s, server presents %s\n", prefix, want, cert.Thumbprint)
 		return exitFailure
 	}
 
@@ -166,7 +175,7 @@ func runOPCUATrust(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return exitOK
 	}
 
-	if *thumbprint == "" && !confirm(stdin, stdout) {
+	if want == "" && !confirm(stdin, stdout) {
 		fmt.Fprintln(stdout, "Not trusted")
 		return exitFailure
 	}
@@ -202,6 +211,22 @@ func confirm(in io.Reader, out io.Writer) bool {
 	default:
 		return false
 	}
+}
+
+// normalizeThumbprint drops the colons, spaces and tabs servers and tools
+// group a thumbprint with and lowers its case; false when what remains is
+// not 40 hexadecimal characters (a SHA-1).
+func normalizeThumbprint(s string) (string, bool) {
+	s = strings.ToLower(strings.NewReplacer(":", "", " ", "", "\t", "").Replace(s))
+	if len(s) != 40 {
+		return "", false
+	}
+
+	if _, err := hex.DecodeString(s); err != nil {
+		return "", false
+	}
+
+	return s, true
 }
 
 // listTrusted prints "<thumbprint>  <expires>  <subject>" for each trusted

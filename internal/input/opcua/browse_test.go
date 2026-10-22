@@ -13,12 +13,15 @@ import (
 )
 
 // treeSession is a session over a fixed address space: Browse answers from
-// refs by the NodeId text, DataTypes from types.
+// refs by the NodeId text (refused for the nodes of refused),
+// VariableAttributes from types and access.
 type treeSession struct {
 	session
 	namespaces []string
 	refs       map[string][]*ua.ReferenceDescription
+	refused    map[string]bool
 	types      map[string]*ua.NodeID
+	access     map[string]byte
 	browsed    []string
 	typeReads  []int
 }
@@ -28,18 +31,28 @@ func (s *treeSession) Namespaces() []string { return s.namespaces }
 func (s *treeSession) Browse(_ context.Context, node *ua.NodeID) ([]*ua.ReferenceDescription, error) {
 	s.browsed = append(s.browsed, node.String())
 
+	if s.refused[node.String()] {
+		return nil, fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadUserAccessDenied)
+	}
+
 	return s.refs[node.String()], nil
 }
 
-func (s *treeSession) DataTypes(_ context.Context, ids []*ua.NodeID) ([]*ua.DataValue, error) {
+func (s *treeSession) VariableAttributes(_ context.Context, ids []*ua.NodeID) ([]variableAttributes, error) {
 	s.typeReads = append(s.typeReads, len(ids))
 
-	out := make([]*ua.DataValue, len(ids))
+	unreadable := &ua.DataValue{EncodingMask: ua.DataValueStatusCode, Status: ua.StatusBadAttributeIDInvalid}
+
+	out := make([]variableAttributes, len(ids))
 	for i, nodeID := range ids {
+		out[i] = variableAttributes{DataType: unreadable, AccessLevel: unreadable}
+
 		if dt := s.types[nodeID.String()]; dt != nil {
-			out[i] = &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(dt)}
-		} else {
-			out[i] = &ua.DataValue{EncodingMask: ua.DataValueStatusCode, Status: ua.StatusBadAttributeIDInvalid}
+			out[i].DataType = &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(dt)}
+		}
+
+		if level, ok := s.access[nodeID.String()]; ok {
+			out[i].AccessLevel = &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(level)}
 		}
 	}
 
@@ -54,12 +67,13 @@ func ref(nodeID *ua.NodeID, name string, class ua.NodeClass) *ua.ReferenceDescri
 	}
 }
 
-// walkAll runs a walk and returns the printed lines as "depth:nodeid name class type".
+// walkAll runs a walk and returns the printed lines as "depth:nodeid name
+// class type access".
 func walkAll(t *testing.T, s session, start *ua.NodeID, depth int) (lines []string, truncated bool) {
 	t.Helper()
 
 	w := &walker{s: s, namespaces: s.Namespaces(), depth: depth, printed: map[string]bool{}, emit: func(e BrowseEntry) {
-		lines = append(lines, fmt.Sprintf("%d:%s %s %s %s", e.Depth, e.NodeID, e.Name, e.Class, e.DataType))
+		lines = append(lines, strings.TrimRight(fmt.Sprintf("%d:%s %s %s %s %s", e.Depth, e.NodeID, e.Name, e.Class, e.DataType, e.Access), " "))
 	}}
 
 	if err := w.visit(context.Background(), start, 0); err != nil {
@@ -69,11 +83,14 @@ func walkAll(t *testing.T, s session, start *ua.NodeID, depth int) (lines []stri
 	return lines, w.truncated
 }
 
-func TestWalkPrintsByDepthWithNamespaceURIsAndDataTypes(t *testing.T) {
+func TestWalkPrintsByDepthWithNamespaceURIsDataTypesAndAccess(t *testing.T) {
 	root := ua.NewNumericNodeID(0, id.ObjectsFolder)
 	line := ua.NewStringNodeID(2, "Line1")
 	speed := ua.NewStringNodeID(2, "speed")
 	custom := ua.NewStringNodeID(2, "custom")
+	setpoint := ua.NewStringNodeID(2, "setpoint")
+	command := ua.NewStringNodeID(2, "command")
+	hidden := ua.NewStringNodeID(2, "hidden")
 	deep := ua.NewStringNodeID(2, "deep")
 	server := ua.NewNumericNodeID(0, id.Server)
 
@@ -81,22 +98,40 @@ func TestWalkPrintsByDepthWithNamespaceURIsAndDataTypes(t *testing.T) {
 		namespaces: []string{"http://opcfoundation.org/UA/", "urn:local", "urn:plant"},
 		refs: map[string][]*ua.ReferenceDescription{
 			root.String(): {ref(server, "Server", ua.NodeClassObject), ref(line, "Line1", ua.NodeClassObject)},
-			line.String(): {ref(speed, "speed", ua.NodeClassVariable), ref(custom, "custom", ua.NodeClassVariable), ref(deep, "deep", ua.NodeClassObject)},
+			line.String(): {
+				ref(speed, "speed", ua.NodeClassVariable), ref(custom, "custom", ua.NodeClassVariable),
+				ref(setpoint, "setpoint", ua.NodeClassVariable), ref(command, "command", ua.NodeClassVariable),
+				ref(hidden, "hidden", ua.NodeClassVariable), ref(deep, "deep", ua.NodeClassObject),
+			},
 		},
 		types: map[string]*ua.NodeID{
-			speed.String():  ua.NewNumericNodeID(0, id.Double),
-			custom.String(): ua.NewNumericNodeID(2, 4711),
+			speed.String():    ua.NewNumericNodeID(0, id.Double),
+			custom.String():   ua.NewNumericNodeID(2, 4711),
+			setpoint.String(): ua.NewNumericNodeID(0, id.Double),
+			command.String():  ua.NewNumericNodeID(0, id.Boolean),
+			hidden.String():   ua.NewNumericNodeID(0, id.Int32),
+		},
+		// Bits other than CurrentRead (0x01) and CurrentWrite (0x02) are not
+		// printed: 0x04 is HistoryRead.
+		access: map[string]byte{
+			speed.String():    0x01 | 0x04,
+			setpoint.String(): 0x03,
+			command.String():  0x02,
+			hidden.String():   0x04,
 		},
 	}
 
 	got, truncated := walkAll(t, s, root, 2)
 
 	want := []string{
-		"0:i=2253 Server Object ",
-		"0:nsu=urn:plant;s=Line1 Line1 Object ",
-		"1:nsu=urn:plant;s=speed speed Variable Double",
+		"0:i=2253 Server Object",
+		"0:nsu=urn:plant;s=Line1 Line1 Object",
+		"1:nsu=urn:plant;s=speed speed Variable Double r",
 		"1:nsu=urn:plant;s=custom custom Variable nsu=urn:plant;i=4711",
-		"1:nsu=urn:plant;s=deep deep Object ",
+		"1:nsu=urn:plant;s=setpoint setpoint Variable Double rw",
+		"1:nsu=urn:plant;s=command command Variable Boolean w",
+		"1:nsu=urn:plant;s=hidden hidden Variable Int32 -",
+		"1:nsu=urn:plant;s=deep deep Object",
 	}
 	if !slices.Equal(got, want) || truncated {
 		t.Fatalf("walk = %q (truncated %v), want %q", got, truncated, want)
@@ -107,9 +142,40 @@ func TestWalkPrintsByDepthWithNamespaceURIsAndDataTypes(t *testing.T) {
 		t.Fatalf("browsed %q, want %q", s.browsed, want)
 	}
 
-	// One batched Read of the data types per parent holding variables.
-	if !slices.Equal(s.typeReads, []int{2}) {
-		t.Fatalf("data type reads = %v, want [2]", s.typeReads)
+	// One batched Read of the attributes per parent holding variables.
+	if !slices.Equal(s.typeReads, []int{5}) {
+		t.Fatalf("attribute reads = %v, want [5]", s.typeReads)
+	}
+}
+
+// A node below the start node that the server refuses to browse is printed
+// and not expanded; the walk goes on with its siblings. Refused at the start
+// node, the walk is an error.
+func TestWalkSkipsANodeTheServerRefusesToBrowse(t *testing.T) {
+	root := ua.NewNumericNodeID(0, id.ObjectsFolder)
+	locked := ua.NewStringNodeID(1, "locked")
+	open := ua.NewStringNodeID(1, "open")
+	inside := ua.NewStringNodeID(1, "inside")
+
+	s := &treeSession{
+		namespaces: []string{"http://opcfoundation.org/UA/", "urn:x"},
+		refs: map[string][]*ua.ReferenceDescription{
+			root.String(): {ref(locked, "locked", ua.NodeClassObject), ref(open, "open", ua.NodeClassObject)},
+			open.String(): {ref(inside, "inside", ua.NodeClassObject)},
+		},
+		refused: map[string]bool{locked.String(): true},
+	}
+
+	got, _ := walkAll(t, s, root, 3)
+	want := []string{"0:nsu=urn:x;s=locked locked Object", "0:nsu=urn:x;s=open open Object", "1:nsu=urn:x;s=inside inside Object"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("walk = %q, want %q", got, want)
+	}
+
+	s.refused[root.String()] = true
+	w := &walker{s: s, namespaces: s.Namespaces(), depth: 3, printed: map[string]bool{}, emit: func(BrowseEntry) {}}
+	if err := w.visit(context.Background(), root, 0); !errors.Is(err, errBrowse) {
+		t.Fatalf("refused start node = %v, want errBrowse", err)
 	}
 }
 
@@ -143,7 +209,7 @@ func TestWalkPrintsALoopOnce(t *testing.T) {
 
 	got, truncated := walkAll(t, s, root, 10)
 
-	want := []string{"0:nsu=urn:x;s=a a Object ", "1:nsu=urn:x;s=b b Object ", "2:i=85 Objects Object "}
+	want := []string{"0:nsu=urn:x;s=a a Object", "1:nsu=urn:x;s=b b Object", "2:i=85 Objects Object"}
 	if !slices.Equal(got, want) || truncated {
 		t.Fatalf("walk = %q (truncated %v), want %q", got, truncated, want)
 	}
@@ -179,13 +245,13 @@ func TestWalkStopsAtTheNodeCap(t *testing.T) {
 				t.Fatalf("printed %d (truncated %v), want %d (%v)", len(got), truncated, tc.printed, tc.truncated)
 			}
 
-			// Data types are read only for the nodes that can be printed.
+			// Attributes are read only for the nodes that can be printed.
 			total := 0
 			for _, n := range s.typeReads {
 				total += n
 			}
 			if total != tc.printed {
-				t.Fatalf("read %d data types, want %d", total, tc.printed)
+				t.Fatalf("read the attributes of %d nodes, want %d", total, tc.printed)
 			}
 		})
 	}
@@ -337,7 +403,10 @@ func TestSessionBrowseErrors(t *testing.T) {
 	}
 }
 
-func TestSessionDataTypesChunkAtTheServerLimit(t *testing.T) {
+// The data type and the access level of each variable travel in one batch,
+// two nodes per variable, chunked at the server's MaxNodesPerRead (32 for
+// the fake).
+func TestSessionVariableAttributesChunkAtTheServerLimit(t *testing.T) {
 	deps, _ := testDeps(t)
 	f := &fakeClient{}
 	withFake(&deps, f)
@@ -349,19 +418,27 @@ func TestSessionDataTypesChunkAtTheServerLimit(t *testing.T) {
 		ids[i] = ua.NewNumericNodeID(0, uint32(i+1))
 	}
 
-	got, err := s.DataTypes(context.Background(), ids)
+	got, err := s.VariableAttributes(context.Background(), ids)
 	if err != nil || len(got) != 70 {
-		t.Fatalf("DataTypes = %d values, %v; want 70", len(got), err)
+		t.Fatalf("VariableAttributes = %d values, %v; want 70", len(got), err)
 	}
 
-	if _, err := s.DataTypes(context.Background(), nil); err != nil {
-		t.Fatalf("DataTypes of nothing = %v", err)
+	for i, attrs := range got {
+		dataType, _ := attrs.DataType.Value.Value().(*ua.NodeID)
+		level, _ := attrs.AccessLevel.Value.Value().(uint8)
+		if dataType == nil || dataType.IntID() != uint32(i+1) || level != uint8(i+1) {
+			t.Fatalf("attributes %d = %v, %v; want those of i=%d", i, attrs.DataType.Value, attrs.AccessLevel.Value, i+1)
+		}
+	}
+
+	if _, err := s.VariableAttributes(context.Background(), nil); err != nil {
+		t.Fatalf("VariableAttributes of nothing = %v", err)
 	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if !slices.Equal(f.dataTypeReads, []int{32, 32, 6}) {
-		t.Fatalf("data type reads = %v, want [32 32 6] and none for no ids", f.dataTypeReads)
+	if !slices.Equal(f.attributeReads, []int{32, 32, 32, 32, 12}) {
+		t.Fatalf("attribute reads = %v, want [32 32 32 32 12] and none for no ids", f.attributeReads)
 	}
 }

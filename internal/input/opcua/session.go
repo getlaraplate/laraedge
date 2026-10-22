@@ -181,9 +181,9 @@ type session interface {
 	// references, all node classes, following continuation points (task 6,
 	// ruling R1). It is the one walk step of the browse command.
 	Browse(ctx context.Context, node *ua.NodeID) ([]*ua.ReferenceDescription, error)
-	// DataTypes reads the DataType attribute of ids, in chunks, in the order
-	// of ids. No request is sent for no ids.
-	DataTypes(ctx context.Context, ids []*ua.NodeID) ([]*ua.DataValue, error)
+	// VariableAttributes reads the DataType and AccessLevel attributes of
+	// ids, in chunks, in the order of ids. No request is sent for no ids.
+	VariableAttributes(ctx context.Context, ids []*ua.NodeID) ([]variableAttributes, error)
 	// Namespaces is the NamespaceArray read at this connect.
 	Namespaces() []string
 	// Close ends the session. It is idempotent and safe while a call is in
@@ -832,23 +832,39 @@ func (s *uaSession) Read(ctx context.Context, ids []*ua.NodeID) ([]*ua.DataValue
 	return out, nil
 }
 
-// DataTypes reads the DataType attribute of ids in chunks of the server's
-// MaxNodesPerRead, never an empty request.
-func (s *uaSession) DataTypes(ctx context.Context, ids []*ua.NodeID) ([]*ua.DataValue, error) {
-	out := make([]*ua.DataValue, 0, len(ids))
+// variableAttributes are what browse reads of a variable besides its
+// reference.
+type variableAttributes struct {
+	DataType    *ua.DataValue
+	AccessLevel *ua.DataValue
+}
 
-	for chunk := range slices.Chunk(ids, s.maxRead) {
-		nodes := make([]*ua.ReadValueID, len(chunk))
-		for i, nodeID := range chunk {
-			nodes[i] = &ua.ReadValueID{NodeID: nodeID, AttributeID: ua.AttributeIDDataType}
-		}
+// VariableAttributes reads the DataType and AccessLevel attributes of ids in
+// one batch, chunked at the server's MaxNodesPerRead (two nodes per id),
+// never an empty request.
+func (s *uaSession) VariableAttributes(ctx context.Context, ids []*ua.NodeID) ([]variableAttributes, error) {
+	nodes := make([]*ua.ReadValueID, 0, 2*len(ids))
+	for _, nodeID := range ids {
+		nodes = append(nodes,
+			&ua.ReadValueID{NodeID: nodeID, AttributeID: ua.AttributeIDDataType},
+			&ua.ReadValueID{NodeID: nodeID, AttributeID: ua.AttributeIDAccessLevel},
+		)
+	}
 
-		res, err := s.read(ctx, "read the data types", &ua.ReadRequest{TimestampsToReturn: ua.TimestampsToReturnNeither, NodesToRead: nodes})
+	values := make([]*ua.DataValue, 0, len(nodes))
+
+	for chunk := range slices.Chunk(nodes, s.maxRead) {
+		res, err := s.read(ctx, "read the variable attributes", &ua.ReadRequest{TimestampsToReturn: ua.TimestampsToReturnNeither, NodesToRead: chunk})
 		if err != nil {
 			return nil, err
 		}
 
-		out = append(out, res.Results...)
+		values = append(values, res.Results...)
+	}
+
+	out := make([]variableAttributes, len(ids))
+	for i := range out {
+		out[i] = variableAttributes{DataType: values[2*i], AccessLevel: values[2*i+1]}
 	}
 
 	return out, nil

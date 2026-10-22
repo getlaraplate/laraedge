@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -20,8 +21,10 @@ const browseTimeout = 2 * time.Minute
 // runBrowse runs "browse <input>": it walks the hierarchical references of an
 // OPC UA server from the Objects folder, or from --node, and prints one line
 // per node, indented two spaces per level, as
-// "<NodeId>  <BrowseName>  <NodeClass>[  <DataType>]". It connects like
-// probe (the trust check included) and reads no value.
+// "<NodeId>  <BrowseName>  <NodeClass>[  <DataType>  <access>]", the last
+// two for a variable (access r, w, rw or -; "?" for an unreadable
+// attribute). It connects like probe (the trust check included) and reads no
+// value.
 func runBrowse(args []string, stdout, stderr io.Writer) int {
 	const prefix = "laraplate-edge browse: "
 
@@ -79,12 +82,7 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 
 	truncated, err := in.Browse(ctx, start, *depth, func(e opcua.BrowseEntry) {
-		line := strings.Repeat("  ", e.Depth) + e.NodeID + "  " + e.Name + "  " + e.Class
-		if e.DataType != "" {
-			line += "  " + e.DataType
-		}
-
-		fmt.Fprintln(stdout, line)
+		fmt.Fprintln(stdout, browseLine(e))
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s%v\n", prefix, err)
@@ -96,4 +94,16 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return exitOK
+}
+
+// browseLine is the printed line of e: the data type and access columns
+// appear for a variable whose attributes were read, "?" standing for the
+// one that was unreadable.
+func browseLine(e opcua.BrowseEntry) string {
+	line := strings.Repeat("  ", e.Depth) + e.NodeID + "  " + e.Name + "  " + e.Class
+	if e.DataType != "" || e.Access != "" {
+		line += "  " + cmp.Or(e.DataType, "?") + "  " + cmp.Or(e.Access, "?")
+	}
+
+	return line
 }
