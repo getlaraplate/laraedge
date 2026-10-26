@@ -22,7 +22,7 @@ back on failure as for inputs. Processors and plugin outputs are plan 3.
 **Tech Stack:** Go 1.27; new dependency `github.com/getlaraplate/laraedge-sdk` v0.1.0 (Apache-2.0; brings
 `google.golang.org/grpc` v1.84.0 Apache-2.0, `google.golang.org/protobuf` v1.36.12 BSD-3-Clause,
 `github.com/Microsoft/go-winio` v0.6.3 MIT, `golang.org/x/net` v0.60.0, `golang.org/x/sys`, `golang.org/x/text`
-BSD-3-Clause) — approval requested with this plan.
+BSD-3-Clause) — approved by the user on 2026-10-26.
 
 **Spec:** `../../../../docs/superpowers/specs/2026-10-22-laraedge-plugins-design.md` (stack root) sections 4 (Input),
 5, 6, 7 (built-in drivers and conformance), 9 plan 2, as amended by the SDK plan's delivery status
