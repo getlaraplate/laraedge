@@ -19,4 +19,8 @@ document the backend's structural schema accepts in its own tests.
 
 Replace these files when the backend test or its schema changes. The agent test validates each
 document against both schemas (layer 1 only): this build still refuses the opcua driver, the
-keystore token in its build check. Their plugin entries carry a `manifest_sha256` the backend does not interpret, added to the copies because the agent schema requires it.
+keystore token and the plugin entries in its build check.
+
+Exception: spec section 5 makes `manifest_sha256` required in a plugin entry, which the backend's
+arrays lack, so the agent test expects exactly `plugins.<i>.manifest_sha256: is required` for them.
+The backend must add `manifest_sha256` to its test arrays before it publishes plugin documents.

@@ -84,6 +84,22 @@ func TestPluginHash(t *testing.T) {
 			wantStderr: []string{"laraplate-edge plugin hash:"},
 		},
 		{
+			name: "manifest name with a path separator",
+			setup: func(t *testing.T, dir string) {
+				writeHashFile(t, filepath.Join(dir, "plugin.json"), strings.Replace(hashManifest, `"name":"demo"`, `"name":"../demo"`, 1))
+			},
+			args:       func(dir string) []string { return []string{"plugin", "hash", dir} },
+			wantCode:   1,
+			wantStderr: []string{"plugin.json: name must not contain a path separator or .."},
+		},
+		{
+			name:       "nonexistent directory",
+			setup:      func(*testing.T, string) {},
+			args:       func(dir string) []string { return []string{"plugin", "hash", filepath.Join(dir, "absent")} },
+			wantCode:   1,
+			wantStderr: []string{"laraplate-edge plugin hash:", "plugin.json"},
+		},
+		{
 			name:       "no directory",
 			setup:      func(*testing.T, string) {},
 			args:       func(string) []string { return []string{"plugin", "hash"} },

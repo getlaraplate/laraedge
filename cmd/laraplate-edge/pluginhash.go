@@ -3,11 +3,13 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/getlaraplate/laraedge-sdk/manifest"
 )
@@ -54,6 +56,10 @@ func hashPlugin(dir string) (binarySum, manifestSum string, err error) {
 	m, raw, err := manifest.Load(manifestPath)
 	if err != nil {
 		return "", "", err
+	}
+
+	if strings.ContainsAny(m.Name, `/\`) || strings.Contains(m.Name, "..") {
+		return "", "", errors.New("plugin.json: name must not contain a path separator or ..")
 	}
 
 	binaryPath := filepath.Join(dir, m.Name)

@@ -33,8 +33,7 @@
     {
       "id": "fanuc",
       "path": "/opt/laraplate-edge/plugins/fanuc-focas",
-      "sha256": "abc",
-      "manifest_sha256": "def"
+      "sha256": "abc"
     }
   ]
 }
