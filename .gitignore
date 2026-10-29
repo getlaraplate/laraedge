@@ -29,3 +29,6 @@ coverage.*
 /.worktrees/
 .DS_Store
 Thumbs.db
+
+# Built by the builtin tests and by CI next to plugin.json and conformance.json
+/cmd/laraplate-edge/testdata/builtin-simulated/laraedge-builtin-simulated

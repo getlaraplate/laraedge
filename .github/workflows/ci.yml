@@ -48,6 +48,17 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+      # The agent served under its busybox name is a plugin (decision H8);
+      # the SDK conformance suite checks it with the committed plugin.json and
+      # conformance.json. bash, also on Windows, for the .exe suffix.
+      - name: Conformance of the built-in simulated driver
+        shell: bash
+        run: |
+          dir=cmd/laraplate-edge/testdata/builtin-simulated
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          go build -o "$dir/laraedge-builtin-simulated$suffix" ./cmd/laraplate-edge
+          go run github.com/getlaraplate/laraedge-sdk/cmd/laraedge-conformance@v0.1.0 "$dir"
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 

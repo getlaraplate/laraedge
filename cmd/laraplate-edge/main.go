@@ -66,6 +66,12 @@ commands:
 `
 
 func main() {
+	// Decision H8: under a busybox name the binary is a plugin, whatever its
+	// arguments, so this comes before any command parsing.
+	if driver, ok := builtinDriver(os.Args[0]); ok {
+		os.Exit(serveBuiltin(os.Args[0], driver, os.Stderr))
+	}
+
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 

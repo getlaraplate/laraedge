@@ -6,17 +6,23 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/getlaraplate/laraedge/internal/atomicfile"
 	"github.com/getlaraplate/laraedge/internal/bootstrap"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/model"
+	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/secrets"
 	"github.com/getlaraplate/laraedge/internal/transform"
 )
@@ -166,6 +172,10 @@ func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.L
 		return nil, 0, fmt.Errorf("the configuration has no input %q (inputs: %s)", id, inputIDs(doc))
 	}
 
+	if strings.HasPrefix(cfg.Driver, plugin.DriverPrefix) {
+		return probePlugin(doc, boot, *cfg, log)
+	}
+
 	factory := inputDrivers(boot, secrets.NewResolver(), log, nil)[cfg.Driver]
 	if factory == nil {
 		return nil, 0, fmt.Errorf("input %q: driver %s is not available in this build", id, cfg.Driver)
@@ -190,6 +200,102 @@ func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.L
 	}
 
 	return samples, clk.Now().Sub(start), nil
+}
+
+// pluginStopTimeout bounds the stop of the plugin process, which has its own
+// deadlines (Shutdown 5 s, then SIGTERM, then kill 5 s later).
+const pluginStopTimeout = 15 * time.Second
+
+// probePlugin reads every point of the plugin input cfg once: it starts the
+// plugin, probes, and stops it again. The elapsed time is that of the probe,
+// the configuration of the instance included.
+func probePlugin(doc config.Document, boot bootstrap.File, cfg config.Input, log *slog.Logger) ([]model.Sample, time.Duration, error) {
+	ctx, release := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer release()
+
+	in, closePlugin, err := openPluginInput(ctx, doc, boot, cfg, false, log)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer closePlugin()
+
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	clk := clock.Real()
+	start := clk.Now()
+
+	samples, err := in.Probe(probeCtx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return samples, clk.Now().Sub(start), nil
+}
+
+// openPluginInput resolves the plugin of cfg (decision H1: relative paths
+// against the configuration file's directory, absolute only with the
+// laraplate provider), starts it with a data_dir of its own that lives as long
+// as the returned close function, and returns the input the plugin serves.
+// The data_dir is a fresh temporary one, never the agent's: a running agent
+// keeps its plugin sockets there. close stops the input and the plugin and
+// removes the directory, and must be called whatever happens next. The
+// browse refuses, before starting anything, a plugin whose manifest does not
+// declare browse. The plugin sees the secrets the resolver of this process resolves.
+func openPluginInput(ctx context.Context, doc config.Document, boot bootstrap.File, cfg config.Input, browse bool, log *slog.Logger) (input.Input, func(), error) {
+	id := strings.TrimPrefix(cfg.Driver, plugin.DriverPrefix)
+
+	specs, msgs := plugin.Resolve(doc, configBaseDir(boot), boot.Config.Provider)
+	i := slices.IndexFunc(specs, func(s plugin.Spec) bool { return s.ID == id })
+	if i < 0 {
+		if !slices.ContainsFunc(doc.Plugins, func(p config.Plugin) bool { return p.ID == id }) {
+			return nil, nil, fmt.Errorf("input %q: no plugin entry with id %q", cfg.ID, id)
+		}
+
+		return nil, nil, fmt.Errorf("input %q: plugin %q: %s", cfg.ID, id, strings.Join(msgs, "; "))
+	}
+	spec := specs[i]
+	if spec.Manifest.Kinds.Input == nil {
+		return nil, nil, fmt.Errorf("input %q: the plugin %q does not offer the input kind", cfg.ID, id)
+	}
+
+	if browse && !spec.Manifest.Kinds.Input.Browse {
+		return nil, nil, fmt.Errorf("input %q: %s", cfg.ID, errPluginNoBrowse)
+	}
+
+	dataDir, err := os.MkdirTemp("", "lpe")
+	if err != nil {
+		return nil, nil, fmt.Errorf("input %q: temporary data_dir: %w", cfg.ID, err)
+	}
+
+	host := plugin.NewHost(spec, plugin.HostOptions{DataDir: dataDir, Clock: clock.Real(), Log: log})
+	// The host is stopped on every path from here on, also after a failed
+	// start: Stop cleans up whatever Start left.
+	stopHost := func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), pluginStopTimeout)
+		defer cancel()
+
+		_ = host.Stop(stopCtx)
+		_ = os.RemoveAll(dataDir)
+	}
+
+	if err := host.Start(ctx); err != nil {
+		stopHost()
+
+		return nil, nil, fmt.Errorf("input %q: start the plugin %q: %w", cfg.ID, id, err)
+	}
+
+	in, err := plugin.InputFactory(host, secrets.NewResolver())(cfg, clock.Real())
+	if err != nil {
+		stopHost()
+
+		return nil, nil, err
+	}
+
+	return in, func() {
+		_ = in.Close()
+		stopHost()
+	}, nil
 }
 
 // inputIDs lists the input ids of doc for a message.
