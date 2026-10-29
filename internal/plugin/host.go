@@ -120,10 +120,12 @@ type Host struct {
 	state      State
 	run        *running
 	generation uint64
-	restarts   map[string]uint64
-	lastError  string
-	binarySum  string
-	started    bool
+	// watchers are the subscriptions of Watch, notified like changes.
+	watchers  map[chan uint64]struct{}
+	restarts  map[string]uint64
+	lastError string
+	binarySum string
+	started   bool
 	// cancelStart cancels the launch of a Start in flight; startDone is
 	// closed when that Start returns.
 	cancelStart context.CancelFunc
@@ -243,6 +245,28 @@ func (h *Host) Conn() (*grpc.ClientConn, uint64) {
 // Changes delivers the new generation after every successful start or
 // restart; it holds only the latest one.
 func (h *Host) Changes() <-chan uint64 { return h.changes }
+
+// Watch returns a channel of its own that, like Changes, delivers the latest
+// generation after every successful start or restart, and a function that
+// ends the subscription. It lets every instance of the plugin observe a
+// restart, which the single Changes channel cannot. Subscribe before reading
+// Conn: a generation announced before Watch is not delivered.
+func (h *Host) Watch() (<-chan uint64, func()) {
+	ch := make(chan uint64, 1)
+
+	h.mu.Lock()
+	if h.watchers == nil {
+		h.watchers = map[chan uint64]struct{}{}
+	}
+	h.watchers[ch] = struct{}{}
+	h.mu.Unlock()
+
+	return ch, func() {
+		h.mu.Lock()
+		delete(h.watchers, ch)
+		h.mu.Unlock()
+	}
+}
 
 // BinarySHA256 returns the hash of the binary verified at the last
 // successful launch, empty before the first.
@@ -615,6 +639,13 @@ func (h *Host) upLocked(run *running) {
 	default:
 	}
 	h.changes <- h.generation
+	for ch := range h.watchers {
+		select {
+		case <-ch:
+		default:
+		}
+		ch <- h.generation
+	}
 	h.log.Info("plugin started", "pid", run.proc.Pid)
 }
 

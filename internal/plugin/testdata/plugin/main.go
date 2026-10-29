@@ -11,6 +11,19 @@
 //	ignore_sigterm   ignore SIGTERM
 //	pid_file         write the process id to this file next to the binary
 //	block_before_handshake  block forever instead of the handshake
+//
+// Input behaviour, per instance:
+//
+//	script        events the stream sends at every Subscribe, in order
+//	probe         the samples Probe returns
+//	refuse_config Configure refuses with a ConfigError at connection.port
+//	refuse_echo   the refusal message quotes connection.token
+//	config_file   write the configuration of every Configure to this file
+//	trace_file    append "configure <id>" and "run <id>" lines to this file
+//	browse        offer browse (manifest and service)
+//	probe_block   Probe blocks until its context ends
+//
+// trace_file also gets "stop <id>" lines.
 package main
 
 import (
@@ -49,6 +62,34 @@ type behaviour struct {
 	IgnoreSIGTERM  bool   `json:"ignore_sigterm"`
 	PIDFile        string `json:"pid_file"`
 	Block          bool   `json:"block_before_handshake"`
+
+	Script       []event  `json:"script"`
+	Probe        []sample `json:"probe"`
+	RefuseConfig bool     `json:"refuse_config"`
+	RefuseEcho   bool     `json:"refuse_echo"`
+	ConfigFile   string   `json:"config_file"`
+	TraceFile    string   `json:"trace_file"`
+	Browse       bool     `json:"browse"`
+	ProbeBlock   bool     `json:"probe_block"`
+}
+
+// event is one event of the script: exactly one field is set.
+type event struct {
+	Sample   *sample `json:"sample"`
+	Answered string  `json:"answered"`
+	Health   *struct {
+		Connected bool   `json:"connected"`
+		ReadError string `json:"read_error"`
+	} `json:"health"`
+}
+
+// sample is an integer sample; quality is good unless "bad" is given.
+type sample struct {
+	Device  string `json:"device"`
+	Signal  string `json:"signal"`
+	Value   int64  `json:"value"`
+	TS      string `json:"ts"`
+	Quality string `json:"quality"`
 }
 
 func main() {
@@ -84,7 +125,13 @@ func main() {
 
 		return
 	}
-	sdk.ServeInput(name, version, input{}, inputKind())
+	in := input{b: b, dir: dir}
+	if b.Browse {
+		sdk.ServeInput(name, version, browsingInput{in}, inputKind(b))
+
+		return
+	}
+	sdk.ServeInput(name, version, in, inputKind(b))
 }
 
 func readBehaviour() (behaviour, string) {
@@ -113,34 +160,123 @@ func fail(err error) {
 	os.Exit(1)
 }
 
-func inputKind() manifest.InputKind {
+func inputKind(b behaviour) manifest.InputKind {
 	return manifest.InputKind{
 		ConnectionSchema: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}`),
 		AddressSchema:    json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string"}`),
 		ReadModes:        []string{"poll"},
 		Types:            []string{"int32"},
+		Browse:           b.Browse,
 	}
 }
 
-// input is an Input that reads nothing.
-type input struct{}
+// input is an Input driven by the behaviour file.
+type input struct {
+	b   behaviour
+	dir string
+}
 
-func (input) Configure(context.Context, string, json.RawMessage) []sdk.ConfigError { return nil }
+// browsingInput is an input that also browses.
+type browsingInput struct{ input }
 
-func (input) Run(ctx context.Context, _ string, _ sdk.InputEmitter) error {
+func (browsingInput) Browse(_ context.Context, _, node string, depth int) ([]sdk.Node, error) {
+	return []sdk.Node{{Address: fmt.Sprintf("%s/%d", node, depth), Name: "n1", Type: "int32", Access: "read"}}, nil
+}
+
+func (in input) trace(line string) {
+	if in.b.TraceFile == "" {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(in.dir, in.b.TraceFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		fail(err)
+	}
+	defer f.Close()
+	fmt.Fprintln(f, line)
+}
+
+func (in input) Configure(_ context.Context, id string, cfg json.RawMessage) []sdk.ConfigError {
+	in.trace("configure " + id)
+	if in.b.ConfigFile != "" {
+		if err := os.WriteFile(filepath.Join(in.dir, in.b.ConfigFile), cfg, 0o600); err != nil {
+			fail(err)
+		}
+	}
+	if !in.b.RefuseConfig {
+		return nil
+	}
+	message := "must be an integer"
+	if in.b.RefuseEcho {
+		var c struct {
+			Connection struct {
+				Token string `json:"token"`
+			} `json:"connection"`
+		}
+		_ = json.Unmarshal(cfg, &c)
+		message = "bad value " + c.Connection.Token
+	}
+
+	return []sdk.ConfigError{{Path: "connection.port", Message: message}}
+}
+
+func (in input) Run(ctx context.Context, id string, out sdk.InputEmitter) error {
+	in.trace("run " + id)
+	for _, e := range in.b.Script {
+		var err error
+		switch {
+		case e.Sample != nil:
+			err = out.Sample(e.Sample.sdk())
+		case e.Answered != "":
+			err = out.Answered(e.Answered)
+		case e.Health != nil:
+			err = out.Health(e.Health.Connected, sdk.ReadError(e.Health.ReadError))
+		}
+		if err != nil {
+			return err
+		}
+	}
 	<-ctx.Done()
 
 	return nil
 }
 
-func (input) Probe(context.Context, string) ([]sdk.Sample, error) { return nil, nil }
+func (s sample) sdk() sdk.Sample {
+	ts, err := time.Parse(time.RFC3339, s.TS)
+	if err != nil {
+		fail(err)
+	}
+	quality := sdk.QualityGood
+	if s.Quality == "bad" {
+		quality = sdk.QualityBad
+	}
 
-func (input) Stop(context.Context, string) error { return nil }
+	return sdk.Sample{Device: s.Device, Signal: s.Signal, TS: ts, Value: sdk.IntValue(s.Value), Quality: quality, Priority: sdk.PriorityCritical}
+}
+
+func (in input) Probe(ctx context.Context, _ string) ([]sdk.Sample, error) {
+	if in.b.ProbeBlock {
+		<-ctx.Done()
+
+		return nil, ctx.Err()
+	}
+	out := make([]sdk.Sample, 0, len(in.b.Probe))
+	for _, s := range in.b.Probe {
+		out = append(out, s.sdk())
+	}
+
+	return out, nil
+}
+
+func (in input) Stop(_ context.Context, id string) error {
+	in.trace("stop " + id)
+
+	return nil
+}
 
 // serveIgnoringShutdown serves Info and health like the SDK, but Shutdown
 // leaves the process running.
 func serveIgnoringShutdown() {
-	kind := inputKind()
+	kind := inputKind(behaviour{})
 	m := manifest.Manifest{Name: name, Version: version, ProtocolVersions: []string{"v1"}, Kinds: manifest.Kinds{Input: &kind}}
 	raw, err := json.Marshal(m)
 	if err != nil {
