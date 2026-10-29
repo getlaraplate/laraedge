@@ -22,6 +22,7 @@
 //	trace_file    append "configure <id>" and "run <id>" lines to this file
 //	browse        offer browse (manifest and service)
 //	probe_block   Probe blocks until its context ends
+//	busy_runs     the first N Run calls of the process answer ALREADY_EXISTS at once
 //	configure_block  Configure blocks until its context ends, then refuses
 //
 // trace_file also gets "stop <id>" lines.
@@ -37,12 +38,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 
 	"github.com/getlaraplate/laraedge-sdk/handshake"
 	"github.com/getlaraplate/laraedge-sdk/manifest"
@@ -73,6 +77,7 @@ type behaviour struct {
 	Browse       bool     `json:"browse"`
 	ProbeBlock   bool     `json:"probe_block"`
 	ConfigBlock  bool     `json:"configure_block"`
+	BusyRuns     int64    `json:"busy_runs"`
 }
 
 // event is one event of the script: exactly one field is set.
@@ -127,7 +132,7 @@ func main() {
 
 		return
 	}
-	in := input{b: b, dir: dir}
+	in := input{b: b, dir: dir, runs: new(atomic.Int64)}
 	if b.Browse {
 		sdk.ServeInput(name, version, browsingInput{in}, inputKind(b))
 
@@ -174,8 +179,9 @@ func inputKind(b behaviour) manifest.InputKind {
 
 // input is an Input driven by the behaviour file.
 type input struct {
-	b   behaviour
-	dir string
+	b    behaviour
+	dir  string
+	runs *atomic.Int64
 }
 
 // browsingInput is an input that also browses.
@@ -227,6 +233,9 @@ func (in input) Configure(ctx context.Context, id string, cfg json.RawMessage) [
 }
 
 func (in input) Run(ctx context.Context, id string, out sdk.InputEmitter) error {
+	if in.b.BusyRuns > 0 && in.runs.Add(1) <= in.b.BusyRuns {
+		return status.Error(codes.AlreadyExists, "busy")
+	}
 	in.trace("run " + id)
 	for _, e := range in.b.Script {
 		var err error
@@ -260,7 +269,8 @@ func (s sample) sdk() sdk.Sample {
 	return sdk.Sample{Device: s.Device, Signal: s.Signal, TS: ts, Value: sdk.IntValue(s.Value), Quality: quality, Priority: sdk.PriorityCritical}
 }
 
-func (in input) Probe(ctx context.Context, _ string) ([]sdk.Sample, error) {
+func (in input) Probe(ctx context.Context, id string) ([]sdk.Sample, error) {
+	in.trace("probe " + id)
 	if in.b.ProbeBlock {
 		<-ctx.Done()
 

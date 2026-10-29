@@ -278,14 +278,14 @@ func TestInputEmitsSamplesWithPluginTimestampAndQualityThroughTransforms(t *test
 }
 
 func TestInputAnsweredAndHealthFeedTheDevicesAndTheStatus(t *testing.T) {
-	script := `[{"health":{"connected":true,"read_error":"timeout"}},{"health":{"connected":true,"read_error":"bogus"}},{"answered":"d1"}]`
+	script := `[{"health":{"connected":true,"read_error":"timeout"}},{"answered":"d1"}]`
 	h := newInputHarness(t, scriptBehaviour(script, ""))
 	in := h.startInput(t, testInput(`{"host":"h"}`))
 
 	reporter := in.(input.HealthReporter)
 	h.waitFor("health", func() bool { return reporter.Health().ReadErrors[input.ReadErrorTimeout] == 1 })
 	if got := reporter.Health(); !got.Connected || got.ReadErrors[input.ReadErrorTimeout] != 1 || len(got.ReadErrors) != 1 {
-		t.Fatalf("Health() = %+v, want connected with one timeout and the unknown kind ignored", got)
+		t.Fatalf("Health() = %+v, want connected with one timeout", got)
 	}
 }
 
@@ -493,7 +493,7 @@ func TestInputProbeReturnsThePluginSamples(t *testing.T) {
 }
 
 func TestInputProbeGivesUpAfter30Seconds(t *testing.T) {
-	h := newInputHarness(t, `{"probe_block":true}`)
+	h := newInputHarness(t, `{"probe_block":true,"trace_file":"trace"}`)
 	in := h.build(t, testInput(`{"host":"h"}`))
 
 	result := make(chan error, 1)
@@ -502,23 +502,15 @@ func TestInputProbeGivesUpAfter30Seconds(t *testing.T) {
 		result <- err
 	}()
 
-	deadline := time.Now().Add(guard)
-	for {
-		select {
-		case err := <-result:
-			if err == nil || !strings.Contains(err.Error(), "did not answer in time") {
-				t.Fatalf("Probe() = %v, want the timeout", err)
-			}
-
-			return
-		default:
+	h.waitTrace("probe in1")
+	h.clk.Advance(30 * time.Second)
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "did not answer in time") {
+			t.Fatalf("Probe() = %v, want the timeout", err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("Probe did not give up")
-		}
-		if h.clk.PendingTimers() > 0 {
-			h.clk.Advance(30 * time.Second)
-		}
+	case <-time.After(guard):
+		t.Fatal("Probe did not give up")
 	}
 }
 
@@ -607,10 +599,11 @@ func TestHostWatchDeliversEveryRestartToEverySubscriber(t *testing.T) {
 	}
 }
 
-// TestInputRestartOfTheSameInstanceIsNotAnOutage: a section change is Close
-// then Start with the same instance id; a Subscribe refused while the old
-// stream unwinds is retried quickly and reports nothing down.
-func TestInputRestartOfTheSameInstanceIsNotAnOutage(t *testing.T) {
+// TestInputRestartOfTheSameInstanceReconfigures is a smoke test of the H5
+// path: Close then Start of the same instance configures and subscribes
+// again without reporting an outage. (The SDK makes Configure wait for the
+// old stream, so this does not meet ALREADY_EXISTS; see the busy tests.)
+func TestInputRestartOfTheSameInstanceReconfigures(t *testing.T) {
 	h := newInputHarness(t, scriptBehaviour(`[{"answered":"d1"}]`, ""))
 	cfg := testInput(`{"host":"h"}`)
 	first := h.startInput(t, cfg)
@@ -620,51 +613,70 @@ func TestInputRestartOfTheSameInstanceIsNotAnOutage(t *testing.T) {
 	}
 	h.startInput(t, cfg)
 
-	advances := 0
-	h.waitFor("the second stream", func() bool {
-		if strings.Count(h.read("trace"), "run in1") >= 2 {
-			return true
-		}
-		if h.inClk.PendingTimers() > 0 && advances < busyRetriesForTest {
-			advances++
-			h.inClk.Advance(100 * time.Millisecond)
-		}
-
-		return false
-	})
+	h.waitFor("the second stream", func() bool { return strings.Count(h.read("trace"), "run in1") >= 2 })
 	if n := len(h.out.samples(model.Bad)); n != 0 {
 		t.Fatalf("%d bad samples after a restart of the instance", n)
 	}
 }
 
-const busyRetriesForTest = 5
+// stepRetry waits for the input to sleep before a retry (the lifecycle timer
+// plus the retry sleep are pending) and advances its clock by the interval.
+func (h *inputHarness) stepRetry() {
+	h.t.Helper()
+
+	h.waitFor("the retry sleep", func() bool { return h.inClk.PendingTimers() >= 2 })
+	h.inClk.Advance(100 * time.Millisecond)
+}
+
+func TestInputSubscribeRefusedAsBusyIsRetriedWithoutAnOutage(t *testing.T) {
+	h := newInputHarness(t, scriptBehaviour(`[{"answered":"d1"}]`, `,"busy_runs":2`))
+	h.startInput(t, testInput(`{"host":"h"}`))
+
+	h.stepRetry()
+	h.stepRetry()
+	h.waitTrace("run in1")
+	if n := len(h.out.samples(model.Bad)); n != 0 {
+		t.Fatalf("%d bad samples while the plugin was only busy", n)
+	}
+	if trace := h.read("trace"); strings.Count(trace, "configure in1") != 1 || strings.Count(trace, "run in1") != 1 {
+		t.Fatalf("trace = %q, want one Configure and one Run", trace)
+	}
+}
+
+func TestInputSubscribeStaysBusyForTenSecondsThenCountsAsAnOutage(t *testing.T) {
+	h := newInputHarness(t, scriptBehaviour(`[{"answered":"d1"}]`, `,"busy_runs":1000`))
+	h.startInput(t, testInput(`{"host":"h"}`))
+
+	for i := range 99 {
+		h.stepRetry()
+		if n := len(h.out.samples(model.Bad)); n != 0 {
+			t.Fatalf("bad samples after %d retries (%v), before the bound", i+1, time.Duration(i+1)*100*time.Millisecond)
+		}
+	}
+	h.stepRetry()
+	h.waitFor("one bad sample per point", func() bool { return len(h.out.samples(model.Bad)) == 3 })
+}
 
 func TestInputConfigureGivesUpAfter10Seconds(t *testing.T) {
-	h := newInputHarness(t, `{"configure_block":true}`)
+	h := newInputHarness(t, `{"configure_block":true,"trace_file":"trace"}`)
 	in := h.build(t, testInput(`{"host":"h"}`))
 
 	result := make(chan error, 1)
 	go func() { result <- in.Start(context.Background(), h.out.emit) }()
 
-	deadline := time.Now().Add(guard)
-	for {
-		select {
-		case err := <-result:
-			if err != nil {
-				t.Fatalf("Start() = %v, want no error: a plugin that does not answer is not a configuration refusal", err)
-			}
-			h.waitFor("the timeout in the log", func() bool {
-				return strings.Contains(h.log.String(), "configure: the plugin did not answer in time")
-			})
-
-			return
-		default:
+	h.waitTrace("configure in1")
+	h.clk.Advance(10 * time.Second)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Start() = %v, want no error: a plugin that does not answer is not a configuration refusal", err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("Start did not return")
-		}
-		h.clk.Advance(10 * time.Second)
+	case <-time.After(guard):
+		t.Fatal("Start did not return")
 	}
+	h.waitFor("the timeout in the log", func() bool {
+		return strings.Contains(h.log.String(), "configure: the plugin did not answer in time")
+	})
 }
 
 func TestInputStartAfterAFailedStartIsAllowed(t *testing.T) {

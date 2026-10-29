@@ -33,11 +33,13 @@ const (
 	configureTimeout = 10 * time.Second
 	probeTimeout     = 30 * time.Second
 
-	// busyRetries and busyWait bound the quick retries of a Subscribe the
-	// plugin refuses with ALREADY_EXISTS while the previous stream of the
-	// instance is still unwinding.
-	busyRetries = 5
-	busyWait    = 50 * time.Millisecond
+	// A Subscribe the plugin refuses with ALREADY_EXISTS (an older stream of
+	// the instance is still unwinding) is retried every busyWait for up to
+	// busyBound before it counts as an outage. busyBound matches the 10 s
+	// the SDK allows the plugin's Stop before it releases the instance
+	// (stopTimeout).
+	busyWait  = 100 * time.Millisecond
+	busyBound = 10 * time.Second
 )
 
 // SecretResolver resolves a secret:// reference; *secrets.Resolver is one.
@@ -490,11 +492,15 @@ func (in *pluginInput) run(ctx context.Context, emit func(model.Record), life *i
 		backoff = driverkit.NewBackoff(in.clk, rand.Float64)
 		warned  = map[string]bool{}
 		down    bool
-		busy    int
+		busyAt  time.Time // first refusal of the current streak, zero when none
+		lastGen uint64
 	)
 
 	for ctx.Err() == nil {
 		conn, gen := in.h.Conn()
+		if gen != lastGen {
+			lastGen, busyAt = gen, time.Time{}
+		}
 		if conn == nil {
 			in.goDown(&down, emit)
 			if !in.wait(ctx, changes, nil) {
@@ -536,17 +542,21 @@ func (in *pluginInput) run(ctx context.Context, emit func(model.Record), life *i
 		}
 		if received {
 			backoff.Reset()
-			busy = 0
+			busyAt = time.Time{}
 		}
-		if !received && status.Code(err) == codes.AlreadyExists && busy < busyRetries {
+		if !received && status.Code(err) == codes.AlreadyExists {
 			// The previous stream of the instance is still unwinding in the
-			// plugin (Close then Start): not an outage, try again shortly.
-			busy++
-			if in.clk.Sleep(ctx, busyWait) != nil {
-				return
+			// plugin: not an outage until busyBound has passed.
+			if busyAt.IsZero() {
+				busyAt = in.clk.Now()
 			}
+			if in.clk.Now().Sub(busyAt) < busyBound {
+				if in.clk.Sleep(ctx, busyWait) != nil {
+					return
+				}
 
-			continue
+				continue
+			}
 		}
 		in.goDown(&down, emit)
 		in.log.Warn("plugin input stream ended", "code", status.Code(err).String())
