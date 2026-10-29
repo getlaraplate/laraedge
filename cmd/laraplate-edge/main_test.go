@@ -200,7 +200,6 @@ func TestConfigValidate(t *testing.T) {
 			wantCode: 1,
 			wantStderr: []string{
 				fixtures + "spec-5.3.yaml: inputs.0.connection.auth.password: not available in this build\n",
-				fixtures + "spec-5.3.yaml: plugins.0: not available in this build\n",
 				fixtures + "spec-5.3.yaml: inputs.0: opcua input \"press-line\": devices.0.points.0: type: required\n",
 			},
 		},
@@ -365,5 +364,95 @@ func TestRunLogsToStdout(t *testing.T) {
 		if !json.Valid([]byte(line)) {
 			t.Errorf("stdout line %q is not JSON", line)
 		}
+	}
+}
+
+const validateManifest = `{"kinds":{"input":{"address_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string"},"browse":false,"connection_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"},"read_modes":["poll"],"types":["int16"]}},"name":"demo","protocol_versions":["v1"],"version":"0.1.0"}`
+
+func TestConfigValidateChecksPlugins(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "demo")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(pluginDir, "plugin.json"), validateManifest)
+	writeFile(t, filepath.Join(pluginDir, "demo"), "not really a binary")
+
+	docText := func(sha string) string {
+		return `{"schema":"laraplate-edge-config/1","version":1,
+"plugins":[{"id":"demo","path":"plugins/demo/demo","sha256":"` + sha + `","manifest_sha256":"` + hashHex([]byte(validateManifest)) + `"}],
+"outputs":[{"id":"o0","type":"laraplate-http","url":"https://example.com","token":"secret://env/T","route":{"include":["*"]}}],
+"inputs":[{"id":"i0","driver":"plugin:demo","devices":[{"device":"d","points":[{"signal":"s","type":"int16","address":"x","read":{"poll":"1s"}}]}]}]}`
+	}
+	doc := filepath.Join(dir, "config.json")
+
+	// A wrong binary hash is reported, relative to the config file's directory.
+	writeFile(t, doc, docText(strings.Repeat("0", 64)))
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitFailure {
+		t.Fatalf("exit code = %d, want 1 (stderr: %q)", code, stderr.String())
+	}
+	if want := doc + ": plugins.0.sha256: does not match the plugin binary"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+
+	// The right hash passes.
+	writeFile(t, doc, docText(hashHex([]byte("not really a binary"))))
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr.String())
+	}
+
+	// A missing manifest is a problem.
+	if err := os.Remove(filepath.Join(pluginDir, "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitFailure {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if want := "plugins.0: plugin.json not found next to the binary"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestConfigValidatePluginsDir(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "demo")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(pluginDir, "demo"), "binary")
+	zeros := strings.Repeat("0", 64)
+	doc := filepath.Join(dir, "config.json")
+	writeFile(t, doc, `{"schema":"laraplate-edge-config/1","version":1,
+"plugins":[{"id":"demo","path":"plugins/demo/demo","sha256":"`+zeros+`","manifest_sha256":"`+zeros+`"}],
+"outputs":[{"id":"o0","type":"laraplate-http","url":"https://example.com","token":"secret://env/T","route":{"include":["*"]}}],
+"inputs":[{"id":"i0","driver":"plugin:demo","devices":[{"device":"d","points":[{"signal":"s","address":"a","type":"int16","read":{"poll":"1s"}}]}]}]}`)
+
+	const outsideMsg = "plugins.0.path: must be inside plugins_dir"
+	tests := []struct {
+		name        string
+		args        []string
+		wantCode    int
+		wantOutside bool
+	}{
+		{name: "dir containing the binary", args: []string{"config", "validate", doc, "--plugins-dir", filepath.Join(dir, "plugins")}, wantCode: exitFailure},
+		{name: "flag before the file", args: []string{"config", "validate", "--plugins-dir", t.TempDir(), doc}, wantCode: exitFailure, wantOutside: true},
+		{name: "relative dir refused", args: []string{"config", "validate", doc, "--plugins-dir", "plugins"}, wantCode: exitUsage},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+
+			if code := run(tc.args, &stdout, &stderr); code != tc.wantCode {
+				t.Fatalf("exit code = %d, want %d (stderr: %q)", code, tc.wantCode, stderr.String())
+			}
+			if got := strings.Contains(stderr.String(), outsideMsg); got != tc.wantOutside {
+				t.Errorf("stderr = %q, outside message present = %v, want %v", stderr.String(), got, tc.wantOutside)
+			}
+		})
 	}
 }

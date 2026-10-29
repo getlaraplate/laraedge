@@ -35,14 +35,14 @@ laraplate-edge config validate config.yaml
 | `version` | no | integer from 1. A document older than the applied one is refused; a missing version counts as 0. Laraplate writes the published version into the document it serves. |
 | `inputs` | yes | list of inputs, may be empty |
 | `outputs` | yes | list of outputs, may be empty |
-| `plugins` | no | refused by this build |
+| `plugins` | no | external driver processes, see [Plugins](#plugins) |
 
 ## Inputs
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | input id |
-| `driver` | yes | | `simulated`, `modbus` or `opcua` in this build. The schema also knows `mqtt`, `serial`, `file` and `plugin:<id>`. |
+| `driver` | yes | | `simulated`, `modbus`, `opcua` or `plugin:<id>` in this build. The schema also knows `mqtt`, `serial` and `file`. |
 | `connection` | no | `{}` | driver settings, an object the schema does not interpret (see the secret rule below) |
 | `death_tolerance` | no | `30s` | how long without a successful read before the input reports its devices dead; `birth` follows at the next successful read |
 | `devices` | yes | | at least one device |
@@ -648,7 +648,7 @@ written atomically (directory mode `0700`, file `0600`) on every count:
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | output id, also its buffer directory `data_dir/outputs/{id}` |
-| `type` | yes | | `laraplate-http` in this build. The schema also knows `laraplate-mqtt` and `plugin:<id>`. |
+| `type` | yes | | `laraplate-http` in this build. The schema also knows `laraplate-mqtt` and `plugin:<id>`, which this build refuses. |
 | `url` | with `laraplate-http` | | Laraplate base URL: `https`, or `http` only for a loopback host; no user or password. The agent posts to `{url}/api/v1/insert/mes/machine-messages`; a query or fragment is ignored. |
 | `token` | with `laraplate-http` | | `secret://` reference to the token of the source's service account |
 | `route.include` | no | `["*"]` | patterns matched against `device/signal` (Go `path.Match`: `*`, `?`, `[...]`). `*` alone matches everything; a pattern without `/` means `<pattern>/*`. A device's `birth` and `death` go to every output routing at least one of its signals, and the `birth` lists only those. |
@@ -673,6 +673,88 @@ they resolve: [USAGE.md](USAGE.md#secret-references)); a plain value is refused.
 Other spellings such as `apikey`, `api-key` or `apiKey` are not recognised as secret keys: do not use
 them for a credential.
 
+## Plugins
+
+`plugins` lists the external processes that provide drivers (`plugin:<id>`), built on
+`laraedge-sdk`. Keys of an entry:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `id` | yes | the id used as `plugin:<id>` |
+| `path` | yes | the plugin binary. Where it resolves and what may contain it depends on the provider and on `plugins_dir` of the bootstrap, see "Where plugins may live" below. |
+| `sha256` | yes | lowercase hex SHA-256 of the binary |
+| `manifest_sha256` | yes | lowercase hex SHA-256 of the `plugin.json` file next to the binary |
+| `max_memory` | no | a size; above it the agent restarts the plugin. No limit when missing. The memory is checked every 10 seconds: the resident set size on Linux, the working set on Windows. |
+
+#### Where plugins may live
+
+`plugins_dir` in the bootstrap (see USAGE.md) is the local trust anchor: an absolute directory, no default,
+that the backend cannot change. The rules for `path`:
+
+- `laraplate` provider, `plugins_dir` unset: plugins are disabled and every entry is refused with
+  `plugins.<i>.path: plugins are disabled: set plugins_dir in the bootstrap`.
+- `laraplate` provider, `plugins_dir` set: a relative `path` resolves against `plugins_dir`; an absolute
+  one must lie inside it.
+- `file` provider: a relative `path` resolves against the directory of the configuration file. When
+  `plugins_dir` is set the binary must lie inside it; when it is unset there is no constraint.
+
+Inside means after resolving symlinks in both the directory and the binary, so `..` and a link pointing
+out are refused with `plugins.<i>.path: must be inside plugins_dir`. The manifest sits next to the binary,
+so it is covered. A missing binary is still reported as missing. `config validate --plugins-dir <path>`
+applies the same check offline, with the `file` provider rules.
+
+`laraplate-edge plugin hash <dir>` prints `sha256:` and `manifest_sha256:` for the plugin in `<dir>`:
+the binary named in `<dir>/plugin.json` (with `.exe` on Windows) and the manifest file. Copy the two
+values into the entry; run it again after every rebuild of the plugin.
+
+The manifest is the file `plugin.json` in the same directory as the binary at `path`. It names the
+plugin and says which inputs it provides (the address syntax, the read modes, the types, whether it can
+`browse`). The agent hashes the binary and the manifest at every start of the plugin and refuses to run
+a plugin whose files do not match the entry. The binary at `path` need not carry the manifest's name,
+but `plugin hash` looks for the binary by that name.
+
+```yaml
+plugins:
+  - id: simulated-counter
+    path: plugins/simulated-counter
+    sha256: <sha256 printed by plugin hash>
+    manifest_sha256: <manifest_sha256 printed by plugin hash>
+    max_memory: 64MiB
+```
+
+### Plugin inputs
+
+An input uses a plugin with `driver: plugin:<id>`, where `<id>` is an entry of `plugins`. Every input
+key (`devices`, `points`, `death_tolerance`, `transforms`, ...) is the same as for the other drivers.
+Which values are valid is the plugin's: `connection` and each point's `address`, `type` and `read` are
+checked against the schemas, types and read modes its `plugin.json` declares, and the plugin checks the
+section again when it is configured. A plugin that no input uses is not started.
+
+`config validate` checks the plugin entries (files present, both hashes, manifest) and the inputs
+against the manifest, without starting the plugin. A problem is reported with its path, for instance
+`plugins.0.sha256: does not match the plugin binary` or `inputs.0.devices.0.points.0.address: ...`.
+
+A `secret://` value inside `connection` is not resolved by `config validate`: a manifest problem on a
+key that is a secret key (see "Secret fields") is dropped offline. The agent resolves the secrets when
+it configures the plugin at start, passes them in the configuration of that input only (never in the
+plugin's environment) and the plugin validates the resolved values then; a refused value shows as a
+config error at start, naming its path and never its value. A reference is resolved only under a secret key
+(see "Secret fields"); anywhere else the plugin receives the `secret://` text as it is and refuses it at
+start, which offline validation does not report.
+
+### Starting, restarting and applying
+
+- A plugin restarts, with all its inputs, only when its `plugins` entry changes or when the hash of its
+  binary on disk differs from the running one. A change in an input's section reconfigures only that
+  input's instance and leaves the plugin process and its other inputs running.
+- A plugin the new document no longer uses is stopped; one it newly uses is started.
+- A new document whose plugin files do not match their hashes, or whose manifest does not accept the
+  inputs, is `rejected` before anything changes: the previous document keeps running.
+- A plugin that dies, fails three health checks in a row or exceeds `max_memory` restarts on its own,
+  with a backoff from 1 second to 1 minute (see [USAGE.md](USAGE.md#running-plugins)). After a restart
+  the agent configures every input again; if the plugin then refuses an input's section, that input
+  stays down (its devices die after the `death_tolerance`) and the document is not rolled back.
+
 ## Applying a document
 
 A document is applied by difference: each input and output is compared with the running one by its
@@ -687,7 +769,7 @@ Outcomes, as reported to Laraplate:
 - `rejected`: the document is invalid, older than the applied one, has a transform chain that does not
   type-check, or asks for something this build does not provide. Nothing changed.
 - `rolled_back`: a component did not start (an input has 30 seconds). What the apply started is stopped
-  and what it stopped is started again.
+  and what it stopped is started again. A plugin that does not start counts as a component that did not start.
 - `applied`: the document runs and is kept as `data_dir/config/last-valid.json`, from which the agent
   starts next time.
 
@@ -700,7 +782,7 @@ Outcomes, as reported to Laraplate:
 |---|---|
 | drivers other than `simulated`, `modbus` and `opcua` | the driver plans, in the design's order: `mqtt`, `serial` and `file` |
 | output types other than `laraplate-http` | the MQTT output plan (`laraplate-mqtt`) and the plugin plan (`plugin:<id>`) |
-| `plugins`, `plugin:<id>` drivers and outputs | the plugin plan (design section 8) |
+| `plugin:<id>` outputs | the plugin output plan (design section 8) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references | a later plan with the OS keystore |
 

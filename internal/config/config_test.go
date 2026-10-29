@@ -129,7 +129,7 @@ func TestParseSpecExample(t *testing.T) {
 		t.Errorf("output = %+v\nwant     %+v", out, wantOut)
 	}
 
-	if p := doc.Plugins[0]; p.ID != "fanuc" || p.Path != "/opt/laraplate-edge/plugins/fanuc-focas" || p.SHA256 != "..." {
+	if p := doc.Plugins[0]; p.ID != "fanuc" || p.Path != "/opt/laraplate-edge/plugins/fanuc-focas" || p.SHA256 != "..." || p.ManifestSHA256 != "..." || p.MaxMemory != 256<<20 {
 		t.Errorf("plugin = %+v", p)
 	}
 }
@@ -142,7 +142,6 @@ func TestCheckBuildRefusesExactlyTheSpecExampleNonBuildParts(t *testing.T) {
 		"inputs.0.connection.auth.password: not available in this build",
 		"inputs.0.devices.0.derived: not available in this build",
 		"outputs.0.token: not available in this build",
-		"plugins.0: not available in this build",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("CheckBuild =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -298,7 +297,7 @@ func TestParseRefusals(t *testing.T) {
 		{"id too long", edit(t, base, "id: main", "id: "+long(65)), []string{"outputs.0.id: must be 1 to 64 characters"}},
 		{"duplicate input id", edit(t, base, "outputs:", "  - id: sim-line\n    driver: simulated\n    devices:\n      - device: other\n        points:\n          - {signal: s, address: a, read: event}\noutputs:"), []string{"inputs.1.id: duplicate of inputs.0.id"}},
 		{"duplicate output id", base + "  - {id: main, type: laraplate-http, url: 'https://b.example.com', token: 'secret://env/B'}\n", []string{"outputs.1.id: duplicate of outputs.0.id"}},
-		{"duplicate plugin id", base + "plugins:\n  - {id: p, path: /a, sha256: x}\n  - {id: p, path: /b, sha256: y}\n", []string{"plugins.1.id: duplicate of plugins.0.id"}},
+		{"duplicate plugin id", base + "plugins:\n  - {id: p, path: /a, sha256: x, manifest_sha256: x}\n  - {id: p, path: /b, sha256: y, manifest_sha256: y}\n", []string{"plugins.1.id: duplicate of plugins.0.id"}},
 		{"duplicate device and signal across inputs", edit(t, base, "outputs:", "  - id: second\n    driver: simulated\n    devices:\n      - device: press-07\n        points:\n          - {signal: state, address: a, read: event}\noutputs:"), []string{"inputs.1.devices.0.points.0.signal: duplicate of inputs.0.devices.0.points.0.signal on the same device"}},
 		{"duplicate signal in a device", edit(t, base, "            read: subscribe\n", "            read: subscribe\n          - {signal: state, address: b, read: event}\n"), []string{"inputs.0.devices.0.points.1.signal: duplicate of inputs.0.devices.0.points.0.signal on the same device"}},
 		{"device too long", edit(t, base, "device: press-07", "device: "+long(129)), []string{"inputs.0.devices.0.device: must be at most 128 characters"}},
@@ -319,8 +318,12 @@ func TestParseRefusals(t *testing.T) {
 		{"url scheme", edit(t, base, "https://erp.example.com", "ftp://erp.example.com"), []string{"outputs.0.url: must be an http or https URL"}},
 		{"bad route pattern", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    route: {include: ['press-[']}"), []string{"outputs.0.route.include.0: invalid pattern"}},
 		{"empty route", edit(t, base, "secret://env/TOKEN", "secret://env/TOKEN\n    route: {include: []}"), []string{"outputs.0.route.include: must have at least 1 items"}},
-		{"plugin without sha256", base + "plugins:\n  - {id: p, path: /a}\n", []string{"plugins.0.sha256: is required"}},
-		{"plugin with empty sha256", base + "plugins:\n  - {id: p, path: /a, sha256: ''}\n", []string{"plugins.0.sha256: must be at least 1 characters"}},
+		{"plugin without manifest_sha256", base + "plugins:\n  - {id: p, path: /a, sha256: x}\n", []string{"plugins.0.manifest_sha256: is required"}},
+		{"plugin with empty manifest_sha256", base + "plugins:\n  - {id: p, path: /a, sha256: x, manifest_sha256: ''}\n", []string{"plugins.0.manifest_sha256: must be at least 1 characters"}},
+		{"plugin with a bad max_memory", base + "plugins:\n  - {id: p, path: /a, sha256: x, manifest_sha256: y, max_memory: lots}\n", []string{"plugins.0.max_memory: must be a size such as 512KiB, 16MiB or 1GiB"}},
+		{"plugin with a zero max_memory", base + "plugins:\n  - {id: p, path: /a, sha256: x, manifest_sha256: y, max_memory: 0MiB}\n", []string{"plugins.0.max_memory: must be greater than zero"}},
+		{"plugin without sha256", base + "plugins:\n  - {id: p, path: /a, manifest_sha256: m}\n", []string{"plugins.0.sha256: is required"}},
+		{"plugin with empty sha256", base + "plugins:\n  - {id: p, path: /a, sha256: '', manifest_sha256: m}\n", []string{"plugins.0.sha256: must be at least 1 characters"}},
 		{"not an object", "- a\n- b\n", []string{"document: must be object"}},
 		{"empty document", "", []string{"document: is empty"}},
 		{"only a comment", "# nothing\n", []string{"document: is empty"}},
@@ -589,7 +592,7 @@ func TestCheckBuild(t *testing.T) {
 		{"env and file references", edit(t, base, "scenario: s.json", "scenario: s.json\n      password: secret://file/etc/p\n      token: secret://env/T"), nil},
 		{"modbus", edit(t, base, "driver: simulated", "driver: modbus"), nil},
 		{"opcua", edit(t, base, "driver: simulated", "driver: opcua"), nil},
-		{"plugin driver", edit(t, base, "driver: simulated", "driver: 'plugin:fanuc'"), []string{"inputs.0.driver: not available in this build"}},
+		{"plugin driver", edit(t, base, "driver: simulated", "driver: 'plugin:fanuc'"), nil},
 		{"mqtt output", edit(t, base, "type: laraplate-http", "type: laraplate-mqtt"), []string{"outputs.0.type: not available in this build"}},
 		{"plugin output", edit(t, base, "type: laraplate-http", "type: 'plugin:kafka'"), []string{"outputs.0.type: not available in this build"}},
 		{"keystore token", edit(t, base, "secret://env/TOKEN", "secret://keystore/main"), []string{"outputs.0.token: not available in this build"}},
@@ -600,7 +603,7 @@ func TestCheckBuild(t *testing.T) {
 		{"keystore under a suffixed key", edit(t, base, "scenario: s.json", "scenario: s.json\n      Client_Secret: 'secret://keystore/x'\n      api_key: 'secret://keystore/y'"), []string{"inputs.0.connection.*: not available in this build", "inputs.0.connection.api_key: not available in this build"}},
 		{"derived with transforms", edit(t, base, "            read: subscribe\n", "            read: subscribe\n        derived: [{signal: d, type: int, expr: '1', transforms: [{deadband: 1}]}]\n"), []string{"inputs.0.devices.0.derived: not available in this build", "inputs.0.devices.0.derived.0.transforms: not available in this build"}},
 		{"derived", edit(t, base, "            read: subscribe\n", "            read: subscribe\n        derived: [{signal: d, type: int, expr: '1'}]\n"), []string{"inputs.0.devices.0.derived: not available in this build"}},
-		{"plugins", base + "plugins:\n  - {id: a, path: /a, sha256: x}\n  - {id: b, path: /b, sha256: y}\n", []string{"plugins.0: not available in this build", "plugins.1: not available in this build"}},
+		{"plugins", base + "plugins:\n  - {id: a, path: /a, sha256: x, manifest_sha256: m}\n  - {id: b, path: /b, sha256: y, manifest_sha256: n, max_memory: 64MiB}\n", nil},
 	}
 
 	for _, tt := range tests {
@@ -666,11 +669,39 @@ func TestBackendFixturesValidate(t *testing.T) {
 			if err := structural.Validate(inst); err != nil {
 				t.Fatalf("backend schema refuses its own fixture: %v", err)
 			}
-			if err := agent.Validate(inst); err != nil {
+			// The agent schema must accept the document once its plugin
+			// entries (which lack the required manifest_sha256) are set
+			// aside; Parse below pins the difference exactly.
+			var stripped map[string]any
+			if err := json.Unmarshal(data, &stripped); err != nil {
+				t.Fatal(err)
+			}
+			delete(stripped, "plugins")
+			strippedInst, err := jsonschema.UnmarshalJSON(bytes.NewReader(mustJSON(t, stripped)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.Validate(strippedInst); err != nil {
 				t.Errorf("agent schema refuses a backend fixture: %v", err)
 			}
-			if _, msgs, err := config.Parse(data); err != nil || len(msgs) != 0 {
-				t.Errorf("Parse = %q, %v", msgs, err)
+			_, msgs, err := config.Parse(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The backend's plugin entries lack manifest_sha256, which the
+			// spec makes required: that is the only accepted difference.
+			var tree struct {
+				Plugins []json.RawMessage `json:"plugins"`
+			}
+			if err := json.Unmarshal(data, &tree); err != nil {
+				t.Fatal(err)
+			}
+			var want []string
+			for i := range tree.Plugins {
+				want = append(want, fmt.Sprintf("plugins.%d.manifest_sha256: is required", i))
+			}
+			if !slices.Equal(msgs, want) {
+				t.Errorf("Parse messages = %q, want %q", msgs, want)
 			}
 		})
 	}
@@ -987,4 +1018,15 @@ func TestParseSubscribeLongForm(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return data
 }

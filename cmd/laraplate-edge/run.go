@@ -101,12 +101,15 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 	store := config.NewStore(boot.DataDir)
 	resolver := secrets.NewResolver(secrets.WithLookupEnv(deps.lookupEnv))
 	sup, err := supervisor.New(supervisor.Config{
-		DataDir:  boot.DataDir,
-		Store:    store,
-		Drivers:  inputDrivers(boot, resolver, log, deps.drivers),
-		Resolver: resolver,
-		Clock:    deps.clock,
-		Logger:   log,
+		DataDir:    boot.DataDir,
+		Store:      store,
+		Drivers:    inputDrivers(boot, resolver, log, deps.drivers),
+		Resolver:   resolver,
+		ConfigDir:  configBaseDir(boot),
+		Provider:   boot.Config.Provider,
+		PluginsDir: boot.PluginsDir,
+		Clock:      deps.clock,
+		Logger:     log,
 	})
 	if err != nil {
 		return err
@@ -311,6 +314,7 @@ func changedSettings(a, b bootstrap.File) []string {
 	check("data_dir", a.DataDir != b.DataDir)
 	check("status_listen", a.StatusListen != b.StatusListen)
 	check("status_token", a.StatusToken != b.StatusToken)
+	check("plugins_dir", a.PluginsDir != b.PluginsDir)
 	check("config.provider", a.Config.Provider != b.Config.Provider)
 	check("config.file", a.Config.File != b.Config.File)
 	check("config.laraplate.url", a.Config.Laraplate.URL != b.Config.Laraplate.URL)

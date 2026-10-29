@@ -1,0 +1,76 @@
+{
+  "input": {
+    "valid": [
+      {
+        "id": "sim-valid-1",
+        "driver": "plugin:laraedge-builtin-simulated",
+        "connection": {
+          "seed": 7,
+          "scenario": {
+            "tick": "1s",
+            "initial": "idle",
+            "states": [
+              {"name": "idle", "transitions": {"running": 0.5}},
+              {"name": "running", "producing": true, "transitions": {"idle": 0.1}}
+            ],
+            "cycle_time": {"mean": "5s", "stddev": "1s"},
+            "scrap_rate": 0.02,
+            "measurements": [{"signal": "press_force", "mean": 182, "stddev": 3.5, "unit": "kN"}]
+          }
+        },
+        "devices": [
+          {
+            "device": "press-1",
+            "points": [
+              {"signal": "state", "address": "state", "type": "string", "read": "subscribe", "priority": "critical"},
+              {"signal": "good_count", "address": "good_count", "type": "uint32", "read": "subscribe", "priority": "critical"},
+              {"signal": "force", "address": "press_force", "type": "float64", "read": "subscribe", "priority": "bulk"}
+            ]
+          }
+        ]
+      }
+    ],
+    "invalid": [
+      {
+        "id": "sim-invalid-no-scenario",
+        "driver": "plugin:laraedge-builtin-simulated",
+        "connection": {"seed": 7},
+        "devices": [
+          {"device": "press-1", "points": [{"signal": "state", "address": "state", "type": "string", "read": "subscribe"}]}
+        ]
+      },
+      {
+        "id": "sim-invalid-address",
+        "driver": "plugin:laraedge-builtin-simulated",
+        "connection": {
+          "scenario": {
+            "tick": "1s",
+            "initial": "idle",
+            "states": [{"name": "idle", "transitions": {}}],
+            "cycle_time": {"mean": "5s", "stddev": "1s"},
+            "scrap_rate": 0.02
+          }
+        },
+        "devices": [
+          {"device": "press-1", "points": [{"signal": "x", "address": "no_such_signal", "type": "float64", "read": "subscribe"}]}
+        ]
+      },
+      {
+        "id": "sim-invalid-type",
+        "driver": "plugin:laraedge-builtin-simulated",
+        "connection": {
+          "scenario": {
+            "tick": "1s",
+            "initial": "idle",
+            "states": [{"name": "idle", "transitions": {}}],
+            "cycle_time": {"mean": "5s", "stddev": "1s"},
+            "scrap_rate": 0.02
+          }
+        },
+        "devices": [
+          {"device": "press-1", "points": [{"signal": "state", "address": "state", "type": "float64", "read": "subscribe"}]}
+        ]
+      }
+    ]
+  }
+}

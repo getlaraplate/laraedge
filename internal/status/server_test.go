@@ -458,6 +458,7 @@ func TestStatusJSON(t *testing.T) {
 				"last_error_at":     nil,
 			},
 		},
+		"plugins": []any{},
 	}
 
 	gotJSON, _ := json.MarshalIndent(got, "", "  ")
@@ -473,7 +474,7 @@ func TestStatusJSONBeforeAnyConfiguration(t *testing.T) {
 
 	_, _, body := h.get(t, http.MethodGet, "/status", "")
 
-	for _, want := range []string{`"config_applied":false`, `"config_version":0`, `"inputs":[]`, `"outputs":[]`} {
+	for _, want := range []string{`"config_applied":false`, `"config_version":0`, `"inputs":[]`, `"outputs":[]`, `"plugins":[]`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("GET /status = %s, want it to contain %s", body, want)
 		}
@@ -557,5 +558,39 @@ func TestStatusJSONReportsHealthOfReportingInputsOnly(t *testing.T) {
 		if got := in["read_errors"]; !reflect.DeepEqual(got, want.errors) {
 			t.Errorf("input %s read_errors = %v, want %v", id, got, want.errors)
 		}
+	}
+}
+
+// pluginStatus is a status with a plugin up after two restarts and one a
+// rollback could not start again.
+func pluginStatus() supervisor.Status {
+	return supervisor.Status{
+		Applied: true,
+		Version: 3,
+		Plugins: []supervisor.PluginStatus{
+			{ID: "demo", State: "up", Pid: 4242, Restarts: 2, RestartsByReason: map[string]uint64{"exit": 1, "memory": 1}, LastError: "the plugin used more memory than max_memory"},
+			{ID: "gone", State: supervisor.StateFailed, LastError: "the plugin files on disk do not match their hashes"},
+		},
+	}
+}
+
+func TestStatusJSONReportsPlugins(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(pluginStatus())
+
+	_, _, body := h.get(t, http.MethodGet, "/status", "")
+
+	var got struct {
+		Plugins []map[string]any `json:"plugins"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("body is not JSON: %v\n%s", err, body)
+	}
+	want := []map[string]any{
+		{"id": "demo", "state": "up", "pid": 4242.0, "restarts": 2.0, "last_error": "the plugin used more memory than max_memory"},
+		{"id": "gone", "state": "failed", "pid": 0.0, "restarts": 0.0, "last_error": "the plugin files on disk do not match their hashes"},
+	}
+	if !reflect.DeepEqual(got.Plugins, want) {
+		t.Fatalf("plugins = %v, want %v", got.Plugins, want)
 	}
 }

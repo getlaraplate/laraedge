@@ -12,6 +12,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/output"
+	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/supervisor"
 )
 
@@ -33,6 +34,10 @@ var outputStates = []string{
 // lossReasons are the drop reasons always exposed, at zero before any drop,
 // so a rate over them never starts from a missing series.
 var lossReasons = []string{model.LossBufferFull, model.LossRejectedInvalid}
+
+// restartReasons are the restart reasons always exposed for a plugin, at
+// zero before any restart.
+var restartReasons = []string{plugin.ReasonExit, plugin.ReasonHealth, plugin.ReasonMemory, plugin.ReasonHash}
 
 // metrics writes the exposition of the current state (spec 6.8). The buffer
 // series (records, bytes, oldest age, drops, corrupt records) are written
@@ -79,6 +84,20 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		for _, in := range reporting {
 			for _, kind := range readErrorKinds(in.ReadErrors) {
 				w.sample("input_read_errors_total", float64(in.ReadErrors[kind]), "input", in.ID, "kind", kind)
+			}
+		}
+	}
+
+	if len(st.Plugins) > 0 {
+		w.family("plugin_up", "gauge", "1 when the plugin process is up, 0 otherwise; only plugins the configuration uses.")
+		for _, p := range st.Plugins {
+			w.sample("plugin_up", boolValue(p.State == string(plugin.StateUp)), "plugin", p.ID)
+		}
+
+		w.family("plugin_restarts_total", "counter", "Restarts of the plugin process, by reason: exit, health, memory, hash; reset to 0 when a configuration change restarts the plugin.")
+		for _, p := range st.Plugins {
+			for _, reason := range withKnown(restartReasons, p.RestartsByReason) {
+				w.sample("plugin_restarts_total", float64(p.RestartsByReason[reason]), "plugin", p.ID, "reason", reason)
 			}
 		}
 	}
@@ -154,14 +173,19 @@ func reportingInputs(inputs []supervisor.InputStatus) []supervisor.InputStatus {
 // before any error so a rate over them never starts from a missing series,
 // then any other kind it reported, sorted.
 func readErrorKinds(counts map[string]uint64) []string {
-	kinds := slices.Clone(input.ReadErrorKinds)
-	for _, kind := range slices.Sorted(maps.Keys(counts)) {
-		if !slices.Contains(kinds, kind) {
-			kinds = append(kinds, kind)
+	return withKnown(input.ReadErrorKinds, counts)
+}
+
+// withKnown returns known, then the other keys of counts, sorted.
+func withKnown(known []string, counts map[string]uint64) []string {
+	keys := slices.Clone(known)
+	for _, key := range slices.Sorted(maps.Keys(counts)) {
+		if !slices.Contains(keys, key) {
+			keys = append(keys, key)
 		}
 	}
 
-	return kinds
+	return keys
 }
 
 // expositionWriter writes the Prometheus text format: a HELP and a TYPE line

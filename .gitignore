@@ -14,6 +14,8 @@ coverage.*
 /examples/simulated/data/
 /examples/modbus/data/
 /examples/opcua/data/
+/examples/simulated-counter/data/
+/examples/simulated-counter/plugins/
 /bootstrap.local.yaml
 
 # Environment and secrets
@@ -29,3 +31,6 @@ coverage.*
 /.worktrees/
 .DS_Store
 Thumbs.db
+
+# Built by the builtin tests and by CI next to plugin.json and conformance.json
+/cmd/laraplate-edge/testdata/builtin-simulated/laraedge-builtin-simulated*

@@ -283,6 +283,12 @@ type Plugin struct {
 	Path string
 	// SHA256 is the expected hash of the binary.
 	SHA256 string
+	// ManifestSHA256 is the expected hash of the plugin.json file next to
+	// the binary.
+	ManifestSHA256 string
+	// MaxMemory is the most bytes of memory the plugin process may use, 0
+	// for no limit.
+	MaxMemory int64
 	// Raw is the plugin as compact canonical JSON.
 	Raw json.RawMessage
 }
@@ -462,9 +468,11 @@ type wireOutput struct {
 }
 
 type wirePlugin struct {
-	ID     string `json:"id"`
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
+	ID             string `json:"id"`
+	Path           string `json:"path"`
+	SHA256         string `json:"sha256"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	MaxMemory      string `json:"max_memory"`
 }
 
 // builder turns a defaulted tree into a Document and collects the semantic
@@ -517,13 +525,17 @@ func build(root map[string]any, lenient bool) (Document, []string, error) {
 		}
 		doc.Outputs = append(doc.Outputs, out)
 	}
-	for _, v := range list(root["plugins"]) {
+	for i, v := range list(root["plugins"]) {
 		var w wirePlugin
 		raw, err := b.component(v, &w)
 		if err != nil {
 			return Document{}, nil, err
 		}
-		doc.Plugins = append(doc.Plugins, Plugin{ID: w.ID, Path: w.Path, SHA256: w.SHA256, Raw: raw})
+		var maxMemory int64
+		if w.MaxMemory != "" {
+			maxMemory = b.size(path{"plugins"}.index(i).key("max_memory"), w.MaxMemory)
+		}
+		doc.Plugins = append(doc.Plugins, Plugin{ID: w.ID, Path: w.Path, SHA256: w.SHA256, ManifestSHA256: w.ManifestSHA256, MaxMemory: maxMemory, Raw: raw})
 	}
 
 	b.uniqueIDs(doc)
@@ -814,7 +826,8 @@ func (b *builder) uniqueSignals(doc Document) {
 // The schema's connection patternProperties states the same rule.
 var secretKeySuffixes = []string{"password", "token", "secret", "api_key"}
 
-func isSecretKey(key string) bool {
+// IsSecretKey reports whether key names a secret reference (see secretKeySuffixes).
+func IsSecretKey(key string) bool {
 	lower := strings.ToLower(key)
 	return slices.ContainsFunc(secretKeySuffixes, func(suffix string) bool { return strings.HasSuffix(lower, suffix) })
 }
@@ -830,7 +843,7 @@ func walkSecrets(v any, p path, fn func(path, string)) {
 		}
 		slices.Sort(keys)
 		for _, k := range keys {
-			if s, ok := x[k].(string); ok && isSecretKey(k) {
+			if s, ok := x[k].(string); ok && IsSecretKey(k) {
 				fn(p.key(k), s)
 				continue
 			}

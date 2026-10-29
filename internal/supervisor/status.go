@@ -20,6 +20,8 @@ type Status struct {
 	Inputs []InputStatus
 	// Outputs are the outputs of the applied document, by id.
 	Outputs []OutputStatus
+	// Plugins are the plugins the applied document uses, by id.
+	Plugins []PluginStatus
 }
 
 // InputStatus describes one input.
@@ -44,6 +46,24 @@ type InputStatus struct {
 	ReadErrors map[string]uint64
 }
 
+// PluginStatus describes one plugin the applied document uses.
+type PluginStatus struct {
+	// ID is the plugin id.
+	ID string
+	// State is the state of the plugin host (plugin.State: starting, up,
+	// down) or StateFailed for a plugin a rollback could not start again.
+	State string
+	// Pid is the process id of the plugin while it is up, else 0.
+	Pid int
+	// Restarts counts the restarts of the plugin process since its host
+	// started; RestartsByReason splits it by reason (exit, health, memory,
+	// hash).
+	Restarts         uint64
+	RestartsByReason map[string]uint64
+	// LastError is the last reason the plugin went down or failed to start.
+	LastError string
+}
+
 // OutputStatus describes one output.
 type OutputStatus struct {
 	// ID is the output id.
@@ -65,7 +85,7 @@ type OutputStatus struct {
 	LastErrorAt time.Time
 }
 
-// Status returns the current state of the inputs and outputs.
+// Status returns the current state of the inputs, outputs and plugins.
 func (s *Supervisor) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -111,8 +131,20 @@ func (s *Supervisor) Status() Status {
 		st.Outputs = append(st.Outputs, OutputStatus{ID: id, Type: f.kind, State: StateFailed, LastError: f.err})
 	}
 
+	for id, rp := range s.plugins {
+		hs := rp.host.Status()
+		st.Plugins = append(st.Plugins, PluginStatus{
+			ID: id, State: string(hs.State), Pid: hs.Pid,
+			Restarts: hs.Restarts, RestartsByReason: hs.RestartsByReason, LastError: hs.LastError,
+		})
+	}
+	for id, f := range s.failedPlugins {
+		st.Plugins = append(st.Plugins, PluginStatus{ID: id, State: StateFailed, LastError: f.err})
+	}
+
 	slices.SortFunc(st.Inputs, func(a, b InputStatus) int { return strings.Compare(a.ID, b.ID) })
 	slices.SortFunc(st.Outputs, func(a, b OutputStatus) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(st.Plugins, func(a, b PluginStatus) int { return strings.Compare(a.ID, b.ID) })
 
 	return st
 }

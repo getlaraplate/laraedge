@@ -10,12 +10,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/getlaraplate/laraedge/internal/bootstrap"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/logging"
+	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/secrets"
 	"github.com/getlaraplate/laraedge/internal/transform"
 	"github.com/getlaraplate/laraedge/internal/version"
@@ -33,7 +35,11 @@ const usageText = `usage: laraplate-edge <command> [arguments]
 commands:
   run --bootstrap <path> [--log-level debug|info|warn|error]
                              run the agent (default log level info)
-  config validate <file>     validate a configuration document
+  config validate <file> [--plugins-dir <path>]
+                             validate a configuration document; with
+                             --plugins-dir (absolute) every plugin binary
+                             must lie inside it, as plugins_dir does in
+                             the bootstrap
   config test <file> --input <samples.jsonl>
                              replay recorded samples (JSON Lines) through the
                              transform chains of a document; the resulting
@@ -44,12 +50,16 @@ commands:
                              wins over --bootstrap, whose data_dir and
                              agent_id an opcua input still uses), else the
                              last valid one in the bootstrap's data_dir;
-                             --record writes the raw samples as JSON Lines
+                             --record writes the raw samples as JSON Lines;
+                             a plugin:<id> input starts its plugin for the
+                             probe
   browse <input> (--config <file> | --bootstrap <path>) [--node <nodeid>] [--depth <n>]
-                             list the nodes of an OPC UA server, indented by
-                             depth, from the Objects folder or --node
-                             (nsu=<uri>;<id> works); --depth 1 to 10, default 2;
-                             stops after 1000 nodes; reads no value
+                             list the nodes of an OPC UA server, or of a
+                             plugin:<id> input whose plugin.json declares
+                             browse, indented by depth, from the Objects
+                             folder or --node (nsu=<uri>;<id> works);
+                             --depth 1 to 10, default 2; stops after 1000
+                             nodes; reads no value
   opcua trust <input> (--config <file> | --bootstrap <path>) [--thumbprint <hex>]
                              show the certificate an OPC UA server presents and
                              trust it after a yes on stdin, or without asking
@@ -58,10 +68,19 @@ commands:
                              list the trusted certificates
   status [--listen addr]     query a running agent (default ` + defaultListen + `);
                              the token, if any, from ` + statusTokenEnv + `
+  plugin hash <dir>          print sha256 and manifest_sha256 of the plugin in
+                             <dir>: the binary named in <dir>/plugin.json and
+                             the plugin.json file, to pin them in the document
   version                    print the version
 `
 
 func main() {
+	// Decision H8: under a busybox name the binary is a plugin, whatever its
+	// arguments, so this comes before any command parsing.
+	if driver, ok := builtinDriver(os.Args[0]); ok {
+		os.Exit(serveBuiltin(os.Args[0], driver, os.Stderr))
+	}
+
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
@@ -90,6 +109,8 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runBrowse(args[1:], stdout, stderr)
 	case "opcua":
 		return runOPCUA(args[1:], stdin, stdout, stderr)
+	case "plugin":
+		return runPlugin(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
@@ -161,12 +182,22 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 // the input drivers' own included (decision M1), every message on stderr
 // prefixed by the file name, exit 0 when there is none.
 func runConfigValidate(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 2 || args[0] != "validate" {
+	fs := newFlagSet("config validate", stderr)
+	pluginsDir := fs.String("plugins-dir", "", "")
+	positional, code, ok := parseArgs(fs, args)
+	if !ok {
+		return code
+	}
+	if len(positional) != 2 || positional[0] != "validate" {
 		fmt.Fprint(stderr, usageText)
 		return exitUsage
 	}
+	if *pluginsDir != "" && !filepath.IsAbs(*pluginsDir) {
+		fmt.Fprintf(stderr, "laraplate-edge config validate: --plugins-dir must be an absolute path\n")
+		return exitUsage
+	}
 
-	file := args[1]
+	file := positional[1]
 	doc, msgs, err := parseDocument(file)
 	if err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge config validate: %v\n", err)
@@ -174,6 +205,7 @@ func runConfigValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(msgs) == 0 {
 		msgs = append(checkDocument(doc), checkInputs(doc, file)...)
+		msgs = append(msgs, checkPlugins(doc, file, *pluginsDir)...)
 	}
 	if len(msgs) > 0 {
 		printMessages(stderr, file, msgs)
@@ -245,6 +277,17 @@ func checkInputs(doc config.Document, file string) []string {
 	}
 
 	return msgs
+}
+
+// checkPlugins resolves the plugin entries of doc against the files next to
+// the configuration file (file provider rules, decision H1) and validates the
+// plugin inputs against their manifests. A non-empty pluginsDir is the
+// plugins_dir the binaries must lie inside.
+func checkPlugins(doc config.Document, file, pluginsDir string) []string {
+	boot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: file}}
+	specs, msgs := plugin.Resolve(doc, plugin.Paths{BaseDir: configBaseDir(boot), Provider: boot.Config.Provider, PluginsDir: pluginsDir})
+
+	return append(msgs, plugin.Validate(doc, specs)...)
 }
 
 // printMessages writes each message on its own line, prefixed by the file.

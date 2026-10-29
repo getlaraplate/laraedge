@@ -1,0 +1,42 @@
+# Configuration document of the simulated-counter demo: one input served by
+# the plugin simulated-counter of the plugin SDK, with two presses, sent to a
+# Laraplate running on this machine. The plugin path is resolved against the
+# directory of this file. The token is read from the environment of the agent:
+# export LARAPLATE_EDGE_TOKEN before running it.
+#
+# Build the plugin and fill the two hashes below first (README.md):
+#   laraplate-edge plugin hash plugins/simulated-counter
+# Then check the document offline and read every point once through the plugin:
+#   laraplate-edge config validate config.yaml
+#   laraplate-edge probe counter-line --config config.yaml
+
+schema: laraplate-edge-config/1
+version: 1
+
+plugins:
+  - id: simulated-counter
+    path: plugins/simulated-counter/simulated-counter
+    # Replace both with the values printed by "plugin hash".
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    max_memory: 64MiB
+
+inputs:
+  - id: counter-line
+    driver: plugin:simulated-counter
+    connection: {}
+    devices:
+      # The address counter:<n> is the increment of the counter at every poll.
+      - device: press-1
+        points:
+          - {signal: strokes, address: "counter:1", type: int32, read: {poll: 1s}, priority: critical}
+          - {signal: parts, address: "counter:5", type: int64, read: {poll: 2s}, priority: critical}
+      - device: press-2
+        points:
+          - {signal: strokes, address: "counter:3", type: int32, read: {poll: 500ms}, priority: critical}
+
+outputs:
+  - id: laraplate
+    type: laraplate-http
+    url: http://127.0.0.1:8000
+    token: secret://env/LARAPLATE_EDGE_TOKEN

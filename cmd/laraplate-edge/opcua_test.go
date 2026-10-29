@@ -24,7 +24,10 @@ import (
 // server log through it unconditionally.
 func TestMain(m *testing.M) {
 	opcuatest.SilenceLibraryLogs()
-	os.Exit(m.Run())
+
+	code := m.Run()
+	removeBuiltTools()
+	os.Exit(code)
 }
 
 const testNS = opcuatest.Namespace
