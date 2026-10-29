@@ -37,7 +37,7 @@ func TestCheckRejectsUnresolvablePlugins(t *testing.T) {
 				c.Provider = tc.provider
 			})
 
-			got := f.sup.check(doc)
+			_, got := f.sup.check(doc)
 			if !strings.Contains(strings.Join(got, "\n"), tc.want) {
 				t.Errorf("check() = %q, want a message %q", got, tc.want)
 			}

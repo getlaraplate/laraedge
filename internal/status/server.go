@@ -291,6 +291,17 @@ type statusDoc struct {
 	ConfigVersion int64       `json:"config_version"`
 	Inputs        []inputDoc  `json:"inputs"`
 	Outputs       []outputDoc `json:"outputs"`
+	Plugins       []pluginDoc `json:"plugins"`
+}
+
+// pluginDoc is a plugin the applied document uses. Restarts is the total;
+// the split by reason is in /metrics.
+type pluginDoc struct {
+	ID        string `json:"id"`
+	State     string `json:"state"`
+	Pid       int    `json:"pid"`
+	Restarts  uint64 `json:"restarts"`
+	LastError string `json:"last_error,omitempty"`
 }
 
 type inputDoc struct {
@@ -341,6 +352,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		ConfigVersion: st.Version,
 		Inputs:        make([]inputDoc, 0, len(st.Inputs)),
 		Outputs:       make([]outputDoc, 0, len(st.Outputs)),
+		Plugins:       make([]pluginDoc, 0, len(st.Plugins)),
 	}
 	for _, in := range st.Inputs {
 		d := inputDoc{
@@ -376,6 +388,10 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 			LastError:        out.LastError,
 			LastErrorAt:      timeOrNil(out.LastErrorAt),
 		})
+	}
+
+	for _, p := range st.Plugins {
+		doc.Plugins = append(doc.Plugins, pluginDoc{ID: p.ID, State: p.State, Pid: p.Pid, Restarts: p.Restarts, LastError: p.LastError})
 	}
 
 	s.writeJSON(w, http.StatusOK, doc)

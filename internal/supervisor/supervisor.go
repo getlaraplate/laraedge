@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,9 +72,12 @@ type Config struct {
 	DataDir string
 	// Store keeps the last valid document; nil means config.NewStore(DataDir).
 	Store *config.Store
-	// Drivers builds the inputs, by driver name.
+	// Drivers builds the inputs, by driver name. The inputs of a plugin,
+	// driver plugin:<id>, are built by the plugin of that id the applied
+	// document declares (decision H4), not from this registry.
 	Drivers map[string]input.Factory
-	// Resolver resolves the output tokens.
+	// Resolver resolves the output tokens and the secrets of the plugin
+	// inputs.
 	Resolver output.SecretResolver
 	// ConfigDir is the directory of the configuration file, against which
 	// relative plugin paths resolve; "" for a provider without a file.
@@ -128,6 +132,10 @@ type Supervisor struct {
 	outputs   map[string]*runningOutput
 	failedIn  map[string]failure
 	failedOut map[string]failure
+	// plugins holds the started plugins, by id; failedPlugins those a
+	// rollback could not start again.
+	plugins       map[string]*runningPlugin
+	failedPlugins map[string]failure
 	// appliedInputs holds the input ids of the applied document.
 	appliedInputs map[string]bool
 	// transformErrors holds, by input id, the runtime errors counted by the
@@ -159,7 +167,8 @@ type runningInput struct {
 // the router's locks (Router.mu, then a hold queue's), then an output
 // buffer's lock inside Append or AddLoss.
 // Supervisor.mu is taken before a buffer's lock (Status reads the buffer
-// figures under it) and never while an instance's or the router's lock is
+// figures under it) and before a plugin host's lock (Status reads the plugin
+// states under it), and never while an instance's or the router's lock is
 // held. No lock is ever taken in the other direction.
 type inputInstance struct {
 	router *pipeline.Router
@@ -216,6 +225,13 @@ func (i *inputInstance) retire() {
 	}
 }
 
+// runningPlugin is a plugin with its host. Its spec is the one the host was
+// built from: a document changing the entry (Raw) restarts it (decision H5).
+type runningPlugin struct {
+	spec plugin.Spec
+	host *plugin.Host
+}
+
 type runningOutput struct {
 	cfg    config.Output
 	dir    string
@@ -258,6 +274,8 @@ func New(cfg Config) (*Supervisor, error) {
 		failedIn:  map[string]failure{},
 		failedOut: map[string]failure{},
 
+		plugins:         map[string]*runningPlugin{},
+		failedPlugins:   map[string]failure{},
 		transformErrors: map[string]uint64{},
 	}
 	if s.store == nil {
@@ -280,12 +298,16 @@ func New(cfg Config) (*Supervisor, error) {
 
 // plan is what an Apply changes: components to stop (changed or removed,
 // by id) and to start (changed or added, by index in the new document).
+// Plugins count as components: only the plugins an input of the document
+// uses run.
 type plan struct {
 	stopInputs     []string
 	stopOutputs    []string
+	stopPlugins    []string
 	removedOutputs map[string]bool
 	startInputs    []int
 	startOutputs   []int
+	startPlugins   []int
 	kept           int
 }
 
@@ -306,25 +328,32 @@ const (
 type journal struct {
 	stoppedInputs  []config.Input
 	stoppedOutputs []config.Output
+	stoppedPlugins []plugin.Spec
 	startedInputs  []string
 	startedOutputs []string
-	// failedIn and failedOut are the failed components before the Apply: a
-	// rollback puts back those this Apply started.
-	failedIn  map[string]failure
-	failedOut map[string]failure
+	startedPlugins []string
+	// failedIn, failedOut and failedPlugins are the failed components before
+	// the Apply: a rollback puts back those this Apply started.
+	failedIn      map[string]failure
+	failedOut     map[string]failure
+	failedPlugins map[string]failure
 }
 
 // Apply makes doc the running document. It refuses, with ResultRejected and
 // nothing changed, a document the build cannot run (config.CheckBuild, a
-// driver missing from the registry, a transform chain that does not type
-// check, an input its driver cannot build) or whose version is lower than
-// the applied one (a missing version counts as 0; ruling R9). Otherwise it
-// applies by difference, comparing each component's Raw by id: unchanged
-// inputs and outputs keep running untouched, changed ones are restarted,
-// removed ones stop (an output's directory is kept) and added ones start.
-// When a component fails to start, or an input does not start within the
-// start timeout, what this Apply started is stopped and what it stopped is
-// started again: ResultRolledBack with the errors. When ctx is cancelled
+// driver missing from the registry, a plugin whose files or manifest do not
+// check, a transform chain that does not type check, an input its driver
+// cannot build) or whose version is lower than the applied one (a missing
+// version counts as 0; ruling R9). Otherwise it applies by difference,
+// comparing each component's Raw by id: unchanged inputs and outputs keep
+// running untouched, changed ones are restarted, removed ones stop (an
+// output's directory is kept) and added ones start. A plugin runs while an
+// input of the document uses it: it starts before those inputs, restarts
+// with all of them when its entry or its binary changes, and stops after
+// the last of them (decision H5). When a component fails to start, or an
+// input does not start within the start timeout, what this Apply started is
+// stopped and what it stopped is started again: ResultRolledBack with the
+// errors. When ctx is cancelled
 // during a failed apply, the rollback still runs but there is no outcome:
 // Apply returns the context error. On success the document is saved as the
 // last valid one; the error is then only for that save failing, with
@@ -337,16 +366,17 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 		return Outcome{}, ErrClosed
 	}
 
-	if msgs := s.check(doc); len(msgs) > 0 {
+	specs, msgs := s.check(doc)
+	if len(msgs) > 0 {
 		s.log.Warn("supervisor: configuration rejected", "version", doc.Version, "errors", msgs)
 
 		return Outcome{Result: ResultRejected, Errors: msgs}, nil
 	}
 
-	p := s.diff(doc)
-	built, msgs := s.build(doc, p)
+	p := s.diff(doc, specs)
+	built, msgs := s.build(doc, p, specs)
 	if len(msgs) > 0 {
-		closeInputs(built)
+		built.close()
 		s.log.Warn("supervisor: configuration rejected", "version", doc.Version, "errors", msgs)
 
 		return Outcome{Result: ResultRejected, Errors: msgs}, nil
@@ -363,7 +393,7 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	}
 
 	j, errs := s.execute(ctx, doc, p, built)
-	closeInputs(built)
+	built.close()
 	if len(errs) > 0 {
 		errs = append(errs, s.rollback(j, inputIDs(doc))...)
 		if applied {
@@ -386,6 +416,7 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	s.mu.Lock()
 	s.applied, s.version, s.appliedInputs = true, doc.Version, inputIDs(doc)
 	clear(s.failedIn)
+	clear(s.failedPlugins)
 	failedOut := sortedKeys(s.failedOut)
 	clear(s.failedOut)
 	s.mu.Unlock()
@@ -399,8 +430,8 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	}
 
 	s.log.Info("supervisor: configuration applied", "version", doc.Version,
-		"started", len(p.startInputs)+len(p.startOutputs),
-		"stopped", len(p.stopInputs)+len(p.stopOutputs),
+		"started", len(p.startInputs)+len(p.startOutputs)+len(p.startPlugins),
+		"stopped", len(p.stopInputs)+len(p.stopOutputs)+len(p.stopPlugins),
 		"unchanged", p.kept)
 
 	s.pruneInputStates(inputIDs(doc))
@@ -451,8 +482,9 @@ func inputIDs(doc config.Document) map[string]bool {
 	return ids
 }
 
-// check returns the reasons to refuse doc before anything is built.
-func (s *Supervisor) check(doc config.Document) []string {
+// check returns the reasons to refuse doc before anything is built, and the
+// verified plugin entries of doc.
+func (s *Supervisor) check(doc config.Document) ([]plugin.Spec, []string) {
 	var msgs []string
 
 	s.mu.Lock()
@@ -466,7 +498,9 @@ func (s *Supervisor) check(doc config.Document) []string {
 	msgs = append(msgs, build...)
 	if len(build) == 0 {
 		for i, in := range doc.Inputs {
-			if s.drivers[in.Driver] == nil {
+			// A plugin input is built by its plugin (decision H4), which
+			// plugin.Validate checks below.
+			if !strings.HasPrefix(in.Driver, plugin.DriverPrefix) && s.drivers[in.Driver] == nil {
 				msgs = append(msgs, fmt.Sprintf("inputs.%d.driver: not available in this build", i))
 			}
 		}
@@ -481,22 +515,63 @@ func (s *Supervisor) check(doc config.Document) []string {
 	msgs = append(msgs, pluginMsgs...)
 	msgs = append(msgs, plugin.Validate(doc, specs)...)
 
-	return msgs
+	return specs, msgs
+}
+
+// pluginOf returns the plugin id of a plugin driver, plugin:<id>.
+func pluginOf(driver string) (string, bool) {
+	return strings.CutPrefix(driver, plugin.DriverPrefix)
 }
 
 // diff compares doc with what runs. Only Apply changes the running maps, so
-// reading them under mu once is enough.
-func (s *Supervisor) diff(doc config.Document) plan {
+// reading them under mu once is enough. A plugin an input of doc uses is
+// kept when its entry and the hash of its binary are those it runs with;
+// otherwise it starts, after the running one stopped, and every input using
+// it restarts with it. A running plugin no input of doc uses stops
+// (decision H5).
+func (s *Supervisor) diff(doc config.Document, specs []plugin.Spec) plan {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	p := plan{removedOutputs: map[string]bool{}}
 
+	used := map[string]bool{}
+	for _, in := range doc.Inputs {
+		if id, ok := pluginOf(in.Driver); ok {
+			used[id] = true
+		}
+	}
+	restarted := map[string]bool{}
+	for i, entry := range doc.Plugins {
+		if !used[entry.ID] {
+			continue
+		}
+		running := s.plugins[entry.ID]
+		k := slices.IndexFunc(specs, func(sp plugin.Spec) bool { return sp.ID == entry.ID })
+		if running != nil && k >= 0 && bytes.Equal(running.spec.Raw, specs[k].Raw) &&
+			strings.EqualFold(running.host.BinarySHA256(), specs[k].SHA256) {
+			p.kept++
+
+			continue
+		}
+		p.startPlugins = append(p.startPlugins, i)
+		if running != nil {
+			p.stopPlugins = append(p.stopPlugins, entry.ID)
+			restarted[entry.ID] = true
+		}
+	}
+	for id := range s.plugins {
+		if !used[id] {
+			p.stopPlugins = append(p.stopPlugins, id)
+		}
+	}
+
 	inDoc := map[string]bool{}
 	for i, in := range doc.Inputs {
 		inDoc[in.ID] = true
 		running := s.inputs[in.ID]
-		if running != nil && bytes.Equal(running.cfg.Raw, in.Raw) {
+		pluginID, _ := pluginOf(running.driver())
+		if running != nil && bytes.Equal(running.cfg.Raw, in.Raw) && !restarted[pluginID] {
 			p.kept++
 
 			continue
@@ -535,36 +610,117 @@ func (s *Supervisor) diff(doc config.Document) plan {
 
 	slices.Sort(p.stopInputs)
 	slices.Sort(p.stopOutputs)
+	slices.Sort(p.stopPlugins)
 
 	return p
 }
 
-// build asks the drivers for every input to start. Nothing runs yet, so a
-// driver refusing its configuration rejects the document.
-func (s *Supervisor) build(doc config.Document, p plan) (map[int]input.Input, []string) {
-	built := map[int]input.Input{}
+// driver returns the driver of a running input, "" for none.
+func (ri *runningInput) driver() string {
+	if ri == nil {
+		return ""
+	}
+
+	return ri.cfg.Driver
+}
+
+// pending is what build prepared: the inputs to start, by index in the
+// document, and the plugins to start, by id, whose hosts are built but not
+// started.
+type pending struct {
+	inputs  map[int]input.Input
+	plugins map[string]*runningPlugin
+}
+
+// close closes the inputs never started. The plugins never started hold
+// nothing to release.
+func (b pending) close() { closeInputs(b.inputs) }
+
+// build prepares the plugins and asks the drivers for every input to start.
+// Nothing runs yet, so a driver refusing its configuration rejects the
+// document. A plugin input is built by the plugin of its id the document
+// declares: the new host when the plugin starts, else the running one.
+func (s *Supervisor) build(doc config.Document, p plan, specs []plugin.Spec) (pending, []string) {
+	b := pending{inputs: map[int]input.Input{}, plugins: map[string]*runningPlugin{}}
+	for _, i := range p.startPlugins {
+		k := slices.IndexFunc(specs, func(sp plugin.Spec) bool { return sp.ID == doc.Plugins[i].ID })
+		b.plugins[specs[k].ID] = s.newPlugin(specs[k])
+	}
+
+	hosts := s.pluginHosts()
+	for id, rp := range b.plugins {
+		hosts[id] = rp.host
+	}
+
 	var msgs []string
 	for _, i := range p.startInputs {
 		cfg := doc.Inputs[i]
-		in, err := s.drivers[cfg.Driver](cfg, s.clk)
+		in, err := s.factory(cfg.Driver, hosts)(cfg, s.clk)
 		if err != nil {
 			msgs = append(msgs, fmt.Sprintf("inputs.%d: %v", i, err))
 
 			continue
 		}
-		built[i] = in
+		b.inputs[i] = in
 	}
 
-	return built, msgs
+	return b, msgs
+}
+
+// newPlugin returns the plugin of spec, its host built and not started.
+func (s *Supervisor) newPlugin(spec plugin.Spec) *runningPlugin {
+	return &runningPlugin{spec: spec, host: plugin.NewHost(spec, plugin.HostOptions{
+		DataDir: s.dataDir,
+		Clock:   s.clk,
+		Log:     s.log,
+	})}
+}
+
+// pluginHosts returns the hosts of the running plugins, by id.
+func (s *Supervisor) pluginHosts() map[string]*plugin.Host {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	hosts := make(map[string]*plugin.Host, len(s.plugins))
+	for id, rp := range s.plugins {
+		hosts[id] = rp.host
+	}
+
+	return hosts
+}
+
+// factory returns the factory of driver: for plugin:<id> the input factory
+// of the host of that id in hosts (decision H4), else the registry's. It
+// returns a factory that refuses when there is none, which check prevents
+// for the documents it accepts.
+func (s *Supervisor) factory(driver string, hosts map[string]*plugin.Host) input.Factory {
+	if id, ok := pluginOf(driver); ok {
+		if h := hosts[id]; h != nil {
+			return plugin.InputFactory(h, s.resolver)
+		}
+
+		return func(config.Input, clock.Clock) (input.Input, error) {
+			return nil, errors.New("its plugin is not running")
+		}
+	}
+	if f := s.drivers[driver]; f != nil {
+		return f
+	}
+
+	return func(config.Input, clock.Clock) (input.Input, error) {
+		return nil, errors.New("driver not available in this build")
+	}
 }
 
 // execute stops, then starts, what p says: inputs stop before outputs, so
-// nothing is routed to an output being stopped, and outputs start before
-// inputs, so a new input finds its outputs. It stops at the first failure.
-// The inputs it starts are removed from built.
-func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, built map[int]input.Input) (journal, []string) {
+// nothing is routed to an output being stopped, and before the plugins they
+// use; outputs and plugins start before inputs, so a new input finds its
+// outputs and its plugin. A plugin's host is stopped, and its Stop waited
+// for, before a new host of the same id starts (ruling R12). It stops at the
+// first failure. The inputs it starts are removed from b.
+func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b pending) (journal, []string) {
 	s.mu.Lock()
-	j := journal{failedIn: maps.Clone(s.failedIn), failedOut: maps.Clone(s.failedOut)}
+	j := journal{failedIn: maps.Clone(s.failedIn), failedOut: maps.Clone(s.failedOut), failedPlugins: maps.Clone(s.failedPlugins)}
 	s.mu.Unlock()
 	for _, id := range p.stopInputs {
 		j.stoppedInputs = append(j.stoppedInputs, s.stopInput(id))
@@ -577,6 +733,9 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 		cfg, _ := s.stopOutput(id, how, config.Route{})
 		j.stoppedOutputs = append(j.stoppedOutputs, cfg)
 	}
+	for _, id := range p.stopPlugins {
+		j.stoppedPlugins = append(j.stoppedPlugins, s.stopPlugin(id))
+	}
 
 	for _, i := range p.startOutputs {
 		cfg := doc.Outputs[i]
@@ -585,17 +744,66 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 		}
 		j.startedOutputs = append(j.startedOutputs, cfg.ID)
 	}
+	for _, i := range p.startPlugins {
+		id := doc.Plugins[i].ID
+		if err := s.startPlugin(ctx, b.plugins[id]); err != nil {
+			return j, []string{fmt.Sprintf("plugins.%d: %v", i, err)}
+		}
+		j.startedPlugins = append(j.startedPlugins, id)
+	}
 	for _, i := range p.startInputs {
 		cfg := doc.Inputs[i]
-		in := built[i]
-		delete(built, i)
+		in := b.inputs[i]
+		delete(b.inputs, i)
 		if err := s.startInput(ctx, cfg, in); err != nil {
+			// A plugin refusing the section names its paths in it (R13).
+			var refused *plugin.ConfigRefusedError
+			if errors.As(err, &refused) {
+				return j, refused.Messages(fmt.Sprintf("inputs.%d", i))
+			}
+
 			return j, []string{fmt.Sprintf("inputs.%d: %v", i, err)}
 		}
 		j.startedInputs = append(j.startedInputs, cfg.ID)
 	}
 
 	return j, nil
+}
+
+// startPlugin starts the host of rp and records it as running. A host that
+// does not start is stopped, which removes what its launch left.
+func (s *Supervisor) startPlugin(ctx context.Context, rp *runningPlugin) error {
+	if err := rp.host.Start(ctx); err != nil {
+		if serr := rp.host.Stop(context.Background()); serr != nil {
+			s.log.Warn("supervisor: cannot stop a plugin that did not start", "plugin", rp.spec.ID, "error", serr)
+		}
+
+		return err
+	}
+	s.step("plugin " + rp.spec.ID)
+
+	s.mu.Lock()
+	s.plugins[rp.spec.ID] = rp
+	delete(s.failedPlugins, rp.spec.ID)
+	s.mu.Unlock()
+
+	return nil
+}
+
+// stopPlugin stops the running plugin id and waits for its host's Stop,
+// bounded by the stop deadline of spec section 6, and returns its spec. The
+// inputs using it are stopped first.
+func (s *Supervisor) stopPlugin(id string) plugin.Spec {
+	s.mu.Lock()
+	rp := s.plugins[id]
+	delete(s.plugins, id)
+	s.mu.Unlock()
+
+	if err := rp.host.Stop(context.Background()); err != nil {
+		s.log.Warn("supervisor: cannot stop a plugin", "plugin", id, "error", err)
+	}
+
+	return rp.spec
 }
 
 // rollback stops what j started and starts again what j stopped. An output
@@ -611,6 +819,12 @@ func (s *Supervisor) rollback(j journal, failedInputs map[string]bool) []string 
 		s.stopInput(id)
 		if f, ok := j.failedIn[id]; ok {
 			s.restoreFailure(s.failedIn, id, f)
+		}
+	}
+	for _, id := range slices.Backward(j.startedPlugins) {
+		s.stopPlugin(id)
+		if f, ok := j.failedPlugins[id]; ok {
+			s.restoreFailure(s.failedPlugins, id, f)
 		}
 	}
 	for _, id := range slices.Backward(j.startedOutputs) {
@@ -639,6 +853,12 @@ func (s *Supervisor) rollback(j journal, failedInputs map[string]bool) []string 
 			// starts or removes it (ruling R48).
 		}
 	}
+	for _, spec := range j.stoppedPlugins {
+		if err := s.startPlugin(s.ctx, s.newPlugin(spec)); err != nil {
+			errs = append(errs, fmt.Sprintf("rollback: plugin %s: %v", spec.ID, err))
+			s.setFailed(s.failedPlugins, spec.ID, "plugin", err)
+		}
+	}
 	for _, cfg := range j.stoppedInputs {
 		if !failedInputs[cfg.ID] {
 			s.removeInputState(cfg.ID)
@@ -654,11 +874,7 @@ func (s *Supervisor) rollback(j journal, failedInputs map[string]bool) []string 
 }
 
 func (s *Supervisor) restartInput(cfg config.Input) error {
-	factory := s.drivers[cfg.Driver]
-	if factory == nil {
-		return errors.New("driver not available in this build")
-	}
-	in, err := factory(cfg, s.clk)
+	in, err := s.factory(cfg.Driver, s.pluginHosts())(cfg, s.clk)
 	if err != nil {
 		return err
 	}
@@ -921,8 +1137,10 @@ func closeInputs(built map[int]input.Input) {
 	}
 }
 
-// Close stops every input, then every output, syncing and closing the
-// buffers, and waits for every goroutine of the supervisor. The records held
+// Close stops every input, then every plugin, all at once so that the stop
+// deadline of spec section 6 bounds them together, then every output,
+// syncing and closing the buffers, and waits for every goroutine of the
+// supervisor. The records held
 // for an output left failed by a rollback are discarded at shutdown, once the
 // inputs are stopped, with a warning per priority giving the count and the ts
 // range. Later calls return nil.
@@ -939,12 +1157,20 @@ func (s *Supervisor) Close() error {
 	inputs := sortedKeys(s.inputs)
 	outputs := sortedKeys(s.outputs)
 	failedOut := sortedKeys(s.failedOut)
+	plugins := sortedKeys(s.plugins)
+	clear(s.failedPlugins)
 	s.mu.Unlock()
 
 	for _, id := range inputs {
 		s.step("stop input " + id)
 		s.stopInput(id)
 	}
+	var stops sync.WaitGroup
+	for _, id := range plugins {
+		s.step("stop plugin " + id)
+		stops.Go(func() { s.stopPlugin(id) })
+	}
+	stops.Wait()
 	for _, id := range failedOut {
 		s.step("discard output " + id)
 		s.router.RemoveOutput(id, "agent shutting down")

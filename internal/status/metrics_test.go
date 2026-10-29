@@ -467,3 +467,49 @@ func TestMetricsHealthFamiliesFollowTransformErrors(t *testing.T) {
 		t.Fatalf("families %q, want the health families right after laraplate_edge_transform_errors_total", order)
 	}
 }
+
+func TestMetricsExposePlugins(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(pluginStatus())
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+	families := parseExposition(t, body)
+
+	up := families["laraplate_edge_plugin_up"]
+	if up == nil || up.typ != "gauge" {
+		t.Fatalf("plugin_up = %+v, want a gauge", up)
+	}
+	if want := map[string]float64{`{plugin="demo"}`: 1, `{plugin="gone"}`: 0}; !maps.Equal(up.samples, want) {
+		t.Errorf("plugin_up = %v, want %v", up.samples, want)
+	}
+
+	restarts := families["laraplate_edge_plugin_restarts_total"]
+	if restarts == nil || restarts.typ != "counter" {
+		t.Fatalf("plugin_restarts_total = %+v, want a counter", restarts)
+	}
+	want := map[string]float64{
+		`{plugin="demo",reason="exit"}`:   1,
+		`{plugin="demo",reason="health"}`: 0,
+		`{plugin="demo",reason="memory"}`: 1,
+		`{plugin="demo",reason="hash"}`:   0,
+		`{plugin="gone",reason="exit"}`:   0,
+		`{plugin="gone",reason="health"}`: 0,
+		`{plugin="gone",reason="memory"}`: 0,
+		`{plugin="gone",reason="hash"}`:   0,
+	}
+	if !maps.Equal(restarts.samples, want) {
+		t.Errorf("plugin_restarts_total = %v, want %v", restarts.samples, want)
+	}
+}
+
+func TestMetricsHaveNoPluginFamiliesWithoutPlugins(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+
+	for _, name := range []string{"plugin_up", "plugin_restarts_total"} {
+		if strings.Contains(body, "laraplate_edge_"+name) {
+			t.Errorf("/metrics mentions %s although the configuration uses no plugin", name)
+		}
+	}
+}
