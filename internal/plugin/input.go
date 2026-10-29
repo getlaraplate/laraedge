@@ -10,12 +10,14 @@ import (
 	"math"
 	"math/rand/v2"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	pb "github.com/getlaraplate/laraedge-sdk/pluginv1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/getlaraplate/laraedge/internal/clock"
@@ -30,6 +32,12 @@ import (
 const (
 	configureTimeout = 10 * time.Second
 	probeTimeout     = 30 * time.Second
+
+	// busyRetries and busyWait bound the quick retries of a Subscribe the
+	// plugin refuses with ALREADY_EXISTS while the previous stream of the
+	// instance is still unwinding.
+	busyRetries = 5
+	busyWait    = 50 * time.Millisecond
 )
 
 // SecretResolver resolves a secret:// reference; *secrets.Resolver is one.
@@ -193,6 +201,16 @@ func (in *pluginInput) Start(ctx context.Context, emit func(model.Record)) error
 	in.started = true
 	in.mu.Unlock()
 
+	// fail undoes the start: the input can be started again.
+	fail := func(err error) error {
+		cancel()
+		in.mu.Lock()
+		in.started, in.cancel = false, nil
+		in.mu.Unlock()
+
+		return err
+	}
+
 	// Watch before reading the connection: a restart in between is seen.
 	changes, unwatch := in.h.Watch()
 	if conn, gen := in.h.Conn(); conn != nil {
@@ -200,14 +218,23 @@ func (in *pluginInput) Start(ctx context.Context, emit func(model.Record)) error
 			var refused *ConfigRefusedError
 			if errors.As(err, &refused) || runCtx.Err() != nil {
 				unwatch()
-				cancel()
 
-				return err
+				return fail(err)
 			}
 			in.log.Warn("plugin input could not be configured at start, retrying", "error", err.Error())
 		}
 	}
 
+	// The goroutines start under mu, so a Close either sees them or comes
+	// first and refuses the start: none starts after Close returned.
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.closed {
+		unwatch()
+		cancel()
+
+		return fmt.Errorf("plugin input %q: start after close", in.cfg.ID)
+	}
 	life := input.NewLifecycle(in.cfg, in.clk, emit)
 	in.wg.Go(func() { life.Run(runCtx) })
 	in.wg.Go(func() {
@@ -267,8 +294,11 @@ func (in *pluginInput) Probe(ctx context.Context) ([]model.Sample, error) {
 
 // Browse lists the nodes below node through the plugin.
 func (b *browsingInput) Browse(ctx context.Context, node string, depth int) ([]Node, error) {
-	if depth < 0 || depth > math.MaxInt32 {
+	if depth < 0 {
 		return nil, fmt.Errorf("plugin input %q: browse: depth must not be negative", b.cfg.ID)
+	}
+	if depth > math.MaxInt32 {
+		return nil, fmt.Errorf("plugin input %q: browse: depth is too large", b.cfg.ID)
 	}
 	conn, err := b.ready(ctx)
 	if err != nil {
@@ -399,7 +429,13 @@ func (in *pluginInput) payload(ctx context.Context) ([]byte, []string, error) {
 func (in *pluginInput) resolveSecrets(ctx context.Context, v any, path string, values *[]string, problems *[]ConfigProblem) any {
 	switch node := v.(type) {
 	case map[string]any:
-		for key, child := range node {
+		keys := make([]string, 0, len(node))
+		for key := range node {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := node[key]
 			childPath := path + "." + key
 			if ref, ok := child.(string); ok && config.IsSecretKey(key) && secrets.IsReference(ref) {
 				node[key] = in.resolveOne(ctx, ref, childPath, values, problems)
@@ -454,6 +490,7 @@ func (in *pluginInput) run(ctx context.Context, emit func(model.Record), life *i
 		backoff = driverkit.NewBackoff(in.clk, rand.Float64)
 		warned  = map[string]bool{}
 		down    bool
+		busy    int
 	)
 
 	for ctx.Err() == nil {
@@ -478,7 +515,7 @@ func (in *pluginInput) run(ctx context.Context, emit func(model.Record), life *i
 				// Decision H6: valid when applied, so no rollback; the input
 				// stays down until the plugin restarts again.
 				in.log.Warn("plugin refused the configuration after a restart, the input stays down",
-					"problems", strings.Join(refused.Messages("input"), "; "))
+					"problems", strings.Join(refused.Messages("inputs."+in.cfg.ID), "; "))
 				if !in.wait(ctx, changes, nil) {
 					return
 				}
@@ -499,6 +536,17 @@ func (in *pluginInput) run(ctx context.Context, emit func(model.Record), life *i
 		}
 		if received {
 			backoff.Reset()
+			busy = 0
+		}
+		if !received && status.Code(err) == codes.AlreadyExists && busy < busyRetries {
+			// The previous stream of the instance is still unwinding in the
+			// plugin (Close then Start): not an outage, try again shortly.
+			busy++
+			if in.clk.Sleep(ctx, busyWait) != nil {
+				return
+			}
+
+			continue
 		}
 		in.goDown(&down, emit)
 		in.log.Warn("plugin input stream ended", "code", status.Code(err).String())

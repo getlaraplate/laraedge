@@ -22,6 +22,7 @@
 //	trace_file    append "configure <id>" and "run <id>" lines to this file
 //	browse        offer browse (manifest and service)
 //	probe_block   Probe blocks until its context ends
+//	configure_block  Configure blocks until its context ends, then refuses
 //
 // trace_file also gets "stop <id>" lines.
 package main
@@ -71,6 +72,7 @@ type behaviour struct {
 	TraceFile    string   `json:"trace_file"`
 	Browse       bool     `json:"browse"`
 	ProbeBlock   bool     `json:"probe_block"`
+	ConfigBlock  bool     `json:"configure_block"`
 }
 
 // event is one event of the script: exactly one field is set.
@@ -195,8 +197,13 @@ func (in input) trace(line string) {
 	fmt.Fprintln(f, line)
 }
 
-func (in input) Configure(_ context.Context, id string, cfg json.RawMessage) []sdk.ConfigError {
+func (in input) Configure(ctx context.Context, id string, cfg json.RawMessage) []sdk.ConfigError {
 	in.trace("configure " + id)
+	if in.b.ConfigBlock {
+		<-ctx.Done()
+
+		return []sdk.ConfigError{{Message: "interrupted"}}
+	}
 	if in.b.ConfigFile != "" {
 		if err := os.WriteFile(filepath.Join(in.dir, in.b.ConfigFile), cfg, 0o600); err != nil {
 			fail(err)

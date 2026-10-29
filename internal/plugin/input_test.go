@@ -220,7 +220,7 @@ func sampleEvent(device, signal string, value int, quality string) string {
 	return fmt.Sprintf(`{"sample":{"device":%q,"signal":%q,"value":%d,"ts":%q,"quality":%q}}`, device, signal, value, ts1, quality)
 }
 
-func TestInputStartConfiguresWithResolvedSecretsAndReturnsAtOnce(t *testing.T) {
+func TestInputStartConfiguresWithResolvedSecrets(t *testing.T) {
 	h := newInputHarness(t, `{"config_file":"config.json","trace_file":"trace"}`)
 
 	h.startInput(t, testInput(`{"host":"h","token":"secret://env/TOKEN"}`))
@@ -418,7 +418,7 @@ func TestInputRefusedAfterRestartStaysDown(t *testing.T) {
 	if strings.Contains(h.log.String(), secretValue) {
 		t.Fatalf("the log holds the secret value:\n%s", h.log.String())
 	}
-	if !strings.Contains(h.log.String(), "input.connection.port: bad value ***") {
+	if !strings.Contains(h.log.String(), "inputs.in1.connection.port: bad value ***") {
 		t.Fatalf("the log does not name the path:\n%s", h.log.String())
 	}
 	if n := h.resolver.count(); n != 2 {
@@ -604,5 +604,77 @@ func TestHostWatchDeliversEveryRestartToEverySubscriber(t *testing.T) {
 	case got := <-first:
 		t.Fatalf("the cancelled watcher got generation %d", got)
 	default:
+	}
+}
+
+// TestInputRestartOfTheSameInstanceIsNotAnOutage: a section change is Close
+// then Start with the same instance id; a Subscribe refused while the old
+// stream unwinds is retried quickly and reports nothing down.
+func TestInputRestartOfTheSameInstanceIsNotAnOutage(t *testing.T) {
+	h := newInputHarness(t, scriptBehaviour(`[{"answered":"d1"}]`, ""))
+	cfg := testInput(`{"host":"h"}`)
+	first := h.startInput(t, cfg)
+	h.waitTrace("run in1")
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.startInput(t, cfg)
+
+	advances := 0
+	h.waitFor("the second stream", func() bool {
+		if strings.Count(h.read("trace"), "run in1") >= 2 {
+			return true
+		}
+		if h.inClk.PendingTimers() > 0 && advances < busyRetriesForTest {
+			advances++
+			h.inClk.Advance(100 * time.Millisecond)
+		}
+
+		return false
+	})
+	if n := len(h.out.samples(model.Bad)); n != 0 {
+		t.Fatalf("%d bad samples after a restart of the instance", n)
+	}
+}
+
+const busyRetriesForTest = 5
+
+func TestInputConfigureGivesUpAfter10Seconds(t *testing.T) {
+	h := newInputHarness(t, `{"configure_block":true}`)
+	in := h.build(t, testInput(`{"host":"h"}`))
+
+	result := make(chan error, 1)
+	go func() { result <- in.Start(context.Background(), h.out.emit) }()
+
+	deadline := time.Now().Add(guard)
+	for {
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatalf("Start() = %v, want no error: a plugin that does not answer is not a configuration refusal", err)
+			}
+			h.waitFor("the timeout in the log", func() bool {
+				return strings.Contains(h.log.String(), "configure: the plugin did not answer in time")
+			})
+
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Start did not return")
+		}
+		h.clk.Advance(10 * time.Second)
+	}
+}
+
+func TestInputStartAfterAFailedStartIsAllowed(t *testing.T) {
+	h := newInputHarness(t, `{"refuse_config":true}`)
+	in := h.build(t, testInput(`{"host":"h"}`))
+	for range 2 {
+		err := in.Start(context.Background(), h.out.emit)
+		var refused *plugin.ConfigRefusedError
+		if !errors.As(err, &refused) {
+			t.Fatalf("Start() = %v, want a ConfigRefusedError each time", err)
+		}
 	}
 }
