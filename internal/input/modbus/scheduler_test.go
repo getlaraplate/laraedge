@@ -56,7 +56,11 @@ func TestSilentUnitDoesNotStarveTheOthers(t *testing.T) {
 			srv := startRawServer(t, dev, f.mbap)
 			srv.silence(1, true)
 
-			h := newHarness(t, modbusInput(srv.connection(`"timeout":"50ms"`), 2*time.Second,
+			// The timeout is real time and also bounds the answering unit's
+			// exchange (with the library's inter-frame pauses on rtuovertcp):
+			// 50ms was exceeded on a loaded Windows runner, so the answer was
+			// counted a timeout. The silent unit costs one timeout per poll.
+			h := newHarness(t, modbusInput(srv.connection(`"timeout":"250ms"`), 2*time.Second,
 				config.Device{Device: "dead", Points: []config.Point{pollPoint("a", "hr:0@1", "int16", interval)}},
 				config.Device{Device: "alive", Points: []config.Point{pollPoint("b", "hr:5@2", "int16", interval)}},
 			))
