@@ -162,14 +162,14 @@ crash after N s, flood stderr, ignore Shutdown, allocate memory).
   (`Start`, `Close`, `Probe`, `Health`, and `Browse(ctx, node string, depth int) ([]Node, error)` when the manifest
   offers browse); `SecretResolver interface{ Resolve(ctx context.Context, ref string) (string, error) }`.
 
-- [ ] **Step 1: Failing tests** (against the test plugin): `Start` configures the instance with secrets resolved (the
+- [x] **Step 1: Failing tests** (against the test plugin): `Start` configures the instance with secrets resolved (the
   plugin receives the value, the agent logs never contain it) and returns at once; samples reach emit with the
   plugin's ts and quality and pass the point's transforms; `answered` keeps devices alive and `health` feeds
   `connected`/`read_errors`; a `ConfigError` fails `Start` with the paths; on plugin crash one `bad` sample per point
   then `death` after the tolerance, and after the restart `Configure`+`Subscribe` again then birth (H6); `Close` ends
   the stream and nothing is emitted afterwards; `Probe` returns the plugin's samples within 30 s.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 5: Supervisor and wiring
 
