@@ -1,5 +1,5 @@
-// Package plugin resolves, validates and (in later tasks) runs the plugin
-// processes of a configuration document.
+// Package plugin resolves and validates the plugin entries of a configuration
+// document and runs and supervises their processes.
 package plugin
 
 import (
@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,6 +26,23 @@ func SumHex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// HashFile returns the lowercase hex SHA-256 of the file at path, read as a
+// stream.
+func HashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	sum := sha256.New()
+	if _, err := io.Copy(sum, f); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(sum.Sum(nil)), nil
+}
+
 // HashDir returns the SHA-256 of the plugin binary named in dir/plugin.json
 // (with .exe on Windows) and of the plugin.json bytes.
 func HashDir(dir string) (binarySum, manifestSum string, err error) {
@@ -41,10 +59,10 @@ func HashDir(dir string) (binarySum, manifestSum string, err error) {
 	if runtime.GOOS == "windows" {
 		binaryPath += ".exe"
 	}
-	data, err := os.ReadFile(binaryPath)
+	binarySum, err = HashFile(binaryPath)
 	if err != nil {
 		return "", "", fmt.Errorf("read the plugin binary: %w", err)
 	}
 
-	return SumHex(data), SumHex(raw), nil
+	return binarySum, SumHex(raw), nil
 }

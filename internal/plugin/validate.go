@@ -32,6 +32,10 @@ type Spec struct {
 	Manifest manifest.Manifest
 	// ManifestRaw is the plugin.json bytes, as hashed.
 	ManifestRaw []byte
+	// SHA256 is the expected hex SHA-256 of the binary (either case).
+	SHA256 string
+	// ManifestSHA256 is the expected hex SHA-256 of plugin.json.
+	ManifestSHA256 string
 	// MaxMemory is the memory limit in bytes, 0 for none.
 	MaxMemory int64
 	// Raw is the plugin entry as compact canonical JSON.
@@ -63,6 +67,8 @@ func Resolve(doc config.Document, baseDir string, provider string) ([]Spec, []st
 	return specs, msgs
 }
 
+// resolveOne hashes the configured Path, not <dir>/<manifest name>: the binary
+// named after the manifest is a suite rule only (SDK ruling R11).
 func resolveOne(p config.Plugin, prefix, baseDir, provider string) (Spec, []string) {
 	binary := p.Path
 	if !filepath.IsAbs(binary) {
@@ -87,10 +93,10 @@ func resolveOne(p config.Plugin, prefix, baseDir, provider string) (Spec, []stri
 		msgs = append(msgs, prefix+".manifest: "+dottedMessage(problem))
 	}
 
-	data, err := os.ReadFile(binary)
+	binarySum, err := HashFile(binary)
 	if err != nil {
 		msgs = append(msgs, prefix+".path: the plugin binary cannot be read")
-	} else if !strings.EqualFold(SumHex(data), p.SHA256) {
+	} else if !strings.EqualFold(binarySum, p.SHA256) {
 		msgs = append(msgs, prefix+".sha256: does not match the plugin binary")
 	}
 	if !strings.EqualFold(SumHex(raw), p.ManifestSHA256) {
@@ -100,7 +106,10 @@ func resolveOne(p config.Plugin, prefix, baseDir, provider string) (Spec, []stri
 		return Spec{}, msgs
 	}
 
-	return Spec{ID: p.ID, Path: binary, Dir: dir, Manifest: m, ManifestRaw: raw, MaxMemory: p.MaxMemory, Raw: p.Raw}, nil
+	return Spec{
+		ID: p.ID, Path: binary, Dir: dir, Manifest: m, ManifestRaw: raw,
+		SHA256: p.SHA256, ManifestSHA256: p.ManifestSHA256, MaxMemory: p.MaxMemory, Raw: p.Raw,
+	}, nil
 }
 
 // Validate checks the plugin inputs of doc: the plugin:<id> driver must name
