@@ -3,7 +3,8 @@
 // envelope against the backend schema, through a network cut, a kill -9 with
 // a restart, a configuration change served by the laraplate provider, a run
 // with transform chains, and a modbus input against the Modbus TCP server of
-// the Go library, stopped and started again.
+// the Go library, stopped and started again, and the SDK's simulated-counter
+// run as a plugin, killed, and replaced by a document with a wrong hash.
 //
 // The test is behind the e2e build tag, Unix only:
 //
