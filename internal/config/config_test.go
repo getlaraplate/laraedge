@@ -669,39 +669,11 @@ func TestBackendFixturesValidate(t *testing.T) {
 			if err := structural.Validate(inst); err != nil {
 				t.Fatalf("backend schema refuses its own fixture: %v", err)
 			}
-			// The agent schema must accept the document once its plugin
-			// entries (which lack the required manifest_sha256) are set
-			// aside; Parse below pins the difference exactly.
-			var stripped map[string]any
-			if err := json.Unmarshal(data, &stripped); err != nil {
-				t.Fatal(err)
-			}
-			delete(stripped, "plugins")
-			strippedInst, err := jsonschema.UnmarshalJSON(bytes.NewReader(mustJSON(t, stripped)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := agent.Validate(strippedInst); err != nil {
+			if err := agent.Validate(inst); err != nil {
 				t.Errorf("agent schema refuses a backend fixture: %v", err)
 			}
-			_, msgs, err := config.Parse(data)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// The backend's plugin entries lack manifest_sha256, which the
-			// spec makes required: that is the only accepted difference.
-			var tree struct {
-				Plugins []json.RawMessage `json:"plugins"`
-			}
-			if err := json.Unmarshal(data, &tree); err != nil {
-				t.Fatal(err)
-			}
-			var want []string
-			for i := range tree.Plugins {
-				want = append(want, fmt.Sprintf("plugins.%d.manifest_sha256: is required", i))
-			}
-			if !slices.Equal(msgs, want) {
-				t.Errorf("Parse messages = %q, want %q", msgs, want)
+			if _, msgs, err := config.Parse(data); err != nil || len(msgs) != 0 {
+				t.Errorf("Parse = %q, %v", msgs, err)
 			}
 		})
 	}
