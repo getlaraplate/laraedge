@@ -370,7 +370,8 @@ laraplate-edge probe counter-line --config config.yaml   # one read through the 
 - The environment is minimal: `PATH`, `TZ` and, on Windows, `SystemRoot`. Secrets never go in it; they
   reach the plugin only in the configuration of the input that uses them.
 - The plugin listens on a socket in `data_dir/run/plugins/<id>/`, which the agent creates for each run
-  and removes when the plugin stops. It must answer the handshake within 10 seconds.
+  and removes when the plugin stops; on Windows it listens on a named pipe instead and there is no such
+  directory. It must answer the handshake within 10 seconds.
 - What the plugin writes to stderr (and to stdout after the handshake) goes to the agent log at `INFO`
   with `plugin=<id>`, one log line per line of output. A line longer than 4 KiB is cut. Output is rate
   limited to 50 lines a second with a burst of 200; the lines above it are dropped and counted in one

@@ -307,12 +307,13 @@ func TestHostStartsAndAnswersHealth(t *testing.T) {
 		t.Fatalf("BinarySHA256() = %s, want %s", got, h.spec.SHA256)
 	}
 
+	// Windows uses a named pipe: there is no socket directory.
 	socketDir := filepath.Join(h.dataDir, "run", "plugins", "demo")
-	info, err := os.Stat(socketDir)
-	if err != nil {
-		t.Fatalf("socket directory: %v", err)
-	}
 	if runtime.GOOS != "windows" {
+		info, err := os.Stat(socketDir)
+		if err != nil {
+			t.Fatalf("socket directory: %v", err)
+		}
 		if info.Mode().Perm() != 0o700 {
 			t.Fatalf("socket directory mode = %v, want 0700", info.Mode().Perm())
 		}

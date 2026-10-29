@@ -393,7 +393,8 @@ func TestRemovingTheLastPluginComponentStopsThePlugin(t *testing.T) {
 		[]any{demo.entry(nil)}, pluginInput("p1", "demo", "d1", 0, "s1")))
 	f.runningPluginPid("demo")
 	socketDir := filepath.Join(dataDir, "run", "plugins", "demo")
-	if _, err := os.Stat(socketDir); err != nil {
+	// Windows uses a named pipe: there is no socket directory.
+	if _, err := os.Stat(socketDir); err != nil && runtime.GOOS != "windows" {
 		t.Fatalf("socket directory of the running plugin: %v", err)
 	}
 
