@@ -28,4 +28,4 @@ outputs:
     batch: { max_samples: 1000, max_wait: 2s }
     buffer: { max_size: 1GiB }
 plugins:
-  - { id: fanuc, path: /opt/laraplate-edge/plugins/fanuc-focas, sha256: "..." }
+  - { id: fanuc, path: /opt/laraplate-edge/plugins/fanuc-focas, sha256: "...", manifest_sha256: "...", max_memory: 256MiB }

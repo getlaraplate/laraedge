@@ -406,12 +406,14 @@
     },
     "plugin": {
       "type": "object",
-      "required": ["id", "path", "sha256"],
+      "required": ["id", "path", "sha256", "manifest_sha256"],
       "additionalProperties": false,
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "path": { "type": "string", "minLength": 1 },
-        "sha256": { "type": "string", "minLength": 1 }
+        "sha256": { "description": "The SHA-256 of the plugin binary.", "type": "string", "minLength": 1 },
+        "manifest_sha256": { "description": "The SHA-256 of the plugin.json file next to the binary.", "type": "string", "minLength": 1 },
+        "max_memory": { "description": "The most memory the plugin process may use, above it the agent restarts it. Omitted: no limit.", "$ref": "#/$defs/size" }
       }
     }
   }

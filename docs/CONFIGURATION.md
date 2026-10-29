@@ -35,14 +35,14 @@ laraplate-edge config validate config.yaml
 | `version` | no | integer from 1. A document older than the applied one is refused; a missing version counts as 0. Laraplate writes the published version into the document it serves. |
 | `inputs` | yes | list of inputs, may be empty |
 | `outputs` | yes | list of outputs, may be empty |
-| `plugins` | no | refused by this build |
+| `plugins` | no | external driver processes, see [Plugins](#plugins) |
 
 ## Inputs
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | input id |
-| `driver` | yes | | `simulated`, `modbus` or `opcua` in this build. The schema also knows `mqtt`, `serial`, `file` and `plugin:<id>`. |
+| `driver` | yes | | `simulated`, `modbus`, `opcua` or `plugin:<id>` in this build. The schema also knows `mqtt`, `serial` and `file`. |
 | `connection` | no | `{}` | driver settings, an object the schema does not interpret (see the secret rule below) |
 | `death_tolerance` | no | `30s` | how long without a successful read before the input reports its devices dead; `birth` follows at the next successful read |
 | `devices` | yes | | at least one device |
@@ -648,7 +648,7 @@ written atomically (directory mode `0700`, file `0600`) on every count:
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | output id, also its buffer directory `data_dir/outputs/{id}` |
-| `type` | yes | | `laraplate-http` in this build. The schema also knows `laraplate-mqtt` and `plugin:<id>`. |
+| `type` | yes | | `laraplate-http` in this build. The schema also knows `laraplate-mqtt` and `plugin:<id>`, which this build refuses. |
 | `url` | with `laraplate-http` | | Laraplate base URL: `https`, or `http` only for a loopback host; no user or password. The agent posts to `{url}/api/v1/insert/mes/machine-messages`; a query or fragment is ignored. |
 | `token` | with `laraplate-http` | | `secret://` reference to the token of the source's service account |
 | `route.include` | no | `["*"]` | patterns matched against `device/signal` (Go `path.Match`: `*`, `?`, `[...]`). `*` alone matches everything; a pattern without `/` means `<pattern>/*`. A device's `birth` and `death` go to every output routing at least one of its signals, and the `birth` lists only those. |
@@ -672,6 +672,22 @@ they resolve: [USAGE.md](USAGE.md#secret-references)); a plain value is refused.
 
 Other spellings such as `apikey`, `api-key` or `apiKey` are not recognised as secret keys: do not use
 them for a credential.
+
+## Plugins
+
+`plugins` lists the external processes that provide drivers (`plugin:<id>`), built on
+`laraedge-sdk`. Keys of an entry:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `id` | yes | the id used as `plugin:<id>` |
+| `path` | yes | the plugin binary |
+| `sha256` | yes | lowercase hex SHA-256 of the binary |
+| `manifest_sha256` | yes | lowercase hex SHA-256 of the `plugin.json` file next to the binary |
+| `max_memory` | no | a size; above it the agent restarts the plugin. No limit when missing. |
+
+`laraplate-edge plugin hash <dir>` prints `sha256:` and `manifest_sha256:` for the plugin in `<dir>`:
+the binary named in `<dir>/plugin.json` (with `.exe` on Windows) and the manifest file.
 
 ## Applying a document
 
@@ -700,7 +716,7 @@ Outcomes, as reported to Laraplate:
 |---|---|
 | drivers other than `simulated`, `modbus` and `opcua` | the driver plans, in the design's order: `mqtt`, `serial` and `file` |
 | output types other than `laraplate-http` | the MQTT output plan (`laraplate-mqtt`) and the plugin plan (`plugin:<id>`) |
-| `plugins`, `plugin:<id>` drivers and outputs | the plugin plan (design section 8) |
+| `plugin:<id>` outputs | the plugin output plan (design section 8) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references | a later plan with the OS keystore |
 

@@ -200,7 +200,6 @@ func TestConfigValidate(t *testing.T) {
 			wantCode: 1,
 			wantStderr: []string{
 				fixtures + "spec-5.3.yaml: inputs.0.connection.auth.password: not available in this build\n",
-				fixtures + "spec-5.3.yaml: plugins.0: not available in this build\n",
 				fixtures + "spec-5.3.yaml: inputs.0: opcua input \"press-line\": devices.0.points.0: type: required\n",
 			},
 		},

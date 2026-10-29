@@ -11,11 +11,15 @@ const notInBuild = "not available in this build"
 // not provide.
 const keystorePrefix = "secret://keystore/"
 
+// pluginPrefix starts the driver and output type names a plugin provides.
+const pluginPrefix = "plugin:"
+
 // CheckBuild is the second validation layer: it refuses, with "<path>: not
 // available in this build", the parts of a valid document this build does
-// not provide: drivers other than simulated, modbus and opcua (plugin
-// drivers included), output types other than laraplate-http, secret://keystore/
-// references, derived signals with their transforms, and plugins. Point
+// not provide: drivers other than simulated, modbus, opcua and plugin:<id>,
+// output types other than laraplate-http (plugin:<id> outputs included, until
+// the plugin output plan), secret://keystore/ references, and derived signals
+// with their transforms. Plugins and their drivers are provided. Point
 // transforms are provided; their chains are type-checked by
 // transform.CheckDocument, which config cannot call (import cycle). It
 // returns nil when the build can apply doc.
@@ -25,7 +29,7 @@ func CheckBuild(doc Document) []string {
 
 	for i, in := range doc.Inputs {
 		p := path{"inputs"}.index(i)
-		if in.Driver != DriverSimulated && in.Driver != DriverModbus && in.Driver != DriverOPCUA {
+		if in.Driver != DriverSimulated && in.Driver != DriverModbus && in.Driver != DriverOPCUA && !strings.HasPrefix(in.Driver, pluginPrefix) {
 			add(p.key("driver"))
 		}
 		var conn any
@@ -56,9 +60,6 @@ func CheckBuild(doc Document) []string {
 		if strings.HasPrefix(out.Token, keystorePrefix) {
 			add(p.key("token"))
 		}
-	}
-	for i := range doc.Plugins {
-		add(path{"plugins"}.index(i))
 	}
 	return msgs
 }

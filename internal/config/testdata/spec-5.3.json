@@ -43,6 +43,6 @@
     }
   ],
   "plugins": [
-    { "id": "fanuc", "path": "/opt/laraplate-edge/plugins/fanuc-focas", "sha256": "..." }
+    { "id": "fanuc", "path": "/opt/laraplate-edge/plugins/fanuc-focas", "sha256": "...", "manifest_sha256": "...", "max_memory": "256MiB" }
   ]
 }

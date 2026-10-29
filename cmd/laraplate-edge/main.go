@@ -58,6 +58,9 @@ commands:
                              list the trusted certificates
   status [--listen addr]     query a running agent (default ` + defaultListen + `);
                              the token, if any, from ` + statusTokenEnv + `
+  plugin hash <dir>          print sha256 and manifest_sha256 of the plugin in
+                             <dir>: the binary named in <dir>/plugin.json and
+                             the plugin.json file, to pin them in the document
   version                    print the version
 `
 
@@ -90,6 +93,8 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runBrowse(args[1:], stdout, stderr)
 	case "opcua":
 		return runOPCUA(args[1:], stdin, stdout, stderr)
+	case "plugin":
+		return runPlugin(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
