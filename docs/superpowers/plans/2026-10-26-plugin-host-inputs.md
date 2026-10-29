@@ -102,11 +102,11 @@ stay refused until plan 3), tests; create `cmd/laraplate-edge/pluginhash.go` (`p
   `laraplate-edge plugin hash <dir>` printing `sha256: <hex>` and `manifest_sha256: <hex>` for the binary named in
   `plugin.json` (`<name>`, `.exe` on Windows) and `plugin.json`.
 
-- [ ] **Step 1: Failing tests:** schema refuses a plugin without `manifest_sha256` and a bad `max_memory`; parse fills
+- [x] **Step 1: Failing tests:** schema refuses a plugin without `manifest_sha256` and a bad `max_memory`; parse fills
   the fields; `CheckBuild` no longer reports plugins or `plugin:<id>` drivers but still reports `type: plugin:<id>`
   outputs; `plugin hash` prints the two lines (lowercase hex SHA-256) and fails clearly when files are missing.
-- [ ] **Step 2: Implement** (`go get github.com/getlaraplate/laraedge-sdk@v0.1.0`; licences in the commit message).
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement** (`go get github.com/getlaraplate/laraedge-sdk@v0.1.0`; licences in the commit message).
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 2: Offline validation
 
