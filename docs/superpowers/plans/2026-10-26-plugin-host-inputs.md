@@ -193,11 +193,11 @@ probe or browse, stop it), `cmd/laraplate-edge/main.go` (H8 dispatch on the exec
 agent as `laraedge-builtin-simulated[.exe]` next to those files and runs `laraedge-conformance` from the SDK module
 on Linux and Windows).
 
-- [ ] **Step 1: Failing tests:** `probe` and `browse` on a plugin input; the binary run as
+- [x] **Step 1: Failing tests:** `probe` and `browse` on a plugin input; the binary run as
   `laraedge-builtin-simulated` serves the plugin protocol (`--manifest` equals the committed `plugin.json`); the
   conformance suite passes on it (test that runs `conformance.Run`).
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 7: End to end, documentation, closing
 
