@@ -120,12 +120,12 @@ it), `internal/supervisor/supervisor.go` (`check` calls it).
   every plugin input section against `Manifest.ValidateInput`, secret-key problems dropped (H3); messages prefixed
   with the document path, e.g. `inputs[2].connection.port: ...`); `Options{RequireFiles bool}` for H2.
 
-- [ ] **Step 1: Failing tests** (fixtures: a test plugin directory with a manifest and a fake binary): hashes mismatching
+- [x] **Step 1: Failing tests** (fixtures: a test plugin directory with a manifest and a fake binary): hashes mismatching
   binary or manifest; a manifest failing `Check`; `plugin:<id>` unknown or without the input kind; a bad address and a
   read mode or type the manifest refuses at their document paths; Review Focus secret test; relative path resolution
   per H1; `config validate` reports these offline and a missing file as a problem; no message contains a value.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 3: Host
 
