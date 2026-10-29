@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -42,7 +43,7 @@ type Spec struct {
 // configuration file, and are refused with the laraplate provider), the
 // binary and manifest hashes, and the manifest itself. It returns a Spec for
 // every entry that passed and one message per problem, prefixed
-// "plugins[i]". A missing binary or manifest is a problem. Messages name
+// "plugins.<i>". A missing binary or manifest is a problem. Messages name
 // paths and fixed text, never a configured value.
 func Resolve(doc config.Document, baseDir string, provider string) ([]Spec, []string) {
 	var (
@@ -51,7 +52,7 @@ func Resolve(doc config.Document, baseDir string, provider string) ([]Spec, []st
 	)
 
 	for i, p := range doc.Plugins {
-		prefix := fmt.Sprintf("plugins[%d]", i)
+		prefix := fmt.Sprintf("plugins.%d", i)
 		spec, problems := resolveOne(p, prefix, baseDir, provider)
 		msgs = append(msgs, problems...)
 		if len(problems) == 0 {
@@ -83,7 +84,7 @@ func resolveOne(p config.Plugin, prefix, baseDir, provider string) (Spec, []stri
 
 	var msgs []string
 	for _, problem := range m.Check() {
-		msgs = append(msgs, prefix+".manifest: "+problem)
+		msgs = append(msgs, prefix+".manifest: "+dottedMessage(problem))
 	}
 
 	data, err := os.ReadFile(binary)
@@ -108,7 +109,7 @@ func resolveOne(p config.Plugin, prefix, baseDir, provider string) (Spec, []stri
 // files failed Resolve) are not checked against a manifest. Problems whose
 // value is a secret reference or whose path ends in a secret key are dropped
 // (decision H3): Configure validates the resolved values at start. Messages
-// are prefixed "inputs[i]".
+// are prefixed "inputs.<i>".
 func Validate(doc config.Document, specs []Spec) []string {
 	byID := map[string]Spec{}
 	for _, s := range specs {
@@ -125,7 +126,7 @@ func Validate(doc config.Document, specs []Spec) []string {
 		if !ok {
 			continue
 		}
-		prefix := fmt.Sprintf("inputs[%d]", i)
+		prefix := fmt.Sprintf("inputs.%d", i)
 
 		if !declared[id] {
 			msgs = append(msgs, prefix+".driver: no plugin entry with this id")
@@ -149,7 +150,7 @@ func Validate(doc config.Document, specs []Spec) []string {
 			if problem.Path == "" {
 				msgs = append(msgs, prefix+": "+problem.Message)
 			} else {
-				msgs = append(msgs, prefix+"."+problem.Path+": "+problem.Message)
+				msgs = append(msgs, prefix+"."+dotted(problem.Path)+": "+problem.Message)
 			}
 		}
 	}
@@ -188,6 +189,23 @@ func dropped(section any, path string) bool {
 	s, ok := value.(string)
 
 	return ok && secrets.IsReference(s)
+}
+
+var indexPattern = regexp.MustCompile(`\[([0-9]+)\]`)
+
+// dotted renders an SDK path in the dotted style of the other messages:
+// devices[0].points[1].address becomes devices.0.points.1.address.
+func dotted(path string) string { return indexPattern.ReplaceAllString(path, ".$1") }
+
+// dottedMessage applies dotted to the path before the first ": " of a
+// manifest.Check problem.
+func dottedMessage(problem string) string {
+	path, rest, ok := strings.Cut(problem, ": ")
+	if !ok {
+		return problem
+	}
+
+	return dotted(path) + ": " + rest
 }
 
 type pathToken struct {

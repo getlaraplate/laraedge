@@ -26,8 +26,8 @@ func TestCheckRejectsUnresolvablePlugins(t *testing.T) {
 		provider string
 		want     string
 	}{
-		{"missing files under the file provider", bootstrap.ProviderFile, "plugins[0]: plugin.json not found next to the binary"},
-		{"relative path under the laraplate provider", bootstrap.ProviderLaraplate, "plugins[0].path: must be absolute with the laraplate provider"},
+		{"missing files under the file provider", bootstrap.ProviderFile, "plugins.0: plugin.json not found next to the binary"},
+		{"relative path under the laraplate provider", bootstrap.ProviderLaraplate, "plugins.0.path: must be absolute with the laraplate provider"},
 	}
 
 	for _, tc := range tests {

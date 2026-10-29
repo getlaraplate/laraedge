@@ -392,7 +392,7 @@ func TestConfigValidateChecksPlugins(t *testing.T) {
 	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitFailure {
 		t.Fatalf("exit code = %d, want 1 (stderr: %q)", code, stderr.String())
 	}
-	if want := doc + ": plugins[0].sha256: does not match the plugin binary"; !strings.Contains(stderr.String(), want) {
+	if want := doc + ": plugins.0.sha256: does not match the plugin binary"; !strings.Contains(stderr.String(), want) {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
 
@@ -412,7 +412,7 @@ func TestConfigValidateChecksPlugins(t *testing.T) {
 	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitFailure {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	if want := "plugins[0]: plugin.json not found next to the binary"; !strings.Contains(stderr.String(), want) {
+	if want := "plugins.0: plugin.json not found next to the binary"; !strings.Contains(stderr.String(), want) {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
 }

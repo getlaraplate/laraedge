@@ -124,22 +124,22 @@ func TestResolveAndValidate(t *testing.T) {
 		want     []string
 	}{
 		{name: "valid", fx: good},
-		{name: "binary hash mismatch", fx: good, opts: docOptions{sha: zeros}, want: []string{"plugins[0].sha256: does not match the plugin binary"}},
-		{name: "manifest hash mismatch", fx: good, opts: docOptions{manifestSHA: zeros}, want: []string{"plugins[0].manifest_sha256: does not match plugin.json"}},
-		{name: "manifest fails Check", fx: bad, want: []string{"plugins[0].manifest: kinds: must offer at least one of input, processor, output"}},
-		{name: "missing manifest", fx: missingManifest, want: []string{"plugins[0]: plugin.json not found next to the binary"}},
-		{name: "missing binary", fx: missingBinary, want: []string{"plugins[0].path: the plugin binary cannot be read"}},
-		{name: "plugin without the input kind", fx: outputOnly, want: []string{"inputs[0].driver: the plugin does not offer the input kind"}},
-		{name: "unknown plugin id", fx: good, opts: docOptions{driver: "plugin:other"}, want: []string{"inputs[0].driver: no plugin entry with this id"}},
-		{name: "relative path refused with the laraplate provider", fx: good, provider: bootstrap.ProviderLaraplate, want: []string{"plugins[0].path: must be absolute with the laraplate provider"}},
+		{name: "binary hash mismatch", fx: good, opts: docOptions{sha: zeros}, want: []string{"plugins.0.sha256: does not match the plugin binary"}},
+		{name: "manifest hash mismatch", fx: good, opts: docOptions{manifestSHA: zeros}, want: []string{"plugins.0.manifest_sha256: does not match plugin.json"}},
+		{name: "manifest fails Check", fx: bad, want: []string{"plugins.0.manifest: kinds: must offer at least one of input, processor, output"}},
+		{name: "missing manifest", fx: missingManifest, want: []string{"plugins.0: plugin.json not found next to the binary"}},
+		{name: "missing binary", fx: missingBinary, want: []string{"plugins.0.path: the plugin binary cannot be read"}},
+		{name: "plugin without the input kind", fx: outputOnly, want: []string{"inputs.0.driver: the plugin does not offer the input kind"}},
+		{name: "unknown plugin id", fx: good, opts: docOptions{driver: "plugin:other"}, want: []string{"inputs.0.driver: no plugin entry with this id"}},
+		{name: "relative path refused with the laraplate provider", fx: good, provider: bootstrap.ProviderLaraplate, want: []string{"plugins.0.path: must be absolute with the laraplate provider"}},
 		{name: "absolute path with the laraplate provider", fx: good, opts: docOptions{path: "ABS"}, provider: bootstrap.ProviderLaraplate},
-		{name: "bad connection", fx: good, opts: docOptions{connection: `{"host":"h","port":"xyz"}`}, want: []string{"inputs[0].connection.port: "}},
-		{name: "bad address", fx: good, opts: docOptions{point: `{"signal":"s","address":"BAD","type":"int16","read":{"poll":"1s"}}`}, want: []string{"inputs[0].devices[0].points[0].address: "}},
-		{name: "read mode refused", fx: good, opts: docOptions{point: `{"signal":"s","address":"m:1","type":"int16","read":"subscribe"}`}, want: []string{"inputs[0].devices[0].points[0].read: read mode is not accepted by this plugin"}},
-		{name: "type refused", fx: good, opts: docOptions{point: `{"signal":"s","address":"m:1","type":"float32","read":{"poll":"1s"}}`}, want: []string{"inputs[0].devices[0].points[0].type: type is not accepted by this plugin"}},
-		{name: "secret reference in a typed field is not reported", fx: good, opts: docOptions{connection: `{"host":"h","port":"secret://env/PORT"}`}},
-		{name: "problem at a secret key is not reported", fx: good, opts: docOptions{connection: `{"host":"h","token":"secret://env/TOKEN"}`}},
-		{name: "files missing: no manifest check of the sections", fx: missingManifest, opts: docOptions{connection: `{"port":"xyz"}`}, want: []string{"plugins[0]: plugin.json not found next to the binary"}},
+		{name: "bad connection", fx: good, opts: docOptions{connection: `{"host":"h","port":"xyz"}`}, want: []string{"inputs.0.connection.port: "}},
+		{name: "bad address", fx: good, opts: docOptions{point: `{"signal":"s","address":"BAD","type":"int16","read":{"poll":"1s"}}`}, want: []string{"inputs.0.devices.0.points.0.address: "}},
+		{name: "read mode refused", fx: good, opts: docOptions{point: `{"signal":"s","address":"m:1","type":"int16","read":"subscribe"}`}, want: []string{"inputs.0.devices.0.points.0.read: read mode is not accepted by this plugin"}},
+		{name: "type refused", fx: good, opts: docOptions{point: `{"signal":"s","address":"m:1","type":"float32","read":{"poll":"1s"}}`}, want: []string{"inputs.0.devices.0.points.0.type: type is not accepted by this plugin"}},
+		{name: "secret:// value in a typed field (port) is not reported (R5)", fx: good, opts: docOptions{connection: `{"host":"h","port":"secret://env/PORT"}`}},
+		{name: "problem at a secret key (token) is not reported (R5)", fx: good, opts: docOptions{connection: `{"host":"h","token":"secret://env/TOKEN"}`}},
+		{name: "files missing: no manifest check of the sections", fx: missingManifest, opts: docOptions{connection: `{"port":"xyz"}`}, want: []string{"plugins.0: plugin.json not found next to the binary"}},
 	}
 
 	for _, tc := range tests {
@@ -191,7 +191,7 @@ func TestMessagesCarryNoValue(t *testing.T) {
 			t.Errorf("a message contains a configured value: %q", all)
 		}
 	}
-	if !slices.ContainsFunc(msgs, func(m string) bool { return strings.HasPrefix(m, "inputs[0].devices[0].points[0].address") }) {
+	if !slices.ContainsFunc(msgs, func(m string) bool { return strings.HasPrefix(m, "inputs.0.devices.0.points.0.address") }) {
 		t.Errorf("want an address problem, got %q", msgs)
 	}
 }
