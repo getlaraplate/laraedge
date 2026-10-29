@@ -143,14 +143,14 @@ crash after N s, flood stderr, ignore Shutdown, allocate memory).
   `Stop(ctx) error` (Shutdown 5 s → SIGTERM → kill 5 s), `Status() Status` (`State` up/starting/down/stopped, `Pid`,
   `Restarts`, `LastError`); restart reasons `exit`, `health`, `memory`, `hash`.
 
-- [ ] **Step 1: Failing tests:** starts and answers health; `Info` differing from the manifest refuses the start; a
+- [x] **Step 1: Failing tests:** starts and answers health; `Info` differing from the manifest refuses the start; a
   binary changed on disk refuses the next restart (Review Focus); crash loop backoff 1 s, 2 s, 4 s … capped at 1 min on
   the fake clock, reset after one stable minute (Review Focus); three failed health checks restart; memory above
   `max_memory` restarts with reason `memory` (Linux test; Windows compiled); stderr flood rate limited, plugin not
   blocked (Review Focus); stop sequence including a plugin ignoring Shutdown; environment is exactly the minimal list;
   socket directory under `data_dir/run/plugins/<id>/`.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks (also `-race -count=5 ./internal/plugin`); commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks (also `-race -count=5 ./internal/plugin`); commit.**
 
 ### Task 4: Plugin input adapter
 
