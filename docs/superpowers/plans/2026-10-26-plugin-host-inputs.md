@@ -177,12 +177,12 @@ crash after N s, flood stderr, ignore Shutdown, allocate memory).
 inputs, H4, H5, rollback, Close stops plugins), `internal/supervisor/status.go`, `internal/status/metrics.go`,
 `internal/status/server.go`, `cmd/laraplate-edge/run.go`, tests.
 
-- [ ] **Step 1: Failing tests:** a document with a plugin input runs; a plugin failing to start rolls the document back;
+- [x] **Step 1: Failing tests:** a document with a plugin input runs; a plugin failing to start rolls the document back;
   Review Focus reload of one instance keeps the pid; changing the `plugins` entry restarts the plugin and re-runs its
   instances; removing the last component stops the plugin; `/status` `plugins` and the two metric families; `Close`
   stops plugins within the stop deadline; a plugin crash leaves other inputs and outputs running.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 6: Commands and conformance of built-in drivers
 
