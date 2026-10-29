@@ -19,10 +19,15 @@ encrypted sessions with explicitly trusted server certificates) input drivers, t
 `laraplate-http` output, a durable disk buffer per output with loss markers, versioned configuration from a local file or from Laraplate, a
 local status endpoint with Prometheus metrics, JSON logs and the systemd watchdog. The level-1
 transforms of points are built too, with `probe` and `config test` to try them offline. The other real
-drivers, derived signals, the MQTT output, plugins and packages come with later plans. The design lives in the
+drivers, derived signals, the MQTT output and packages come with later plans. The design lives in the
 Laraplate stack: `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
-- [docs/USAGE.md](docs/USAGE.md): build, run, bootstrap file, signals, `probe` and `config test`, status
+Drivers can also run as external **plugins**, separate processes built on the plugin SDK
+(`laraedge-sdk`): the agent pins each one by the SHA-256 of its binary and manifest, supervises and restarts
+it, and reports it in `/status` and the metrics. See [Plugins in the configuration](docs/CONFIGURATION.md#plugins),
+[Running plugins](docs/USAGE.md#running-plugins) and the demo in `examples/simulated-counter`.
+
+- [docs/USAGE.md](docs/USAGE.md): build, run, bootstrap file, signals, `probe` and `config test`, plugins, status
   endpoint and metrics, logs, systemd, troubleshooting.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): the configuration document, the transforms, the buffer
   and the known limits of this build.
@@ -38,7 +43,7 @@ cd examples/simulated && LARAPLATE_EDGE_TOKEN=... ../../laraplate-edge run --boo
 ```
 
 Commands: `run --bootstrap <path>`, `config validate <file>`, `config test <file> --input <samples.jsonl>`,
-`probe <input>`, `browse <input>`, `opcua trust <input>`, `status [--listen addr]`, `version`.
+`probe <input>`, `browse <input>`, `opcua trust <input>`, `plugin hash <dir>`, `status [--listen addr]`, `version`.
 
 Tests:
 

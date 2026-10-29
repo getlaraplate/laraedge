@@ -36,11 +36,12 @@ the `User-Agent` header.
 | `run --bootstrap <path> [--log-level debug\|info\|warn\|error]` | runs the agent until SIGTERM or SIGINT; logs at `info` by default | 0 after a clean stop, 1 when it cannot start, 2 on a usage error |
 | `config validate <file>` | checks a configuration document with both validation layers (schema and rules, then what this build provides and the type check of every transform chain), and builds every input through its driver without connecting; relative paths in a `connection` resolve against the file's directory, as with the `file` provider; applies nothing | 0 and `<file>: valid` on stdout, or 1 and one `<file>: <path>: <problem>` line per problem on stderr |
 | `config test <file> --input <samples.jsonl>` | replays recorded samples through the transform chains of a document and writes the resulting samples to stdout; applies nothing (see "Trying transforms") | 0; 1 when the document is invalid, the sample file is unreadable or has a bad line; 2 on a usage error |
-| `probe <input> (--config <file> \| --bootstrap <path>) [--record <file>]` | reads every point of one input once and prints the raw samples, before transforms; never starts the input or an output (see "Trying transforms") | 0; 1 when the document is invalid, the input is unknown or the read fails; 2 on a usage error |
-| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>]` | lists the nodes of an OPC UA server, to find the addresses of points (see "OPC UA servers") | 0; 1 when the document is invalid, the input is unknown or not `opcua`, or the server cannot be browsed; 2 on a usage error |
+| `probe <input> (--config <file> \| --bootstrap <path>) [--record <file>]` | reads every point of one input once and prints the raw samples, before transforms; never starts an output; an input served by a plugin is probed by starting its plugin for the duration of the probe (see "Trying transforms" and "Running plugins") | 0; 1 when the document is invalid, the input is unknown or the read fails; 2 on a usage error |
+| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>]` | lists the nodes of an OPC UA server, or of a plugin input whose manifest declares `browse`, to find the addresses of points (see "OPC UA servers" and "Running plugins") | 0; 1 when the document is invalid, the input is unknown or neither `opcua` nor a plugin that supports browse, or the source cannot be browsed; 2 on a usage error |
 | `opcua trust <input> (--config <file> \| --bootstrap <path>) [--thumbprint <hex>]` | shows the certificate an OPC UA server presents and trusts it (see "OPC UA servers") | 0 when trusted or already trusted; 1 when refused, mismatched or on any other failure; 2 on a usage error |
 | `opcua trust --list --bootstrap <path>` | lists the trusted server certificates | 0; 1 when the bootstrap cannot be read, or no certificate could be listed because a file is unreadable; 2 on a usage error |
 | `status [--listen addr]` | prints the `/status` answer of a running agent, indented; `--listen` defaults to `127.0.0.1:9180`; the bearer token, when the endpoint has one, is read from `LARAPLATE_EDGE_STATUS_TOKEN` | 0, or 1 when the agent does not answer |
+| `plugin hash <dir>` | prints `sha256:` and `manifest_sha256:` of the plugin in `<dir>`: the binary named in `<dir>/plugin.json` (with `.exe` on Windows) and the `plugin.json` file, to pin in the document (see "Running plugins") | 0; 1 when the files cannot be read; 2 on a usage error |
 | `version` | prints the version | 0 |
 
 `run` writes its logs to stdout. Usage errors and the error that stops `run` go to stderr. Error
@@ -63,7 +64,7 @@ The buffer and the applied configuration go under `examples/simulated/data`. In 
 ./laraplate-edge status
 ```
 
-To run against a real local Laraplate, see "Running against a local Laraplate" below.
+To run against a real local Laraplate, see "Running against a local Laraplate" below. `examples/simulated-counter` is the same with a plugin as the machine (see "Running plugins").
 
 ## The bootstrap file
 
@@ -212,6 +213,11 @@ response time: 3µs
   bootstrap is read only for an `opcua` input, so `--config` keeps working with a broken bootstrap for the
   other drivers), or `--bootstrap` alone. `--config` alone fails with `data_dir unknown`. An untrusted
   server is an error naming its thumbprint: run `opcua trust` (below).
+- A plugin input (`driver: plugin:<id>`) is probed by starting its plugin, with the hashes checked as at
+  every start, configuring the input, reading each point once and stopping the plugin again. The
+  plugin resolves the `secret://` values of its `connection` as the agent does. It runs a plugin
+  process of its own, beside the running agent's. The probe stops with an error and exit code 1
+  when the plugin cannot start or refuses the input's section.
 - An input id the document does not have exits 1 with the ids it has.
 
 **`config test <file> --input <samples.jsonl>`** replays recorded samples through the transform chains
@@ -334,6 +340,77 @@ nsu=urn:vendor:press;s=Press07  Press07  Object
   node, `browse` fails. The walk stops after 1000 nodes with `... stopped after 1000 nodes`
   on stdout: narrow it with `--node` and `--depth`.
 - No value is read. Like `probe`, it opens a session of its own.
+- A plugin input is browsed the same way, through the plugin, and only when the plugin's `plugin.json`
+  declares `browse`; otherwise the command exits 1 with `the plugin of this input does not support
+  browse`. The plugin chooses the node ids; `--node` takes one it printed, and `--depth` (1 to 10,
+  default 2) counts the levels below the start node as for OPC UA.
+
+## Running plugins
+
+A plugin is an external process that provides a driver (`driver: plugin:<id>`), built on
+`laraedge-sdk`; the document side (the `plugins` entry, the hashes, the manifest) is in
+[CONFIGURATION.md](CONFIGURATION.md#plugins). The agent starts a plugin only when an input uses it.
+
+**Setting one up.** Put the binary and its `plugin.json` in one directory, pin them, then check:
+
+```bash
+laraplate-edge plugin hash plugins/simulated-counter     # prints sha256 and manifest_sha256
+laraplate-edge config validate config.yaml               # files, hashes, manifest and inputs
+laraplate-edge probe counter-line --config config.yaml   # one read through the real plugin
+```
+
+`examples/simulated-counter` shows the whole setup with the SDK's example plugin.
+
+**How the agent runs it.**
+
+- No shell: the binary at `path` is executed directly, after its hash and the manifest's are recomputed
+  and compared with the entry, at every start and restart.
+- The environment is minimal: `PATH`, `TZ` and, on Windows, `SystemRoot`. Secrets never go in it; they
+  reach the plugin only in the configuration of the input that uses them.
+- The plugin listens on a socket in `data_dir/run/plugins/<id>/`, which the agent creates for each run
+  and removes when the plugin stops. It must answer the handshake within 10 seconds.
+- What the plugin writes to stderr (and to stdout after the handshake) goes to the agent log at `INFO`
+  with `plugin=<id>`, one log line per line of output. A line longer than 4 KiB is cut. Output is rate
+  limited to 50 lines a second with a burst of 200; the lines above it are dropped and counted in one
+  `WARN` ("plugin output lines dropped by the rate limit") a minute.
+- A health check runs every 5 seconds, with a 2 second deadline. Three failures in a row, or the exit
+  of the process, restart the plugin.
+- With `max_memory`, the plugin's memory is checked every 10 seconds (resident set size on Linux,
+  working set on Windows); above the limit the agent logs a `WARN` and restarts it. Where the platform
+  cannot report the memory the limit is not enforced and a `WARN` says so.
+- Stopping: the agent asks the plugin to shut down and waits 5 seconds, then sends SIGTERM and waits 5
+  seconds more, then kills it. On Windows it kills the process after the first deadline.
+- A plugin crash never stops the agent. While a plugin is down its inputs report one `bad` sample per
+  point (the zero value of the point's kind) and `connected` false; their devices die after the
+  input's `death_tolerance` unless the plugin is back before, and are born again at the first good
+  read.
+- Restarts back off from 1 second to 1 minute; the backoff starts again from 1 second after the plugin
+  has run stable for one minute.
+
+**Status and metrics.** `/status` has a `plugins` list: `id`, `state` (`starting`, `up`, `down`, or
+`failed` for a plugin a rollback could not start again), `pid`, `restarts` and `last_error`.
+`laraplate_edge_plugin_up{plugin}` is 1 while the process is up, and
+`laraplate_edge_plugin_restarts_total{plugin,reason}` counts the restarts by reason (`exit`, `health`,
+`memory`, `hash`). The restart counters, and `restarts` in `/status`, start from 0 again when a new
+document restarts the plugin (not when only an input's section changes).
+
+**`probe` and `browse`.** Both work on a plugin input, by starting the plugin for the length of the
+command (see "Trying transforms" and "Finding the addresses"). `browse` needs the plugin's manifest to
+declare `browse`. With a `laraplate` provider document, give `--config` a copy of the document, whose
+plugin paths are absolute.
+
+**The built-in conformance.** The agent binary serves its own `simulated` driver as a plugin when it
+runs under the name `laraedge-builtin-simulated` (`.exe` stripped): copy or link the binary under that
+name into a directory. It is the reference the plugin SDK's conformance suite runs against in CI. To
+use it as a plugin, generate its manifest from the binary you install, because the `plugin.json`
+committed in the repository says version `dev`:
+
+```bash
+mkdir -p plugins/laraedge-builtin-simulated
+cp laraplate-edge plugins/laraedge-builtin-simulated/laraedge-builtin-simulated
+plugins/laraedge-builtin-simulated/laraedge-builtin-simulated --manifest > plugins/laraedge-builtin-simulated/plugin.json
+laraplate-edge plugin hash plugins/laraedge-builtin-simulated
+```
 
 ## Status endpoint
 
@@ -343,7 +420,7 @@ Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
 |---|---|
 | `/healthz` | `200 ok` while the process serves; never needs the token |
 | `/readyz` | `200 {"ready":true}` once a configuration is applied and every input runs; otherwise `503 {"ready":false,"reason":"..."}` |
-| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`, and for an input that reports its health, such as `modbus` and `opcua`, `connected` and `read_errors`, the counts since the input was last started, restarting from 0 when its configuration changes or a rollback restarts it, always the four kinds `timeout`, `connection`, `exception` and `decode`, at 0 until the first error) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds`, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
+| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`, and for an input that reports its health, such as `modbus` and `opcua`, `connected` and `read_errors`, the counts since the input was last started, restarting from 0 when its configuration changes or a rollback restarts it, always the four kinds `timeout`, `connection`, `exception` and `decode`, at 0 until the first error), `plugins` (`id`, `state` `starting`, `up`, `down` or `failed`, `pid` while it is up, `restarts`, `last_error`) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds`, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
 | `/metrics` | Prometheus text format 0.0.4, below |
 
 With `status_token` set, every path but `/healthz` needs `Authorization: Bearer <token>`. The endpoint
@@ -362,6 +439,8 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down |
 | `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind`: `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
+| `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
+| `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |
 | `laraplate_edge_buffer_records` | gauge | `output`, `priority` | records not yet confirmed |
 | `laraplate_edge_buffer_bytes` | gauge | `output`, `priority` | bytes of the queue on disk |
 | `laraplate_edge_buffer_oldest_unconfirmed_seconds` | gauge | `output`, `priority` | age of the oldest unconfirmed record: agent clock minus the record's device `ts`, 0 when none |
@@ -372,7 +451,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_clock_offset_seconds` | gauge | `output` | backend clock minus agent clock, from the `Date` header of the last response |
 | `laraplate_edge_last_error_timestamp_seconds` | gauge | `output` | Unix time of the output's last error, 0 when none; the text is in `/status` |
 
-The connection and read error series exist only for inputs that report their health (`modbus` and `opcua`, not `simulated`). The buffer series and the drop counters exist only for outputs that run (a `failed` output has no open
+The plugin series exist only for plugins the applied document uses. The connection and read error series exist only for inputs that report their health (`modbus` and `opcua`, not `simulated`). The buffer series and the drop counters exist only for outputs that run (a `failed` output has no open
 buffer). Counters restart from 0 when the agent restarts.
 
 ## Logs
@@ -466,6 +545,13 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | an `opcua` input `connected` true, its devices alive, but the values are stale or `bad` | the liveness is the server's: while the server answers, the devices are alive even if the machine behind it is off. A Bad status gives `bad` samples, `read_errors` `exception` grows; an unchanged value gives no sample at all with a subscription. | look at the machine and at the server's own status of the nodes. The devices are reported dead only when the server stops answering for `death_tolerance`. |
 | the agent stops with a Go panic whose trace is in the OPC UA library | the library panicked in one of its own goroutines (malformed data from a server): this cannot be caught | the service manager restarts the agent (`Restart=` under systemd). Report it with the trace; `--log-level debug` logs the library's lines with `source=gopcua`. |
 | the document is `rolled_back` with `cannot open the serial port` | the `rtu` input could not open the port: wrong `device` path, or the user has no permission (on Windows also a port another process already has open) | check the path (`ls -l /dev/ttyUSB0`, adapters change number when replugged: prefer `/dev/serial/by-id/...`), and that the agent's user belongs to the group that owns the port (`dialout` on most Linux distributions). On Linux a second open of the port succeeds, so never run `probe` on an `rtu` input while the agent runs: both would read the same port and corrupt each other's frames. |
+| a document is `rejected` with `plugins.N.sha256: does not match the plugin binary` (or `manifest_sha256 ... plugin.json`) | the file at `path`, or its `plugin.json`, is not the one the entry pins: a rebuilt or replaced plugin, or a hash copied from another build | run `laraplate-edge plugin hash <dir>` on the files you mean to deploy and put the two values in the entry. Nothing changed: the previous document keeps running. If the binary on disk changes under a running plugin, its next restart stops on the same check (restart reason `hash`) and the plugin stays down, `last_error` `the plugin files on disk do not match their hashes`, until the files match again or a new document pins the new ones. |
+| a plugin `down`, `last_error` `the plugin printed no handshake line within 10s` | the process started but did not announce its socket in 10 seconds: it is not built on `laraedge-sdk`, it blocks at start, or the machine is overloaded | run the binary by hand: it must print the handshake line on stdout. Read its stderr in the agent log (`plugin=<id>`). The agent retries with backoff. |
+| a plugin `down`, `last_error` `the plugin exited before the handshake with exit code N` | the binary fails at start: wrong platform or architecture, a missing library, no permission to execute | run it by hand and read the error; it also appears in the log with `plugin=<id>` |
+| a plugin's `restarts` grows, `WARN` "plugin down, restarting" repeating (a crash loop) | the plugin dies or fails its health checks again and again; the log gives `reason` and `error`, and the plugin's own stderr lines come before it | the agent restarts it with a backoff that grows from 1 second to 1 minute, and starts again from 1 second after the plugin ran stable for one minute; its inputs report `bad` samples and then device deaths meanwhile. Fix the plugin from its stderr; the agent and the other inputs are not affected. |
+| `WARN` "plugin memory above max_memory", `laraplate_edge_plugin_restarts_total{reason="memory"}` grows | the plugin process holds more than the entry's `max_memory` (resident set size on Linux, working set on Windows), checked every 10 seconds | find the leak in the plugin or raise `max_memory`. A restart empties the plugin, so the plugin keeps working between restarts. |
+| `WARN` "max_memory is not enforced" | the platform cannot report a process's memory | the plugin runs without the limit; use an operating system limit (systemd `MemoryMax`) instead |
+| an input of a plugin stays down, its devices dead, after a plugin restart, with a config error in the log | the plugin refused the input's section when the agent configured it again (a `secret://` value that resolves to something it rejects, for instance); the error names the path, never the value | fix the value and apply a document; a plugin restart does not roll back the document |
 | `/readyz` `503` "input ... is failed" | an input could not start again during a rollback | see its `last_error`; it is retried only when a new document is applied |
 | start fails with `data_dir ... has format N, newer than this agent supports` | the data directory was written by a newer agent | run the newer agent; an older one never rewrites a newer layout |
 | `ERROR` "buffer: corrupt record inside a segment, dropped the rest of the segment" (or "... inside an evicted segment ..."), `corrupt_records` grows | a record of the output buffer failed its checksum or could not be read back: a disk fault, bit rot, a file changed by hand. It is found at start or while the agent runs. | nothing for the agent: it drops the rest of that segment (at most 16 MiB of that queue), counts it and keeps sending; the log line names the queue, the segment and the offset, never a value. The gap has no loss marker (the protocol has no reason for it), so the backend does not see it: check the disk (kernel log, SMART, file system). |
@@ -518,7 +604,7 @@ server of the Go library, behind a TCP proxy that simulates the loss of the netw
 certificate), then checks the births, a subscribed value, a polled one and a value changed on the server, the death of both devices after
 the death tolerance when the proxy drops the connection and refuses the next ones, the births and data again
 once it accepts (the session and the subscription created anew), and that no log line holds the endpoint or a
-sample value. It is not part of `go test ./...`; CI runs it in
+sample value. A fourth run builds the SDK's `simulated-counter` and runs it as a plugin pinned by `plugin hash`: it checks that its data reaches the backend, that killing the plugin process gives a `bad` sample, a restart and data again (`/status` and the metrics follow), and that a new document with a wrong binary hash is `rejected` while the previous one keeps delivering. It is not part of `go test ./...`; CI runs it in
 its own job on Linux amd64.
 
 ## Running against a local Laraplate

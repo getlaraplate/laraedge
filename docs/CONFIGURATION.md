@@ -681,13 +681,60 @@ them for a credential.
 | Key | Required | Meaning |
 |---|---|---|
 | `id` | yes | the id used as `plugin:<id>` |
-| `path` | yes | the plugin binary |
+| `path` | yes | the plugin binary. A relative path resolves against the directory of the configuration file with the `file` provider (like `scenario_file`); with the `laraplate` provider the path must be absolute and a relative one is refused. |
 | `sha256` | yes | lowercase hex SHA-256 of the binary |
 | `manifest_sha256` | yes | lowercase hex SHA-256 of the `plugin.json` file next to the binary |
-| `max_memory` | no | a size; above it the agent restarts the plugin. No limit when missing. |
+| `max_memory` | no | a size; above it the agent restarts the plugin. No limit when missing. The memory is checked every 10 seconds: the resident set size on Linux, the working set on Windows. |
 
 `laraplate-edge plugin hash <dir>` prints `sha256:` and `manifest_sha256:` for the plugin in `<dir>`:
-the binary named in `<dir>/plugin.json` (with `.exe` on Windows) and the manifest file.
+the binary named in `<dir>/plugin.json` (with `.exe` on Windows) and the manifest file. Copy the two
+values into the entry; run it again after every rebuild of the plugin.
+
+The manifest is the file `plugin.json` in the same directory as the binary at `path`. It names the
+plugin and says which inputs it provides (the address syntax, the read modes, the types, whether it can
+`browse`). The agent hashes the binary and the manifest at every start of the plugin and refuses to run
+a plugin whose files do not match the entry. The binary at `path` need not carry the manifest's name,
+but `plugin hash` looks for the binary by that name.
+
+```yaml
+plugins:
+  - id: simulated-counter
+    path: plugins/simulated-counter
+    sha256: <sha256 printed by plugin hash>
+    manifest_sha256: <manifest_sha256 printed by plugin hash>
+    max_memory: 64MiB
+```
+
+### Plugin inputs
+
+An input uses a plugin with `driver: plugin:<id>`, where `<id>` is an entry of `plugins`. Every input
+key (`devices`, `points`, `death_tolerance`, `transforms`, ...) is the same as for the other drivers.
+Which values are valid is the plugin's: `connection` and each point's `address`, `type` and `read` are
+checked against the schemas, types and read modes its `plugin.json` declares, and the plugin checks the
+section again when it is configured. A plugin that no input uses is not started.
+
+`config validate` checks the plugin entries (files present, both hashes, manifest) and the inputs
+against the manifest, without starting the plugin. A problem is reported with its path, for instance
+`plugins.0.sha256: does not match the plugin binary` or `inputs.0.devices.0.points.0.address: ...`.
+
+A `secret://` value inside `connection` is not resolved by `config validate`: a manifest problem on a
+key that is a secret key (see "Secret fields") is dropped offline. The agent resolves the secrets when
+it configures the plugin at start, passes them in the configuration of that input only (never in the
+plugin's environment) and the plugin validates the resolved values then; a refused value shows as a
+config error at start, naming its path and never its value.
+
+### Starting, restarting and applying
+
+- A plugin restarts, with all its inputs, only when its `plugins` entry changes or when the hash of its
+  binary on disk differs from the running one. A change in an input's section reconfigures only that
+  input's instance and leaves the plugin process and its other inputs running.
+- A plugin the new document no longer uses is stopped; one it newly uses is started.
+- A new document whose plugin files do not match their hashes, or whose manifest does not accept the
+  inputs, is `rejected` before anything changes: the previous document keeps running.
+- A plugin that dies, fails three health checks in a row or exceeds `max_memory` restarts on its own,
+  with a backoff from 1 second to 1 minute (see [USAGE.md](USAGE.md#running-plugins)). After a restart
+  the agent configures every input again; if the plugin then refuses an input's section, that input
+  stays down (its devices die after the `death_tolerance`) and the document is not rolled back.
 
 ## Applying a document
 
@@ -703,7 +750,7 @@ Outcomes, as reported to Laraplate:
 - `rejected`: the document is invalid, older than the applied one, has a transform chain that does not
   type-check, or asks for something this build does not provide. Nothing changed.
 - `rolled_back`: a component did not start (an input has 30 seconds). What the apply started is stopped
-  and what it stopped is started again.
+  and what it stopped is started again. A plugin that does not start counts as a component that did not start.
 - `applied`: the document runs and is kept as `data_dir/config/last-valid.json`, from which the agent
   starts next time.
 

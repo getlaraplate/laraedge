@@ -14,6 +14,8 @@ coverage.*
 /examples/simulated/data/
 /examples/modbus/data/
 /examples/opcua/data/
+/examples/simulated-counter/data/
+/examples/simulated-counter/plugins/
 /bootstrap.local.yaml
 
 # Environment and secrets

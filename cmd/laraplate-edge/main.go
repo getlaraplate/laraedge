@@ -45,12 +45,16 @@ commands:
                              wins over --bootstrap, whose data_dir and
                              agent_id an opcua input still uses), else the
                              last valid one in the bootstrap's data_dir;
-                             --record writes the raw samples as JSON Lines
+                             --record writes the raw samples as JSON Lines;
+                             a plugin:<id> input starts its plugin for the
+                             probe
   browse <input> (--config <file> | --bootstrap <path>) [--node <nodeid>] [--depth <n>]
-                             list the nodes of an OPC UA server, indented by
-                             depth, from the Objects folder or --node
-                             (nsu=<uri>;<id> works); --depth 1 to 10, default 2;
-                             stops after 1000 nodes; reads no value
+                             list the nodes of an OPC UA server, or of a
+                             plugin:<id> input whose plugin.json declares
+                             browse, indented by depth, from the Objects
+                             folder or --node (nsu=<uri>;<id> works);
+                             --depth 1 to 10, default 2; stops after 1000
+                             nodes; reads no value
   opcua trust <input> (--config <file> | --bootstrap <path>) [--thumbprint <hex>]
                              show the certificate an OPC UA server presents and
                              trust it after a yes on stdin, or without asking
