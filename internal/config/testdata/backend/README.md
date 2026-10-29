@@ -8,7 +8,7 @@ document the backend's structural schema accepts in its own tests.
   (MES commit `dd02c71`).
 - The documents are the valid ones of the backend test "finds no error in a valid document,
   with or without plugins and version" in
-  `laraplate/Modules/MES/tests/Feature/Machine/MachineAgentConfigTest.php` (MES commit `2db00db`),
+  `laraplate/Modules/MES/tests/Feature/Machine/MachineAgentConfigTest.php` (MES commit `1442087`),
   translated from the PHP arrays of `agentConfigFields()` / `agentConfigDocument()`:
   - `document.json`: `agentConfigDocument()`;
   - `without-plugins.json`: the fields without `plugins`;
@@ -18,9 +18,5 @@ document the backend's structural schema accepts in its own tests.
   as `document.json` passed as text, so it has no file of its own.
 
 Replace these files when the backend test or its schema changes. The agent test validates each
-document against both schemas (layer 1 only): this build still refuses the opcua driver, the
-keystore token and the plugin entries in its build check.
-
-Exception: spec section 5 makes `manifest_sha256` required in a plugin entry, which the backend's
-arrays lack, so the agent test expects exactly `plugins.<i>.manifest_sha256: is required` for them.
-The backend must add `manifest_sha256` to its test arrays before it publishes plugin documents.
+document against both schemas and parses it without problems (layer 1 only: the build check,
+the plugin files and the secrets are not involved).
