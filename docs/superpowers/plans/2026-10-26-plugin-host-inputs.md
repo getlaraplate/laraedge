@@ -265,11 +265,18 @@ summarised below):
   refuses with `plugins.<i>.manifest_sha256: is required`. The MES module's test arrays and the agent configuration
   editor must carry `manifest_sha256` before the backend publishes plugin documents.
 
+- **Local trust anchor (`plugins_dir`, 2026-10-29).** H1 is amended by the optional absolute bootstrap key `plugins_dir`
+  (no default). With the `laraplate` provider and no `plugins_dir`, every plugin entry is refused
+  (`plugins.<i>.path: plugins are disabled: set plugins_dir in the bootstrap`); with it, a relative `path` resolves
+  against `plugins_dir` and an absolute one must lie inside it, which replaces the old "must be absolute" rule. With the
+  `file` provider a relative `path` still resolves against the configuration file's directory and, when `plugins_dir`
+  is set, the binary must lie inside it. Containment compares `filepath.EvalSymlinks` results with `filepath.Rel`, so
+  `..` and escaping symlinks are refused (`plugins.<i>.path: must be inside plugins_dir`); a missing binary stays a
+  missing-file problem. `plugin.Resolve` takes a `plugin.Paths{BaseDir, Provider, PluginsDir}`, and
+  `config validate --plugins-dir <path>` applies the file-provider rules offline.
+
 Left open, for decisions outside this plan:
 
-- **Local trust anchor for plugins.** With the `laraplate` provider the backend supplies `path` and both hashes, so a
-  compromised backend can make the agent run any absolute-path binary that completes the handshake. An allowed plugin
-  directory in the bootstrap, or hashes pinned locally, would close it.
 - **SDK v0.1.0 `acquire`** (`sdk/sdk.go:412`) does not check the parent context, so a late old `Subscribe` can take
   an instance after a new `Configure` and its teardown stops the new configuration. The fix belongs in
   `laraedge-sdk`; the busy retry above mitigates the symptom.

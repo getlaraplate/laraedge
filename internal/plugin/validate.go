@@ -42,14 +42,28 @@ type Spec struct {
 	Raw json.RawMessage
 }
 
+// Paths holds the local inputs that decide where a plugin binary may live.
+type Paths struct {
+	// BaseDir is the directory of the configuration file, against which a
+	// relative path resolves with the file provider; "" for a provider
+	// without a file.
+	BaseDir string
+	// Provider is the bootstrap's provider name.
+	Provider string
+	// PluginsDir is the bootstrap's plugins_dir, absolute, "" when unset. It
+	// is the local trust anchor: with the laraplate provider plugins are
+	// disabled without it and every binary must lie inside it; with the file
+	// provider it constrains the binaries only when set.
+	PluginsDir string
+}
+
 // Resolve checks the plugin entries of doc against the files on disk: the
-// path (relative paths resolve against baseDir, the directory of the
-// configuration file, and are refused with the laraplate provider), the
-// binary and manifest hashes, and the manifest itself. It returns a Spec for
-// every entry that passed and one message per problem, prefixed
-// "plugins.<i>". A missing binary or manifest is a problem. Messages name
-// paths and fixed text, never a configured value.
-func Resolve(doc config.Document, baseDir string, provider string) ([]Spec, []string) {
+// path (see Paths for where it resolves and what contains it), the binary and
+// manifest hashes, and the manifest itself. It returns a Spec for every entry
+// that passed and one message per problem, prefixed "plugins.<i>". A missing
+// binary or manifest is a problem. Messages name paths and fixed text, never
+// a configured value.
+func Resolve(doc config.Document, paths Paths) ([]Spec, []string) {
 	var (
 		specs []Spec
 		msgs  []string
@@ -57,7 +71,7 @@ func Resolve(doc config.Document, baseDir string, provider string) ([]Spec, []st
 
 	for i, p := range doc.Plugins {
 		prefix := fmt.Sprintf("plugins.%d", i)
-		spec, problems := resolveOne(p, prefix, baseDir, provider)
+		spec, problems := resolveOne(p, prefix, paths)
 		msgs = append(msgs, problems...)
 		if len(problems) == 0 {
 			specs = append(specs, spec)
@@ -67,15 +81,53 @@ func Resolve(doc config.Document, baseDir string, provider string) ([]Spec, []st
 	return specs, msgs
 }
 
+// contained reports whether binary lies inside dir once both have their
+// symlinks resolved. The error is the one of dir, or of binary when it does
+// not exist; the caller decides what a missing file means.
+func contained(dir, binary string) (bool, error) {
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false, fmt.Errorf("plugins_dir: %w", err)
+	}
+	realBinary, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(realDir, realBinary)
+	if err != nil {
+		return false, nil
+	}
+
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel), nil
+}
+
 // resolveOne hashes the configured Path, not <dir>/<manifest name>: the binary
 // named after the manifest is a suite rule only (SDK ruling R11).
-func resolveOne(p config.Plugin, prefix, baseDir, provider string) (Spec, []string) {
+func resolveOne(p config.Plugin, prefix string, paths Paths) (Spec, []string) {
+	laraplate := paths.Provider == bootstrap.ProviderLaraplate
+	if laraplate && paths.PluginsDir == "" {
+		return Spec{}, []string{prefix + ".path: plugins are disabled: set plugins_dir in the bootstrap"}
+	}
+
 	binary := p.Path
 	if !filepath.IsAbs(binary) {
-		if provider == bootstrap.ProviderLaraplate {
-			return Spec{}, []string{prefix + ".path: must be absolute with the laraplate provider"}
+		base := paths.BaseDir
+		if laraplate {
+			base = paths.PluginsDir
 		}
-		binary = filepath.Join(baseDir, binary)
+		binary = filepath.Join(base, binary)
+	}
+	binary = filepath.Clean(binary)
+
+	if paths.PluginsDir != "" {
+		ok, err := contained(paths.PluginsDir, binary)
+		switch {
+		case err != nil && strings.HasPrefix(err.Error(), "plugins_dir: "):
+			return Spec{}, []string{prefix + ".path: plugins_dir cannot be resolved"}
+		case err == nil && !ok:
+			return Spec{}, []string{prefix + ".path: must be inside plugins_dir"}
+		}
+		// A binary that does not exist is reported below, not masked here.
 	}
 	dir := filepath.Dir(binary)
 

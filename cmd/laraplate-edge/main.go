@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/getlaraplate/laraedge/internal/bootstrap"
@@ -34,7 +35,11 @@ const usageText = `usage: laraplate-edge <command> [arguments]
 commands:
   run --bootstrap <path> [--log-level debug|info|warn|error]
                              run the agent (default log level info)
-  config validate <file>     validate a configuration document
+  config validate <file> [--plugins-dir <path>]
+                             validate a configuration document; with
+                             --plugins-dir (absolute) every plugin binary
+                             must lie inside it, as plugins_dir does in
+                             the bootstrap
   config test <file> --input <samples.jsonl>
                              replay recorded samples (JSON Lines) through the
                              transform chains of a document; the resulting
@@ -177,12 +182,22 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 // the input drivers' own included (decision M1), every message on stderr
 // prefixed by the file name, exit 0 when there is none.
 func runConfigValidate(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 2 || args[0] != "validate" {
+	fs := newFlagSet("config validate", stderr)
+	pluginsDir := fs.String("plugins-dir", "", "")
+	positional, code, ok := parseArgs(fs, args)
+	if !ok {
+		return code
+	}
+	if len(positional) != 2 || positional[0] != "validate" {
 		fmt.Fprint(stderr, usageText)
 		return exitUsage
 	}
+	if *pluginsDir != "" && !filepath.IsAbs(*pluginsDir) {
+		fmt.Fprintf(stderr, "laraplate-edge config validate: --plugins-dir must be an absolute path\n")
+		return exitUsage
+	}
 
-	file := args[1]
+	file := positional[1]
 	doc, msgs, err := parseDocument(file)
 	if err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge config validate: %v\n", err)
@@ -190,7 +205,7 @@ func runConfigValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(msgs) == 0 {
 		msgs = append(checkDocument(doc), checkInputs(doc, file)...)
-		msgs = append(msgs, checkPlugins(doc, file)...)
+		msgs = append(msgs, checkPlugins(doc, file, *pluginsDir)...)
 	}
 	if len(msgs) > 0 {
 		printMessages(stderr, file, msgs)
@@ -266,10 +281,11 @@ func checkInputs(doc config.Document, file string) []string {
 
 // checkPlugins resolves the plugin entries of doc against the files next to
 // the configuration file (file provider rules, decision H1) and validates the
-// plugin inputs against their manifests.
-func checkPlugins(doc config.Document, file string) []string {
+// plugin inputs against their manifests. A non-empty pluginsDir is the
+// plugins_dir the binaries must lie inside.
+func checkPlugins(doc config.Document, file, pluginsDir string) []string {
 	boot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: file}}
-	specs, msgs := plugin.Resolve(doc, configBaseDir(boot), boot.Config.Provider)
+	specs, msgs := plugin.Resolve(doc, plugin.Paths{BaseDir: configBaseDir(boot), Provider: boot.Config.Provider, PluginsDir: pluginsDir})
 
 	return append(msgs, plugin.Validate(doc, specs)...)
 }

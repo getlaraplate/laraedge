@@ -681,10 +681,27 @@ them for a credential.
 | Key | Required | Meaning |
 |---|---|---|
 | `id` | yes | the id used as `plugin:<id>` |
-| `path` | yes | the plugin binary. A relative path resolves against the directory of the configuration file with the `file` provider (like `scenario_file`); with the `laraplate` provider the path must be absolute and a relative one is refused. |
+| `path` | yes | the plugin binary. Where it resolves and what may contain it depends on the provider and on `plugins_dir` of the bootstrap, see "Where plugins may live" below. |
 | `sha256` | yes | lowercase hex SHA-256 of the binary |
 | `manifest_sha256` | yes | lowercase hex SHA-256 of the `plugin.json` file next to the binary |
 | `max_memory` | no | a size; above it the agent restarts the plugin. No limit when missing. The memory is checked every 10 seconds: the resident set size on Linux, the working set on Windows. |
+
+#### Where plugins may live
+
+`plugins_dir` in the bootstrap (see USAGE.md) is the local trust anchor: an absolute directory, no default,
+that the backend cannot change. The rules for `path`:
+
+- `laraplate` provider, `plugins_dir` unset: plugins are disabled and every entry is refused with
+  `plugins.<i>.path: plugins are disabled: set plugins_dir in the bootstrap`.
+- `laraplate` provider, `plugins_dir` set: a relative `path` resolves against `plugins_dir`; an absolute
+  one must lie inside it.
+- `file` provider: a relative `path` resolves against the directory of the configuration file. When
+  `plugins_dir` is set the binary must lie inside it; when it is unset there is no constraint.
+
+Inside means after resolving symlinks in both the directory and the binary, so `..` and a link pointing
+out are refused with `plugins.<i>.path: must be inside plugins_dir`. The manifest sits next to the binary,
+so it is covered. A missing binary is still reported as missing. `config validate --plugins-dir <path>`
+applies the same check offline, with the `file` provider rules.
 
 `laraplate-edge plugin hash <dir>` prints `sha256:` and `manifest_sha256:` for the plugin in `<dir>`:
 the binary named in `<dir>/plugin.json` (with `.exe` on Windows) and the manifest file. Copy the two

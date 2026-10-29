@@ -233,9 +233,8 @@ func probePlugin(doc config.Document, boot bootstrap.File, cfg config.Input, log
 	return samples, clk.Now().Sub(start), nil
 }
 
-// openPluginInput resolves the plugin of cfg (decision H1: relative paths
-// against the configuration file's directory, absolute only with the
-// laraplate provider), starts it with a data_dir of its own that lives as long
+// openPluginInput resolves the plugin of cfg (decision H1, amended by
+// plugins_dir: see plugin.Paths), starts it with a data_dir of its own that lives as long
 // as the returned close function, and returns the input the plugin serves.
 // The data_dir is a fresh temporary one, never the agent's: a running agent
 // keeps its plugin sockets there. close stops the input and the plugin and
@@ -245,7 +244,7 @@ func probePlugin(doc config.Document, boot bootstrap.File, cfg config.Input, log
 func openPluginInput(ctx context.Context, doc config.Document, boot bootstrap.File, cfg config.Input, browse bool, log *slog.Logger) (input.Input, func(), error) {
 	id := strings.TrimPrefix(cfg.Driver, plugin.DriverPrefix)
 
-	specs, msgs := plugin.Resolve(doc, configBaseDir(boot), boot.Config.Provider)
+	specs, msgs := plugin.Resolve(doc, plugin.Paths{BaseDir: configBaseDir(boot), Provider: boot.Config.Provider, PluginsDir: boot.PluginsDir})
 	i := slices.IndexFunc(specs, func(s plugin.Spec) bool { return s.ID == id })
 	if i < 0 {
 		if !slices.ContainsFunc(doc.Plugins, func(p config.Plugin) bool { return p.ID == id }) {

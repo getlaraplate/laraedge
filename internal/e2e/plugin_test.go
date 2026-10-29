@@ -163,8 +163,9 @@ config:
     token: secret://env/%s
     poll_seconds: 5
 data_dir: %s
+plugins_dir: %s
 status_listen: 127.0.0.1:0
-`, b.url(), tokenEnv, filepath.Join(work, "data")))
+`, b.url(), tokenEnv, filepath.Join(work, "data"), dir))
 
 	a := startAgent(t, boot)
 	b.waitFor(t, a, "version 1 reported applied", func() bool { return b.reported(1, "applied") })

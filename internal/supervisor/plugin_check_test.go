@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,7 +28,6 @@ func TestCheckRejectsUnresolvablePlugins(t *testing.T) {
 		want     string
 	}{
 		{"missing files under the file provider", bootstrap.ProviderFile, "plugins.0: plugin.json not found next to the binary"},
-		{"relative path under the laraplate provider", bootstrap.ProviderLaraplate, "plugins.0.path: must be absolute with the laraplate provider"},
 	}
 
 	for _, tc := range tests {
@@ -42,5 +42,20 @@ func TestCheckRejectsUnresolvablePlugins(t *testing.T) {
 				t.Errorf("check() = %q, want a message %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCheckLaraplateProviderWithoutPluginsDirDisablesPlugins(t *testing.T) {
+	doc, _, err := config.Parse([]byte(pluginCheckDoc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, func(c *Config) { c.Provider = bootstrap.ProviderLaraplate })
+
+	_, got := f.sup.check(doc)
+
+	want := "plugins.0.path: plugins are disabled: set plugins_dir in the bootstrap"
+	if !slices.Contains(got, want) {
+		t.Errorf("check() = %q, want the message %q", got, want)
 	}
 }

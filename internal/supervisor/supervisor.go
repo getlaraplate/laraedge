@@ -83,8 +83,11 @@ type Config struct {
 	// relative plugin paths resolve; "" for a provider without a file.
 	ConfigDir string
 	// Provider is the bootstrap's provider name; with the laraplate provider
-	// a plugin path must be absolute.
+	// plugins are disabled unless PluginsDir is set.
 	Provider string
+	// PluginsDir is the bootstrap's plugins_dir, "" when unset: the local
+	// trust anchor every plugin binary must lie inside.
+	PluginsDir string
 	// Clock drives every timer; nil means clock.Real().
 	Clock clock.Clock
 	// Logger receives the logs; nil means slog.Default().
@@ -101,17 +104,18 @@ type Config struct {
 // need. Apply, Close, Status, ReloadCredentials and AppliedVersion are safe
 // for concurrent use; Apply calls are serialized.
 type Supervisor struct {
-	dataDir   string
-	store     *config.Store
-	drivers   map[string]input.Factory
-	resolver  output.SecretResolver
-	configDir string
-	provider  string
-	clk       clock.Clock
-	log       *slog.Logger
-	timeout   time.Duration
-	client    *http.Client
-	router    *pipeline.Router
+	dataDir    string
+	store      *config.Store
+	drivers    map[string]input.Factory
+	resolver   output.SecretResolver
+	configDir  string
+	provider   string
+	pluginsDir string
+	clk        clock.Clock
+	log        *slog.Logger
+	timeout    time.Duration
+	client     *http.Client
+	router     *pipeline.Router
 
 	// ctx is the lifetime of every component; wg counts every goroutine the
 	// supervisor starts.
@@ -259,20 +263,21 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 
 	s := &Supervisor{
-		dataDir:   cfg.DataDir,
-		store:     cfg.Store,
-		drivers:   cfg.Drivers,
-		resolver:  cfg.Resolver,
-		configDir: cfg.ConfigDir,
-		provider:  cfg.Provider,
-		clk:       cfg.Clock,
-		log:       cfg.Logger,
-		timeout:   cfg.StartTimeout,
-		client:    cfg.HTTPClient,
-		inputs:    map[string]*runningInput{},
-		outputs:   map[string]*runningOutput{},
-		failedIn:  map[string]failure{},
-		failedOut: map[string]failure{},
+		dataDir:    cfg.DataDir,
+		store:      cfg.Store,
+		drivers:    cfg.Drivers,
+		resolver:   cfg.Resolver,
+		configDir:  cfg.ConfigDir,
+		provider:   cfg.Provider,
+		pluginsDir: cfg.PluginsDir,
+		clk:        cfg.Clock,
+		log:        cfg.Logger,
+		timeout:    cfg.StartTimeout,
+		client:     cfg.HTTPClient,
+		inputs:     map[string]*runningInput{},
+		outputs:    map[string]*runningOutput{},
+		failedIn:   map[string]failure{},
+		failedOut:  map[string]failure{},
 
 		plugins:         map[string]*runningPlugin{},
 		failedPlugins:   map[string]failure{},
@@ -510,7 +515,7 @@ func (s *Supervisor) check(doc config.Document) ([]plugin.Spec, []string) {
 	msgs = append(msgs, transform.CheckDocument(doc)...)
 
 	// Plugin entries and plugin inputs: files, hashes, manifests (H2, H3).
-	specs, pluginMsgs := plugin.Resolve(doc, s.configDir, s.provider)
+	specs, pluginMsgs := plugin.Resolve(doc, plugin.Paths{BaseDir: s.configDir, Provider: s.provider, PluginsDir: s.pluginsDir})
 	msgs = append(msgs, pluginMsgs...)
 	msgs = append(msgs, plugin.Validate(doc, specs)...)
 

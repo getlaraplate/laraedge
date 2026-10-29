@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -48,6 +49,10 @@ type File struct {
 	StatusListen string `yaml:"status_listen"`
 	// StatusToken is an optional secret:// reference protecting the status endpoint.
 	StatusToken string `yaml:"status_token"`
+	// PluginsDir is the optional absolute directory plugin binaries must lie
+	// inside; no default. With the laraplate provider plugins are disabled
+	// while it is unset.
+	PluginsDir string `yaml:"plugins_dir"`
 }
 
 // Config selects the configuration provider.
@@ -132,6 +137,9 @@ func (f File) validate() error {
 		if err := validateReference("status_token", f.StatusToken); err != nil {
 			return err
 		}
+	}
+	if f.PluginsDir != "" && !filepath.IsAbs(f.PluginsDir) {
+		return errors.New("plugins_dir must be an absolute path")
 	}
 	return nil
 }

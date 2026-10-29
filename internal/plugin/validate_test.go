@@ -94,8 +94,8 @@ func (f fixture) document(t *testing.T, o docOptions) config.Document {
 	return doc
 }
 
-func run(doc config.Document, baseDir, provider string) []string {
-	specs, msgs := plugin.Resolve(doc, baseDir, provider)
+func run(doc config.Document, paths plugin.Paths) []string {
+	specs, msgs := plugin.Resolve(doc, paths)
 
 	return append(msgs, plugin.Validate(doc, specs)...)
 }
@@ -131,8 +131,6 @@ func TestResolveAndValidate(t *testing.T) {
 		{name: "missing binary", fx: missingBinary, want: []string{"plugins.0.path: the plugin binary cannot be read"}},
 		{name: "plugin without the input kind", fx: outputOnly, want: []string{"inputs.0.driver: the plugin does not offer the input kind"}},
 		{name: "unknown plugin id", fx: good, opts: docOptions{driver: "plugin:other"}, want: []string{"inputs.0.driver: no plugin entry with this id"}},
-		{name: "relative path refused with the laraplate provider", fx: good, provider: bootstrap.ProviderLaraplate, want: []string{"plugins.0.path: must be absolute with the laraplate provider"}},
-		{name: "absolute path with the laraplate provider", fx: good, opts: docOptions{path: "ABS"}, provider: bootstrap.ProviderLaraplate},
 		{name: "bad connection", fx: good, opts: docOptions{connection: `{"host":"h","port":"xyz"}`}, want: []string{"inputs.0.connection.port: "}},
 		{name: "bad address", fx: good, opts: docOptions{point: `{"signal":"s","address":"BAD","type":"int16","read":{"poll":"1s"}}`}, want: []string{"inputs.0.devices.0.points.0.address: "}},
 		{name: "read mode refused", fx: good, opts: docOptions{point: `{"signal":"s","address":"m:1","type":"int16","read":"subscribe"}`}, want: []string{"inputs.0.devices.0.points.0.read: read mode is not accepted by this plugin"}},
@@ -149,7 +147,7 @@ func TestResolveAndValidate(t *testing.T) {
 			}
 			doc := tc.fx.document(t, tc.opts)
 
-			got := run(doc, tc.fx.dir, tc.provider)
+			got := run(doc, plugin.Paths{BaseDir: tc.fx.dir, Provider: tc.provider})
 
 			if len(got) != len(tc.want) {
 				t.Fatalf("messages = %q, want %q", got, tc.want)
@@ -173,7 +171,7 @@ func TestMessagesCarryNoValue(t *testing.T) {
 		point:       `{"signal":"s","address":"TOPSECRETADDR","type":"int16","read":{"poll":"1s"}}`,
 	})
 
-	_, msgs := plugin.Resolve(doc, fx.dir, "")
+	_, msgs := plugin.Resolve(doc, plugin.Paths{BaseDir: fx.dir})
 	if len(msgs) == 0 {
 		t.Fatal("want hash problems")
 	}
@@ -182,7 +180,7 @@ func TestMessagesCarryNoValue(t *testing.T) {
 		connection: `{"host":"10.9.8.7","port":"` + secretValue + `"}`,
 		point:      `{"signal":"s","address":"TOPSECRETADDR","type":"int16","read":{"poll":"1s"}}`,
 	})
-	specs, _ := plugin.Resolve(good, fx.dir, "")
+	specs, _ := plugin.Resolve(good, plugin.Paths{BaseDir: fx.dir})
 	msgs = append(msgs, plugin.Validate(good, specs)...)
 
 	all := strings.Join(msgs, "\n")
@@ -200,7 +198,7 @@ func TestResolveReturnsSpecs(t *testing.T) {
 	fx := newFixture(t, testManifest)
 	doc := fx.document(t, docOptions{})
 
-	specs, msgs := plugin.Resolve(doc, fx.dir, bootstrap.ProviderFile)
+	specs, msgs := plugin.Resolve(doc, plugin.Paths{BaseDir: fx.dir, Provider: bootstrap.ProviderFile})
 	if len(msgs) != 0 || len(specs) != 1 {
 		t.Fatalf("specs = %d, msgs = %q", len(specs), msgs)
 	}

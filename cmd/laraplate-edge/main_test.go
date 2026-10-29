@@ -416,3 +416,43 @@ func TestConfigValidateChecksPlugins(t *testing.T) {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
 }
+
+func TestConfigValidatePluginsDir(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "demo")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(pluginDir, "demo"), "binary")
+	zeros := strings.Repeat("0", 64)
+	doc := filepath.Join(dir, "config.json")
+	writeFile(t, doc, `{"schema":"laraplate-edge-config/1","version":1,
+"plugins":[{"id":"demo","path":"plugins/demo/demo","sha256":"`+zeros+`","manifest_sha256":"`+zeros+`"}],
+"outputs":[{"id":"o0","type":"laraplate-http","url":"https://example.com","token":"secret://env/T","route":{"include":["*"]}}],
+"inputs":[{"id":"i0","driver":"plugin:demo","devices":[{"device":"d","points":[{"signal":"s","address":"a","type":"int16","read":{"poll":"1s"}}]}]}]}`)
+
+	const outsideMsg = "plugins.0.path: must be inside plugins_dir"
+	tests := []struct {
+		name        string
+		args        []string
+		wantCode    int
+		wantOutside bool
+	}{
+		{name: "dir containing the binary", args: []string{"config", "validate", doc, "--plugins-dir", filepath.Join(dir, "plugins")}, wantCode: exitFailure},
+		{name: "flag before the file", args: []string{"config", "validate", "--plugins-dir", t.TempDir(), doc}, wantCode: exitFailure, wantOutside: true},
+		{name: "relative dir refused", args: []string{"config", "validate", doc, "--plugins-dir", "plugins"}, wantCode: exitUsage},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+
+			if code := run(tc.args, &stdout, &stderr); code != tc.wantCode {
+				t.Fatalf("exit code = %d, want %d (stderr: %q)", code, tc.wantCode, stderr.String())
+			}
+			if got := strings.Contains(stderr.String(), outsideMsg); got != tc.wantOutside {
+				t.Errorf("stderr = %q, outside message present = %v, want %v", stderr.String(), got, tc.wantOutside)
+			}
+		})
+	}
+}
