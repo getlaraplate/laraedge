@@ -9,6 +9,8 @@
 //	ignore_shutdown  serve Info and health without the SDK server, with a
 //	                 Shutdown that answers and does nothing
 //	ignore_sigterm   ignore SIGTERM
+//	pid_file         write the process id to this file next to the binary
+//	block_before_handshake  block forever instead of the handshake
 package main
 
 import (
@@ -19,8 +21,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -43,12 +47,19 @@ type behaviour struct {
 	EnvFile        string `json:"env_file"`
 	IgnoreShutdown bool   `json:"ignore_shutdown"`
 	IgnoreSIGTERM  bool   `json:"ignore_sigterm"`
+	PIDFile        string `json:"pid_file"`
+	Block          bool   `json:"block_before_handshake"`
 }
 
 func main() {
 	b, dir := readBehaviour()
 	if b.IgnoreSIGTERM {
 		signal.Ignore(syscall.SIGTERM)
+	}
+	if b.PIDFile != "" {
+		if err := os.WriteFile(filepath.Join(dir, b.PIDFile), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			fail(err)
+		}
 	}
 	if b.EnvFile != "" {
 		env := strings.Join(os.Environ(), "\n") + "\n"
@@ -62,6 +73,11 @@ func main() {
 	if b.CrashAtStart {
 		fmt.Fprintln(os.Stderr, "crashing at start")
 		os.Exit(1)
+	}
+	if b.Block {
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	if b.IgnoreShutdown {
 		serveIgnoringShutdown()

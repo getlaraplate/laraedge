@@ -4,6 +4,9 @@ package plugin_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -89,5 +92,124 @@ func TestHostStopSequence(t *testing.T) {
 				t.Fatalf("state = %s, want stopped", got)
 			}
 		})
+	}
+}
+
+// failHealthChecks lets n health checks of a stopped plugin time out.
+func (h *harness) failHealthChecks(n int) {
+	h.t.Helper()
+
+	for range n {
+		h.waitFor("the health timer", func() bool { return h.clk.PendingTimers() == 1 })
+		h.clk.Advance(5 * time.Second)
+		h.waitFor("the health check deadline", func() bool { return h.clk.PendingTimers() == 1 })
+		h.clk.Advance(2 * time.Second)
+	}
+}
+
+func TestHostHealthFailuresResetOnSuccess(t *testing.T) {
+	h := newHarness(t, newSpec(t, ""))
+	h.start()
+	pid := h.host.Status().Pid
+
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	h.failHealthChecks(2)
+	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor("the health timer", func() bool { return h.clk.PendingTimers() == 1 })
+	h.clk.Advance(5 * time.Second)
+	h.waitFor("a passed health check", func() bool {
+		return strings.Count(h.log.String(), "plugin health check passed") == 1 && h.clk.PendingTimers() == 1
+	})
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	h.failHealthChecks(2)
+	h.waitFor("the fourth failure", func() bool {
+		return strings.Count(h.log.String(), "plugin health check failed") == 4 && h.clk.PendingTimers() == 1
+	})
+
+	if status := h.host.Status(); status.State != plugin.StateUp || status.Restarts != 0 || status.Pid != pid {
+		t.Fatalf("Status() = %+v, want the same plugin up without restarts", status)
+	}
+	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// alive reports whether process pid exists (a reaped process does not).
+func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
+func TestHostStopDuringHandshake(t *testing.T) {
+	h := newHarness(t, newSpec(t, `{"block_before_handshake":true,"pid_file":"pid.txt"}`))
+
+	started := make(chan error, 1)
+	go func() { started <- h.host.Start(context.Background()) }()
+	pidFile := filepath.Join(h.spec.Dir, "pid.txt")
+	var pid int
+	h.waitFor("the plugin process", func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil || len(data) == 0 {
+			return false
+		}
+		pid, err = strconv.Atoi(string(data))
+
+		return err == nil
+	})
+
+	if err := h.host.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() = %v", err)
+	}
+	if alive(pid) {
+		t.Fatal("the plugin process is alive after Stop returned")
+	}
+	select {
+	case err := <-started:
+		if err == nil || err.Error() != "the plugin host is stopped" {
+			t.Fatalf("Start() = %v, want the host is stopped", err)
+		}
+	default:
+		t.Fatal("Start had not returned when Stop returned")
+	}
+	if status := h.host.Status(); status.State != plugin.StateStopped || status.Pid != 0 {
+		t.Fatalf("Status() = %+v, want stopped", status)
+	}
+}
+
+func TestHostConcurrentStopsWaitForTheReap(t *testing.T) {
+	h := newHarness(t, newSpec(t, `{"ignore_shutdown":true}`))
+	h.start()
+	pid := h.host.Status().Pid
+
+	type result struct {
+		err   error
+		alive bool
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			err := h.host.Stop(context.Background())
+			results <- result{err: err, alive: alive(pid)}
+		}()
+	}
+	h.waitFor("Shutdown sent", func() bool { return strings.Contains(h.log.String(), "plugin stopping") })
+	h.waitFor("the Shutdown deadline", func() bool { return h.clk.PendingTimers() == 1 })
+	h.clk.Advance(5 * time.Second)
+
+	for range 2 {
+		select {
+		case r := <-results:
+			if r.err != nil || r.alive {
+				t.Fatalf("Stop() = %v with the plugin alive %v; want nil after the reap", r.err, r.alive)
+			}
+		case <-time.After(guard):
+			t.Fatal("Stop did not return")
+		}
+	}
+	if got := strings.Count(h.log.String(), "plugin stopping"); got != 1 {
+		t.Fatalf("the stop sequence ran %d times, want 1", got)
 	}
 }

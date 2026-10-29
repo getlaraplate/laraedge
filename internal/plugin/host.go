@@ -73,6 +73,7 @@ var (
 	errMemory       = errors.New("the plugin used more memory than max_memory")
 	errNotServing   = errors.New("the plugin health check did not answer SERVING")
 	errInfoMismatch = errors.New("the plugin Info does not match plugin.json")
+	errStopped      = errors.New("the plugin host is stopped")
 	// errMemoryUnsupported is returned by processMemory where memory cannot be read.
 	errMemoryUnsupported = errors.New("reading the memory of a process is not supported on this platform")
 )
@@ -123,8 +124,17 @@ type Host struct {
 	lastError  string
 	binarySum  string
 	started    bool
-	cancel     context.CancelFunc
-	done       chan struct{}
+	// cancelStart cancels the launch of a Start in flight; startDone is
+	// closed when that Start returns.
+	cancelStart context.CancelFunc
+	startDone   chan struct{}
+	// cancel ends the supervision; done is closed when it has ended.
+	cancel context.CancelFunc
+	done   chan struct{}
+	// stopping is closed when the one Stop that does the work has finished,
+	// with stopErr as its result.
+	stopping chan struct{}
+	stopErr  error
 }
 
 // running is one launched plugin process and its connection.
@@ -168,43 +178,50 @@ func NewHost(spec Spec, opts HostOptions) *Host {
 
 // Start launches the plugin once and, when it is up, supervises it until
 // Stop. An error means the plugin could not be started (a document start
-// failure); nothing keeps running then.
+// failure); nothing keeps running then. A Stop during Start cancels the
+// launch and waits for Start; Start after Stop is refused.
 func (h *Host) Start(ctx context.Context) error {
 	h.mu.Lock()
+	if h.stopping != nil {
+		h.mu.Unlock()
+
+		return errStopped
+	}
 	if h.started {
 		h.mu.Unlock()
 
 		return errors.New("plugin host already started")
 	}
+	launchCtx, cancelLaunch := context.WithCancel(ctx)
+	startDone := make(chan struct{})
 	h.started = true
 	h.state = StateStarting
+	h.cancelStart, h.startDone = cancelLaunch, startDone
 	h.mu.Unlock()
+	defer close(startDone)
+	defer cancelLaunch()
 
-	run, err := h.launch(ctx)
+	run, err := h.launch(launchCtx)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.stopping != nil {
+		// Stop waits for this Start and then stops run in its sequence.
+		h.run = run
+
+		return errStopped
+	}
 	if err != nil {
-		h.mu.Lock()
-		if h.state != StateStopped {
-			h.state = StateDown
-		}
+		h.state = StateDown
 		h.lastError = err.Error()
-		h.mu.Unlock()
 
 		return err
 	}
-
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	h.mu.Lock()
-	if h.state == StateStopped {
-		h.mu.Unlock()
-		cancel()
-		h.teardown(run)
-
-		return errors.New("the plugin host was stopped during the start")
-	}
 	h.cancel, h.done = cancel, done
-	h.mu.Unlock()
-	h.up(run)
+	h.upLocked(run)
 	go h.supervise(loopCtx, run, done)
 
 	return nil
@@ -255,18 +272,33 @@ func (h *Host) Status() Status {
 
 // Stop ends the supervision and stops the process: Shutdown with a 5 s
 // deadline, then SIGTERM, then kill 5 s later (on Windows kill right after
-// the deadline). When ctx ends first the process is killed at once and
-// ctx.Err() is returned. Stop is idempotent.
+// the deadline), and removes the socket directory. When ctx ends first the
+// process is killed at once and ctx.Err() is returned. Exactly one call does
+// the work; every other call waits for it and returns its result.
 func (h *Host) Stop(ctx context.Context) error {
 	h.mu.Lock()
-	if h.state == StateStopped {
+	if stopping := h.stopping; stopping != nil {
 		h.mu.Unlock()
+		<-stopping
 
-		return nil
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		return h.stopErr
 	}
-	cancel, done := h.cancel, h.done
+	stopping := make(chan struct{})
+	h.stopping = stopping
+	cancelStart, startDone := h.cancelStart, h.startDone
 	h.mu.Unlock()
 
+	if cancelStart != nil {
+		cancelStart()
+		<-startDone
+	}
+
+	h.mu.Lock()
+	cancel, done, started := h.cancel, h.done, h.started
+	h.mu.Unlock()
 	if cancel != nil {
 		cancel()
 		<-done
@@ -281,12 +313,18 @@ func (h *Host) Stop(ctx context.Context) error {
 		h.shutdown(ctx, run)
 	}
 	h.limiter.report(true)
+	if started {
+		_ = os.RemoveAll(h.socketDir)
+	}
 
 	h.mu.Lock()
 	h.state = StateStopped
+	h.stopErr = ctx.Err()
+	err := h.stopErr
 	h.mu.Unlock()
+	close(stopping)
 
-	return ctx.Err()
+	return err
 }
 
 // supervise watches the running plugin and restarts it until ctx ends.
@@ -375,6 +413,7 @@ func (h *Host) watch(ctx context.Context, run *running) (string, error) {
 				}
 			} else {
 				failures = 0
+				h.log.Debug("plugin health check passed")
 			}
 			health = h.clk.NewTimer(healthEvery)
 		case <-memoryC:
@@ -389,6 +428,8 @@ func (h *Host) watch(ctx context.Context, run *running) (string, error) {
 				h.log.Warn("plugin memory above max_memory", "memory_bytes", used)
 
 				return ReasonMemory, errMemory
+			case err == nil:
+				h.log.Debug("plugin memory checked", "memory_bytes", used)
 			}
 			memory = h.clk.NewTimer(memoryEvery)
 			memoryC = memory.C()
@@ -561,6 +602,10 @@ func (h *Host) up(run *running) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	h.upLocked(run)
+}
+
+func (h *Host) upLocked(run *running) {
 	h.run = run
 	h.state = StateUp
 	h.binarySum = run.binarySum

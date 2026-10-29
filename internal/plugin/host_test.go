@@ -334,6 +334,55 @@ func TestHostStartsAndAnswersHealth(t *testing.T) {
 	if log := h.log.String(); strings.Contains(log, "SIGTERM") || strings.Contains(log, "killing") {
 		t.Fatalf("a plugin honouring Shutdown got SIGTERM or kill:\n%s", log)
 	}
+	if _, err := os.Stat(socketDir); !os.IsNotExist(err) {
+		t.Fatalf("socket directory after Stop: %v, want it removed", err)
+	}
+}
+
+func TestHostStartAfterStopIsRefused(t *testing.T) {
+	h := newHarness(t, newSpec(t, `{"env_file":"env.txt"}`))
+	if err := h.host.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() = %v", err)
+	}
+
+	err := h.host.Start(context.Background())
+	if err == nil || err.Error() != "the plugin host is stopped" {
+		t.Fatalf("Start() after Stop = %v, want the host is stopped", err)
+	}
+	if status := h.host.Status(); status.State != plugin.StateStopped || status.Pid != 0 {
+		t.Fatalf("Status() = %+v, want stopped without a process", status)
+	}
+	if _, err := os.Stat(filepath.Join(h.spec.Dir, "env.txt")); !os.IsNotExist(err) {
+		t.Fatalf("the plugin ran after Stop (env file: %v)", err)
+	}
+}
+
+func TestHostChangesKeepsOnlyTheLatestGeneration(t *testing.T) {
+	h := newHarness(t, newSpec(t, ""))
+	h.start()
+
+	h.kill()
+	h.waitRestarts(1)
+	h.expectBackoff(time.Second)
+	h.waitUp()
+	h.kill()
+	h.waitRestarts(2)
+	h.expectBackoff(2 * time.Second)
+	h.waitUp()
+
+	select {
+	case got := <-h.host.Changes():
+		if got != 3 {
+			t.Fatalf("Changes() delivered %d, want the latest generation 3", got)
+		}
+	default:
+		t.Fatal("Changes() delivered nothing")
+	}
+	select {
+	case got := <-h.host.Changes():
+		t.Fatalf("Changes() delivered a second generation %d", got)
+	default:
+	}
 }
 
 func TestHostStartRefusals(t *testing.T) {
@@ -500,6 +549,7 @@ func TestHostStderrFloodIsRateLimited(t *testing.T) {
 }
 
 func TestHostEnvironmentIsMinimal(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("TZ", "UTC")
 	t.Setenv("LARAPLATE_EDGE_TEST_SECRET", "not for plugins")
 
@@ -511,9 +561,14 @@ func TestHostEnvironmentIsMinimal(t *testing.T) {
 		t.Fatal(err)
 	}
 	var keys []string
+	values := map[string]string{}
 	for line := range strings.Lines(string(data)) {
-		key, _, _ := strings.Cut(strings.TrimSuffix(line, "\n"), "=")
+		key, value, _ := strings.Cut(strings.TrimSuffix(line, "\n"), "=")
 		keys = append(keys, key)
+		values[key] = value
+	}
+	if values["PATH"] != "/usr/bin:/bin" || values["TZ"] != "UTC" {
+		t.Fatalf("PATH, TZ = %q, %q; want the agent's values", values["PATH"], values["TZ"])
 	}
 	slices.Sort(keys)
 
