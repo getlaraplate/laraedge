@@ -91,3 +91,29 @@ func TestTrustAnchor(t *testing.T) {
 		})
 	}
 }
+
+func TestTrustAnchorExecutesTheResolvedPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks are not available")
+	}
+	fx := newFixture(t, testManifest)
+	pluginsDir := filepath.Join(fx.dir, "plugins")
+	link := filepath.Join(pluginsDir, "current")
+	if err := os.Symlink(filepath.Join(pluginsDir, "demo"), link); err != nil {
+		t.Skip("symlinks are not available")
+	}
+	realBinary, err := filepath.EvalSymlinks(filepath.Join(pluginsDir, "demo", "demo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	doc := fx.document(t, docOptions{path: "current/demo"})
+	specs, msgs := plugin.Resolve(doc, plugin.Paths{Provider: bootstrap.ProviderLaraplate, PluginsDir: pluginsDir})
+
+	if len(msgs) != 0 || len(specs) != 1 {
+		t.Fatalf("specs %d, messages %q, want one spec and none", len(specs), msgs)
+	}
+	if specs[0].Path != realBinary {
+		t.Errorf("Spec.Path = %q, want the resolved path %q", specs[0].Path, realBinary)
+	}
+}

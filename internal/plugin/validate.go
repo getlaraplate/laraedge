@@ -82,23 +82,26 @@ func Resolve(doc config.Document, paths Paths) ([]Spec, []string) {
 }
 
 // contained reports whether binary lies inside dir once both have their
-// symlinks resolved. The error is the one of dir, or of binary when it does
-// not exist; the caller decides what a missing file means.
-func contained(dir, binary string) (bool, error) {
+// symlinks resolved, and returns the resolved binary path: the host executes
+// that path, so a symlink changed after the check cannot point it elsewhere.
+// The error is the one of dir, or of binary when it does not exist; the caller
+// decides what a missing file means.
+func contained(dir, binary string) (string, bool, error) {
 	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return false, fmt.Errorf("plugins_dir: %w", err)
+		return "", false, fmt.Errorf("plugins_dir: %w", err)
 	}
 	realBinary, err := filepath.EvalSymlinks(binary)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	rel, err := filepath.Rel(realDir, realBinary)
 	if err != nil {
-		return false, nil
+		return "", false, nil
 	}
+	inside := rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel), nil
+	return realBinary, inside, nil
 }
 
 // resolveOne hashes the configured Path, not <dir>/<manifest name>: the binary
@@ -120,12 +123,14 @@ func resolveOne(p config.Plugin, prefix string, paths Paths) (Spec, []string) {
 	binary = filepath.Clean(binary)
 
 	if paths.PluginsDir != "" {
-		ok, err := contained(paths.PluginsDir, binary)
+		real, ok, err := contained(paths.PluginsDir, binary)
 		switch {
 		case err != nil && strings.HasPrefix(err.Error(), "plugins_dir: "):
 			return Spec{}, []string{prefix + ".path: plugins_dir cannot be resolved"}
 		case err == nil && !ok:
 			return Spec{}, []string{prefix + ".path: must be inside plugins_dir"}
+		case err == nil:
+			binary = real
 		}
 		// A binary that does not exist is reported below, not masked here.
 	}

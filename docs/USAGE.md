@@ -130,7 +130,7 @@ The status token is resolved once at start; rotating it needs a restart.
   Otherwise every output resolves its token again and leaves `suspended_auth` at once (a
   `secret://file/` token is read again; a `secret://env/` one keeps the value the process started
   with), and the `file` provider rereads its document. Every other changed key (`agent_id`, `data_dir`, `status_listen`,
-  `status_token`, `config.*`) is logged at `WARN` and applies at the next restart.
+  `status_token`, `plugins_dir`, `config.*`) is logged at `WARN` and applies at the next restart.
 
 At start the agent creates `data_dir` if needed, applies the last valid configuration it kept (so it
 runs offline from its last document), then hands over to the provider.

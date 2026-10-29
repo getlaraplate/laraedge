@@ -314,6 +314,7 @@ func changedSettings(a, b bootstrap.File) []string {
 	check("data_dir", a.DataDir != b.DataDir)
 	check("status_listen", a.StatusListen != b.StatusListen)
 	check("status_token", a.StatusToken != b.StatusToken)
+	check("plugins_dir", a.PluginsDir != b.PluginsDir)
 	check("config.provider", a.Config.Provider != b.Config.Provider)
 	check("config.file", a.Config.File != b.Config.File)
 	check("config.laraplate.url", a.Config.Laraplate.URL != b.Config.Laraplate.URL)
