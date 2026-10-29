@@ -144,7 +144,7 @@ func countSamples(events []busEvent, quality string) int {
 
 // TestPlugin: the built agent runs the SDK's simulated-counter as a plugin
 // and delivers its data to the backend. Killing the plugin process gives a
-// bad sample, a death after the tolerance, a restart and data again. A new
+// bad sample, a restart and data again. A new
 // document pinning a wrong binary hash is not applied: the previous document
 // keeps running, its plugin delivering data, and the backend is told.
 func TestPlugin(t *testing.T) {
@@ -199,10 +199,11 @@ status_listen: 127.0.0.1:0
 	}
 
 	// Version 2 pins a wrong binary hash: it is not applied.
+	pidBefore, _, _ := pluginState(t, addr)
 	wrong := strings.Repeat("0", len(binarySum))
 	b.publish(2, counterDocument(t, 2, b.url(), dir, wrong, manifestSum))
 	b.waitFor(t, a, "version 2 not applied", func() bool {
-		return b.reported(2, "rolled_back") || b.reported(2, "rejected")
+		return b.reported(2, "rejected")
 	})
 	if b.reported(2, "applied") {
 		t.Errorf("version 2 was reported applied with a wrong hash")
@@ -210,16 +211,18 @@ status_listen: 127.0.0.1:0
 	if slices.ContainsFunc(b.reportErrors(2), func(e string) bool { return strings.Contains(e, wrong) }) {
 		t.Errorf("a report of version 2 holds the hash")
 	}
-	b.waitFor(t, a, "the previous plugin up again", func() bool {
-		newPid, st, _ := pluginState(t, addr)
-
-		return st == "up" && newPid > 0
-	})
+	if pidAfter, st, _ := pluginState(t, addr); st != "up" || pidAfter != pidBefore {
+		t.Errorf("plugin after the rejected document = %q pid %d, want up with the same pid %d (nothing stopped)", st, pidAfter, pidBefore)
+	}
 	before = countSamples(b.events(), "good")
 	b.waitFor(t, a, "good samples after the refused document", func() bool { return countSamples(b.events(), "good") >= before+5 })
 
+	lastPid, _, _ := pluginState(t, addr)
 	a.stop(t)
 
+	if err := syscall.Kill(lastPid, 0); err != syscall.ESRCH {
+		t.Errorf("kill(plugin pid, 0) after the stop = %v, want ESRCH (the plugin is gone)", err)
+	}
 	if _, err := os.Stat(filepath.Join(work, "data", "run", "plugins", pluginName)); err == nil {
 		t.Errorf("the plugin socket directory is still there after a clean stop")
 	}

@@ -721,7 +721,9 @@ A `secret://` value inside `connection` is not resolved by `config validate`: a 
 key that is a secret key (see "Secret fields") is dropped offline. The agent resolves the secrets when
 it configures the plugin at start, passes them in the configuration of that input only (never in the
 plugin's environment) and the plugin validates the resolved values then; a refused value shows as a
-config error at start, naming its path and never its value.
+config error at start, naming its path and never its value. A reference is resolved only under a secret key
+(see "Secret fields"); anywhere else the plugin receives the `secret://` text as it is and refuses it at
+start, which offline validation does not report.
 
 ### Starting, restarting and applying
 
