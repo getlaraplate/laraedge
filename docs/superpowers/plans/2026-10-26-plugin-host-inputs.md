@@ -1,12 +1,12 @@
 ---
-status: open
+status: closed
 created_on: 2026-10-26
 ---
 # Plugin host and plugin inputs. Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block.
 
-**Status:** Open. In progress (started 2026-10-29).
+**Status:** Closed (2026-10-29). Shipped; see "Delivery status" below.
 
 **Goal:** the agent runs plugins built on `laraedge-sdk`: it validates their configuration offline against their
 manifests, starts and supervises their processes (verified hashes, handshake, health, restart with backoff, memory
@@ -207,9 +207,77 @@ secrets, restart and limits), `docs/USAGE.md` (running plugins, logs, status and
 built-in conformance, troubleshooting: hash mismatch, handshake timeout, crash loop, memory limit), `README.md`, this
 plan, `docs/superpowers/plans/INDEX.md`.
 
-- [ ] **Step 1: End to end.** The built agent with the SDK's `simulated-counter` (built from the SDK module at v0.1.0)
+- [x] **Step 1: End to end.** The built agent with the SDK's `simulated-counter` (built from the SDK module at v0.1.0)
   delivers data to the fake backend; killing the plugin produces bad samples, restart and data again; a wrong hash in
   a new document rolls back to the previous one.
-- [ ] **Step 2: Docs.**
-- [ ] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, index; the
+- [x] **Step 2: Docs.**
+- [x] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, index; the
   stack spec status line; commit.
+
+## Delivery status (2026-10-29): shipped
+
+All seven tasks are built on branch `develop`, each reviewed (Task 7 inside the whole-branch review), then a
+whole-branch review and one fix wave. The agent runs input plugins built on `laraedge-sdk` v0.1.0 (Apache-2.0):
+`plugins` entries carry `manifest_sha256` (required) and `max_memory`; `plugin hash` prints both hashes; `config
+validate` and the supervisor resolve each plugin (H1 paths), verify binary and manifest hashes, check the manifest and
+validate every plugin input section against it, with dotted document paths and no values in any message. A `Host`
+supervises one process per plugin: hashes recomputed from the exact file immediately before every launch, minimal
+environment, socket directory `data_dir/run/plugins/<id>/` (removed on stop), handshake, canonical `Info` compare,
+health every 5 s, restart with backoff 1 s to 1 min, memory limit, stdout/stderr to the agent log with the H7
+limiter, and the stop sequence. The input adapter configures each instance with secrets resolved at that moment,
+subscribes, feeds the device lifecycle and health, and re-runs `Configure` and `Subscribe` after a plugin restart
+(H6). The supervisor starts only the plugins a document uses, applies by difference (H5), rolls back on failure,
+stops plugins after their inputs, and reports plugins in `/status` and in `laraplate_edge_plugin_up` and
+`laraplate_edge_plugin_restarts_total`. `probe` and `browse` work on plugin inputs; the agent binary named
+`laraedge-builtin-simulated` serves the `simulated` driver as a plugin and passes the SDK conformance suite, locally
+and in CI on Linux and Windows. The end-to-end test runs the SDK's `simulated-counter`. Commits from `1188525` to
+`e2416d3`, and the closing commit. The divergences from the plan, each with its reason (the controller rulings are
+summarised below):
+
+- **No `Options{RequireFiles}` (R4).** H2 makes a missing file a problem both offline and in the supervisor, so the
+  option changed nothing; `Resolve` has three arguments.
+- **Secret references outside secret keys (R5).** Offline validation also drops a manifest problem whose value is a
+  `secret://` reference, not only one under a secret key, so the Review Focus case is not reported offline. At run
+  time a reference is resolved only under a secret key; elsewhere the plugin refuses it at start.
+- **A wrong hash is rejected, not rolled back (R23).** The supervisor checks plugin files before applying anything, so
+  a document with a wrong hash is `rejected` and the running plugin keeps its pid; the end-to-end test asserts
+  exactly that.
+- **The kill scenario reaches no death in the end-to-end test.** The plugin restarts within the input's tolerance;
+  death after the tolerance is proven by the adapter's tests.
+- **Busy `Subscribe` retry (R18).** A `Subscribe` refused with `ALREADY_EXISTS` before any event is retried every
+  100 ms for up to 10 s (the SDK's stop timeout) without going down. It guards the window in which an old
+  `Subscribe` is still in flight; on an ordinary reconfigure the SDK's `Configure` already waits for the old stream.
+- **Start and Stop serialised; old host stopped before the new one (R12).** `Stop` removes the socket directory, so
+  the supervisor waits for the old host's `Stop` before starting a new host with the same id.
+- **API beyond the plan (R8).** `HostOptions.Rand`, `Status.RestartsByReason`, `Host.BinarySHA256`, `Host.Watch`
+  (one latest-wins channel per subscriber, beside `Changes`), `plugin.HashFile`, `Spec.SHA256` and
+  `Spec.ManifestSHA256`; `plugin.Browser` exists only when the manifest declares browse (R15).
+- **Restart counting (R9, R19, R20).** Each lost process and each failed start attempt counts one restart labelled by
+  its cause; `/status` shows the total, the metric the split; counters restart from zero when a new document
+  restarts the plugin.
+- **A replaced binary under an unchanged entry rejects every later document (R20).** The H5 hash branch is reachable
+  only together with an entry change.
+- **The committed built-in `plugin.json` says version `dev` (R22).** Operators generate theirs with
+  `laraedge-builtin-simulated --manifest` from the binary they install.
+- **`probe` and `browse` skip offline validation of plugin inputs** (the plugin's `Configure` checks) and use a fresh
+  temporary data directory; `browse --depth` counts from 1 and is passed to the plugin as `depth - 1`.
+- **Backend follow-up (R2).** The backend's fixtures carry plugin entries without `manifest_sha256`, which the agent now
+  refuses with `plugins.<i>.manifest_sha256: is required`. The MES module's test arrays and the agent configuration
+  editor must carry `manifest_sha256` before the backend publishes plugin documents.
+
+Left open, for decisions outside this plan:
+
+- **Local trust anchor for plugins.** With the `laraplate` provider the backend supplies `path` and both hashes, so a
+  compromised backend can make the agent run any absolute-path binary that completes the handshake. An allowed plugin
+  directory in the bootstrap, or hashes pinned locally, would close it.
+- **SDK v0.1.0 `acquire`** (`sdk/sdk.go:412`) does not check the parent context, so a late old `Subscribe` can take
+  an instance after a new `Configure` and its teardown stops the new configuration. The fix belongs in
+  `laraedge-sdk`; the busy retry above mitigates the symptom.
+- **Plugin output is logged as written.** A plugin that prints its configuration puts resolved secrets in the agent
+  log; the spec leaves this to the plugin author.
+- **`internal/supervisor/supervisor.go`** is about 1200 lines; the plugin part could move to `supervisor/plugins.go`
+  with no API change.
+- The Windows memory reader and kill-after-deadline are compiled and vetted but not run locally; the Windows CI
+  conformance step is to be confirmed on its first run.
+
+**Documented in:** `docs/CONFIGURATION.md`, `docs/USAGE.md` (and `README.md`, `examples/simulated-counter/`).
