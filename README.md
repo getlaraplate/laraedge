@@ -32,6 +32,12 @@ it, and reports it in `/status` and the metrics. See [Plugins in the configurati
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): the configuration document, the transforms, the buffer
   and the known limits of this build.
 
+## Download
+
+Every version tag publishes a [GitHub Release](https://github.com/getlaraplate/laraedge/releases) with the binary for
+Linux amd64, arm64 and armv7 (`.tar.gz`) and Windows amd64 (`.zip`), a `SHA256SUMS` file and the version's changelog.
+Versions `0.x` are pre-releases. Check an archive with `sha256sum -c SHA256SUMS --ignore-missing`.
+
 ## Build and run
 
 Requires Go 1.27 or newer. The agent is one static binary (no CGO).
