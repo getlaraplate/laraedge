@@ -353,11 +353,10 @@ type journal struct {
 // the last of them (decision H5). When a component fails to start, or an
 // input does not start within the start timeout, what this Apply started is
 // stopped and what it stopped is started again: ResultRolledBack with the
-// errors. When ctx is cancelled
-// during a failed apply, the rollback still runs but there is no outcome:
-// Apply returns the context error. On success the document is saved as the
-// last valid one; the error is then only for that save failing, with
-// ResultApplied.
+// errors. When ctx is cancelled during a failed apply, the rollback still
+// runs but there is no outcome: Apply returns the context error. On success
+// the document is saved as the last valid one; the error is then only for
+// that save failing, with ResultApplied.
 func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, error) {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
@@ -1140,10 +1139,9 @@ func closeInputs(built map[int]input.Input) {
 // Close stops every input, then every plugin, all at once so that the stop
 // deadline of spec section 6 bounds them together, then every output,
 // syncing and closing the buffers, and waits for every goroutine of the
-// supervisor. The records held
-// for an output left failed by a rollback are discarded at shutdown, once the
-// inputs are stopped, with a warning per priority giving the count and the ts
-// range. Later calls return nil.
+// supervisor. The records held for an output left failed by a rollback are
+// discarded at shutdown, once the inputs are stopped, with a warning per
+// priority giving the count and the ts range. Later calls return nil.
 func (s *Supervisor) Close() error {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()

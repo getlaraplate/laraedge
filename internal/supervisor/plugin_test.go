@@ -309,7 +309,7 @@ func TestPluginStartFailureRollsBack(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f, _ := newPluginFixture(t)
+			f, dataDir := newPluginFixture(t)
 			demo := installPlugin(t, "demo", tc.behaviour)
 			doc1 := f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}})
 			f.mustApply(doc1)
@@ -326,6 +326,9 @@ func TestPluginStartFailureRollsBack(t *testing.T) {
 			}
 			if len(st.Plugins) != 0 {
 				t.Fatalf("Status().Plugins = %+v, want none after the rollback", st.Plugins)
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "run", "plugins", "demo")); !os.IsNotExist(err) {
+				t.Fatalf("socket directory after the failed start: %v, want it removed", err)
 			}
 		})
 	}
@@ -497,4 +500,41 @@ func TestRollbackStartsTheReplacedPluginAgain(t *testing.T) {
 	if got := demo.traceCount(t, "configure p1"); got != 2 {
 		t.Errorf("p1 configured %d times, want 2 (start, rollback)", got)
 	}
+}
+
+// TestRollbackAfterAFailedReplacementPlugin: a changed entry whose new
+// binary does not start rolls the document back; the previous plugin runs
+// again from its previous entry, its inputs bound to the restored host.
+func TestRollbackAfterAFailedReplacementPlugin(t *testing.T) {
+	f, _ := newPluginFixture(t)
+	demo := installPlugin(t, "demo", sampleScript)
+	broken := installPlugin(t, "demo", `{"crash_at_start":true}`)
+	base := func(version int64) config.Document { return f.document(version, nil, []outSpec{{id: "main"}}) }
+
+	f.mustApply(f.pluginDocument(base(1), []any{demo.entry(nil)}, pluginInput("p1", "demo", "d1", 0, "s1")))
+	pid := f.runningPluginPid("demo")
+	f.be.waitDetail(t, "main", "d1/s1=42 good", 1)
+
+	out := f.apply(f.pluginDocument(base(2), []any{broken.entry(nil)}, pluginInput("p1", "demo", "d1", 0, "s1")))
+
+	if out.Result != ResultRolledBack || len(out.Errors) != 1 || !strings.HasPrefix(out.Errors[0], "plugins.0: ") {
+		t.Fatalf("Apply() = %+v, want rolled_back with a plugins.0 error", out)
+	}
+	if got := f.runningPluginPid("demo"); got == pid {
+		t.Fatalf("plugin pid = %d, want the previous plugin started again", got)
+	}
+	f.sup.mu.Lock()
+	restored := f.sup.plugins["demo"]
+	f.sup.mu.Unlock()
+	if restored.spec.Path != demo.binary {
+		t.Fatalf("restored plugin runs %s, want the previous binary %s", restored.spec.Path, demo.binary)
+	}
+	st := f.sup.Status()
+	if st.Version != 1 || len(st.Inputs) != 1 || st.Inputs[0].ID != "p1" || st.Inputs[0].State != InputRunning {
+		t.Fatalf("Status() = %+v, want version 1 with p1 running", st)
+	}
+	if got := demo.traceCount(t, "configure p1"); got != 2 {
+		t.Errorf("p1 configured %d times on the previous plugin, want 2 (start, rollback)", got)
+	}
+	f.be.waitDetail(t, "main", "d1/s1=42 good", 2)
 }
