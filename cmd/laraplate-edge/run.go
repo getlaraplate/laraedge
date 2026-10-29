@@ -101,12 +101,14 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 	store := config.NewStore(boot.DataDir)
 	resolver := secrets.NewResolver(secrets.WithLookupEnv(deps.lookupEnv))
 	sup, err := supervisor.New(supervisor.Config{
-		DataDir:  boot.DataDir,
-		Store:    store,
-		Drivers:  inputDrivers(boot, resolver, log, deps.drivers),
-		Resolver: resolver,
-		Clock:    deps.clock,
-		Logger:   log,
+		DataDir:   boot.DataDir,
+		Store:     store,
+		Drivers:   inputDrivers(boot, resolver, log, deps.drivers),
+		Resolver:  resolver,
+		ConfigDir: configBaseDir(boot),
+		Provider:  boot.Config.Provider,
+		Clock:     deps.clock,
+		Logger:    log,
 	})
 	if err != nil {
 		return err

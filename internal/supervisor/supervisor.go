@@ -25,6 +25,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/output"
 	"github.com/getlaraplate/laraedge/internal/pipeline"
+	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
@@ -74,6 +75,12 @@ type Config struct {
 	Drivers map[string]input.Factory
 	// Resolver resolves the output tokens.
 	Resolver output.SecretResolver
+	// ConfigDir is the directory of the configuration file, against which
+	// relative plugin paths resolve; "" for a provider without a file.
+	ConfigDir string
+	// Provider is the bootstrap's provider name; with the laraplate provider
+	// a plugin path must be absolute.
+	Provider string
 	// Clock drives every timer; nil means clock.Real().
 	Clock clock.Clock
 	// Logger receives the logs; nil means slog.Default().
@@ -90,15 +97,17 @@ type Config struct {
 // need. Apply, Close, Status, ReloadCredentials and AppliedVersion are safe
 // for concurrent use; Apply calls are serialized.
 type Supervisor struct {
-	dataDir  string
-	store    *config.Store
-	drivers  map[string]input.Factory
-	resolver output.SecretResolver
-	clk      clock.Clock
-	log      *slog.Logger
-	timeout  time.Duration
-	client   *http.Client
-	router   *pipeline.Router
+	dataDir   string
+	store     *config.Store
+	drivers   map[string]input.Factory
+	resolver  output.SecretResolver
+	configDir string
+	provider  string
+	clk       clock.Clock
+	log       *slog.Logger
+	timeout   time.Duration
+	client    *http.Client
+	router    *pipeline.Router
 
 	// ctx is the lifetime of every component; wg counts every goroutine the
 	// supervisor starts.
@@ -238,6 +247,8 @@ func New(cfg Config) (*Supervisor, error) {
 		store:     cfg.Store,
 		drivers:   cfg.Drivers,
 		resolver:  cfg.Resolver,
+		configDir: cfg.ConfigDir,
+		provider:  cfg.Provider,
 		clk:       cfg.Clock,
 		log:       cfg.Logger,
 		timeout:   cfg.StartTimeout,
@@ -464,6 +475,11 @@ func (s *Supervisor) check(doc config.Document) []string {
 	// Decision P1: config cannot type-check the chains, the supervisor does
 	// before anything is built.
 	msgs = append(msgs, transform.CheckDocument(doc)...)
+
+	// Plugin entries and plugin inputs: files, hashes, manifests (H2, H3).
+	specs, pluginMsgs := plugin.Resolve(doc, s.configDir, s.provider)
+	msgs = append(msgs, pluginMsgs...)
+	msgs = append(msgs, plugin.Validate(doc, specs)...)
 
 	return msgs
 }

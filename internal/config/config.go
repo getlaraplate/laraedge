@@ -826,7 +826,8 @@ func (b *builder) uniqueSignals(doc Document) {
 // The schema's connection patternProperties states the same rule.
 var secretKeySuffixes = []string{"password", "token", "secret", "api_key"}
 
-func isSecretKey(key string) bool {
+// IsSecretKey reports whether key names a secret reference (see secretKeySuffixes).
+func IsSecretKey(key string) bool {
 	lower := strings.ToLower(key)
 	return slices.ContainsFunc(secretKeySuffixes, func(suffix string) bool { return strings.HasSuffix(lower, suffix) })
 }
@@ -842,7 +843,7 @@ func walkSecrets(v any, p path, fn func(path, string)) {
 		}
 		slices.Sort(keys)
 		for _, k := range keys {
-			if s, ok := x[k].(string); ok && isSecretKey(k) {
+			if s, ok := x[k].(string); ok && IsSecretKey(k) {
 				fn(p.key(k), s)
 				continue
 			}

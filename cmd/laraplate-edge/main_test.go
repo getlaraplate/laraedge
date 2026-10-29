@@ -366,3 +366,53 @@ func TestRunLogsToStdout(t *testing.T) {
 		}
 	}
 }
+
+const validateManifest = `{"kinds":{"input":{"address_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string"},"browse":false,"connection_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"},"read_modes":["poll"],"types":["int16"]}},"name":"demo","protocol_versions":["v1"],"version":"0.1.0"}`
+
+func TestConfigValidateChecksPlugins(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "demo")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(pluginDir, "plugin.json"), validateManifest)
+	writeFile(t, filepath.Join(pluginDir, "demo"), "not really a binary")
+
+	docText := func(sha string) string {
+		return `{"schema":"laraplate-edge-config/1","version":1,
+"plugins":[{"id":"demo","path":"plugins/demo/demo","sha256":"` + sha + `","manifest_sha256":"` + hashHex([]byte(validateManifest)) + `"}],
+"outputs":[{"id":"o0","type":"laraplate-http","url":"https://example.com","token":"secret://env/T","route":{"include":["*"]}}],
+"inputs":[{"id":"i0","driver":"plugin:demo","devices":[{"device":"d","points":[{"signal":"s","type":"int16","address":"x","read":{"poll":"1s"}}]}]}]}`
+	}
+	doc := filepath.Join(dir, "config.json")
+
+	// A wrong binary hash is reported, relative to the config file's directory.
+	writeFile(t, doc, docText(strings.Repeat("0", 64)))
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitFailure {
+		t.Fatalf("exit code = %d, want 1 (stderr: %q)", code, stderr.String())
+	}
+	if want := doc + ": plugins[0].sha256: does not match the plugin binary"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+
+	// The right hash passes.
+	writeFile(t, doc, docText(hashHex([]byte("not really a binary"))))
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr.String())
+	}
+
+	// A missing manifest is a problem.
+	if err := os.Remove(filepath.Join(pluginDir, "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitFailure {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if want := "plugins[0]: plugin.json not found next to the binary"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}

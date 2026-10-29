@@ -16,6 +16,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/logging"
+	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/secrets"
 	"github.com/getlaraplate/laraedge/internal/transform"
 	"github.com/getlaraplate/laraedge/internal/version"
@@ -179,6 +180,7 @@ func runConfigValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(msgs) == 0 {
 		msgs = append(checkDocument(doc), checkInputs(doc, file)...)
+		msgs = append(msgs, checkPlugins(doc, file)...)
 	}
 	if len(msgs) > 0 {
 		printMessages(stderr, file, msgs)
@@ -250,6 +252,16 @@ func checkInputs(doc config.Document, file string) []string {
 	}
 
 	return msgs
+}
+
+// checkPlugins resolves the plugin entries of doc against the files next to
+// the configuration file (file provider rules, decision H1) and validates the
+// plugin inputs against their manifests.
+func checkPlugins(doc config.Document, file string) []string {
+	boot := bootstrap.File{Config: bootstrap.Config{Provider: bootstrap.ProviderFile, File: file}}
+	specs, msgs := plugin.Resolve(doc, configBaseDir(boot), boot.Config.Provider)
+
+	return append(msgs, plugin.Validate(doc, specs)...)
 }
 
 // printMessages writes each message on its own line, prefixed by the file.
