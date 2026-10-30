@@ -58,7 +58,7 @@ jobs:
           suffix=""
           if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
           go build -o "$dir/laraedge-builtin-simulated$suffix" ./cmd/laraplate-edge
-          go run github.com/getlaraplate/laraedge-sdk/cmd/laraedge-conformance@v0.1.0 "$dir"
+          go run github.com/getlaraplate/laraedge-sdk/cmd/laraedge-conformance@v0.1.1 "$dir"
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 

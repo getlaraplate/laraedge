@@ -89,6 +89,8 @@ type Document struct {
 	Outputs []Output
 	// Plugins are external driver and output processes.
 	Plugins []Plugin
+	// Processors are plugin components deriving signals from observed devices.
+	Processors []Processor
 	// Raw is the whole document as compact canonical JSON, defaults applied.
 	Raw json.RawMessage
 }
@@ -226,6 +228,9 @@ type Output struct {
 	Batch Batch
 	// Buffer bounds the output's disk buffer.
 	Buffer Buffer
+	// Config holds the plugin settings as canonical JSON, for plugin:<id>
+	// types only; nil when absent.
+	Config json.RawMessage
 	// Raw is the output as compact canonical JSON, defaults applied.
 	Raw json.RawMessage
 }
@@ -291,6 +296,46 @@ type Plugin struct {
 	MaxMemory int64
 	// Raw is the plugin as compact canonical JSON.
 	Raw json.RawMessage
+}
+
+// Processor is one processor of the document: a plugin component that
+// observes devices of the inputs and derives signals on devices of its own.
+type Processor struct {
+	// ID is unique among the processors.
+	ID string
+	// Plugin is the id of the plugin providing the processor.
+	Plugin string
+	// Observe lists the device names of the inputs it receives.
+	Observe []string
+	// Devices are the derived devices.
+	Devices []DerivedDevice
+	// DeathTolerance is how long the processor may be down before its
+	// derived devices are declared dead.
+	DeathTolerance time.Duration
+	// Config holds the plugin settings as canonical JSON, {} when absent.
+	Config json.RawMessage
+	// Raw is the processor as compact canonical JSON, defaults applied.
+	Raw json.RawMessage
+}
+
+// DerivedDevice is a device a processor derives.
+type DerivedDevice struct {
+	// Device is the device name used in messages.
+	Device string
+	// Signals are the declared derived signals.
+	Signals []DerivedSignal
+}
+
+// DerivedSignal is a signal a processor derives.
+type DerivedSignal struct {
+	// Signal is the signal name, unique per device.
+	Signal string
+	// Type is int, float, bool or string.
+	Type string
+	// Priority is critical or bulk, critical when not set.
+	Priority string
+	// Unit is the engineering unit, empty when not set.
+	Unit string
 }
 
 // Parse reads a configuration document, JSON or YAML (a document whose first
@@ -398,6 +443,16 @@ func applyDefaults(root map[string]any) {
 			}
 		}
 	}
+	for _, pr := range list(root["processors"]) {
+		processor := object(pr)
+		setDefault(processor, "death_tolerance", defaultDeathToleranceText)
+		setDefault(processor, "config", map[string]any{})
+		for _, dev := range list(processor["devices"]) {
+			for _, sig := range list(object(dev)["signals"]) {
+				setDefault(object(sig), "priority", defaultPriority)
+			}
+		}
+	}
 	for _, out := range list(root["outputs"]) {
 		output := object(out)
 		setDefault(ensureObject(output, "route"), "include", []any{"*"})
@@ -447,12 +502,30 @@ type wireInput struct {
 	} `json:"devices"`
 }
 
+type wireProcessor struct {
+	ID             string          `json:"id"`
+	Plugin         string          `json:"plugin"`
+	Observe        []string        `json:"observe"`
+	DeathTolerance string          `json:"death_tolerance"`
+	Config         json.RawMessage `json:"config"`
+	Devices        []struct {
+		Device  string `json:"device"`
+		Signals []struct {
+			Signal   string `json:"signal"`
+			Type     string `json:"type"`
+			Priority string `json:"priority"`
+			Unit     string `json:"unit"`
+		} `json:"signals"`
+	} `json:"devices"`
+}
+
 type wireOutput struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	URL   string `json:"url"`
-	Token string `json:"token"`
-	Route struct {
+	ID     string          `json:"id"`
+	Type   string          `json:"type"`
+	URL    string          `json:"url"`
+	Token  string          `json:"token"`
+	Config json.RawMessage `json:"config"`
+	Route  struct {
 		Include []string `json:"include"`
 	} `json:"route"`
 	Batch struct {
@@ -538,7 +611,16 @@ func build(root map[string]any, lenient bool) (Document, []string, error) {
 		doc.Plugins = append(doc.Plugins, Plugin{ID: w.ID, Path: w.Path, SHA256: w.SHA256, ManifestSHA256: w.ManifestSHA256, MaxMemory: maxMemory, Raw: raw})
 	}
 
+	for i, v := range list(root["processors"]) {
+		pr, err := b.processor(path{"processors"}.index(i), v)
+		if err != nil {
+			return Document{}, nil, err
+		}
+		doc.Processors = append(doc.Processors, pr)
+	}
+
 	b.uniqueIDs(doc)
+	b.processorRules(doc)
 	b.uniqueSignals(doc)
 	return doc, b.msgs, nil
 }
@@ -618,8 +700,10 @@ func (b *builder) output(p path, v any) (Output, error) {
 			MinFreePercent: w.Buffer.MinFreePercent,
 			FsyncInterval:  b.duration(p.key("buffer").key("fsync_interval"), w.Buffer.FsyncInterval),
 		},
-		Raw: raw,
+		Config: w.Config,
+		Raw:    raw,
 	}
+	b.checkConfigSecrets(p.key("config"), object(v)["config"])
 	if out.Batch.MaxBody > MaxBody {
 		b.add(p.key("batch").key("max_body"), "must not exceed "+defaultMaxBodyText+" (the backend default of mes.machine.max_body_kb)")
 	}
@@ -642,6 +726,81 @@ func (b *builder) output(p path, v any) (Output, error) {
 		}
 	}
 	return out, nil
+}
+
+func (b *builder) processor(p path, v any) (Processor, error) {
+	var w wireProcessor
+	raw, err := b.component(v, &w)
+	if err != nil {
+		return Processor{}, err
+	}
+	pr := Processor{
+		ID:             w.ID,
+		Plugin:         w.Plugin,
+		Observe:        w.Observe,
+		DeathTolerance: b.duration(p.key("death_tolerance"), w.DeathTolerance),
+		Config:         w.Config,
+		Raw:            raw,
+	}
+	for _, wd := range w.Devices {
+		dev := DerivedDevice{Device: wd.Device}
+		for _, ws := range wd.Signals {
+			dev.Signals = append(dev.Signals, DerivedSignal{Signal: ws.Signal, Type: ws.Type, Priority: ws.Priority, Unit: ws.Unit})
+		}
+		pr.Devices = append(pr.Devices, dev)
+	}
+	b.checkConfigSecrets(p.key("config"), object(v)["config"])
+	return pr, nil
+}
+
+// checkConfigSecrets refuses, at its path, a value under a secret key of a
+// plugin config object that is not a usable secret:// reference.
+func (b *builder) checkConfigSecrets(p path, config any) {
+	walkSecrets(config, p, func(rp path, ref string) {
+		if err := secrets.Check(ref); err != nil && !errors.Is(err, secrets.ErrUnavailable) {
+			b.add(rp, secretMessage)
+		}
+	})
+}
+
+// processorRules refuses observed devices no input has, and derived devices
+// or signals that clash.
+func (b *builder) processorRules(doc Document) {
+	real := map[string]bool{}
+	for _, in := range doc.Inputs {
+		for _, dev := range in.Devices {
+			real[dev.Device] = true
+		}
+	}
+	derived := map[string]path{}
+	for i, pr := range doc.Processors {
+		pp := path{"processors"}.index(i)
+		for k, name := range pr.Observe {
+			if name != "" && !real[name] {
+				b.add(pp.key("observe").index(k), "is not a device of any input")
+			}
+		}
+		for d, dev := range pr.Devices {
+			dp := pp.key("devices").index(d).key("device")
+			switch q, dup := derived[dev.Device]; {
+			case dev.Device == "":
+			case real[dev.Device]:
+				b.add(dp, "is the name of a device of an input")
+			case dup:
+				b.add(dp, "duplicate of "+q.String())
+			default:
+				derived[dev.Device] = dp
+			}
+			seen := map[string]int{}
+			for s, sig := range dev.Signals {
+				if j, dup := seen[sig.Signal]; dup && sig.Signal != "" {
+					b.add(pp.key("devices").index(d).key("signals").index(s).key("signal"), "duplicate of "+pp.key("devices").index(d).key("signals").index(j).key("signal").String())
+					continue
+				}
+				seen[sig.Signal] = s
+			}
+		}
+	}
 }
 
 // transforms converts a chain of single-key objects.
@@ -791,6 +950,7 @@ func (b *builder) uniqueIDs(doc Document) {
 	check("inputs", ids(len(doc.Inputs), func(i int) string { return doc.Inputs[i].ID }))
 	check("outputs", ids(len(doc.Outputs), func(i int) string { return doc.Outputs[i].ID }))
 	check("plugins", ids(len(doc.Plugins), func(i int) string { return doc.Plugins[i].ID }))
+	check("processors", ids(len(doc.Processors), func(i int) string { return doc.Processors[i].ID }))
 }
 
 // uniqueSignals refuses a (device, signal) pair defined twice, by points or

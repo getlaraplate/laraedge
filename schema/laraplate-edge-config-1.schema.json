@@ -16,7 +16,8 @@
     },
     "inputs": { "type": "array", "items": { "$ref": "#/$defs/input" } },
     "outputs": { "type": "array", "items": { "$ref": "#/$defs/output" } },
-    "plugins": { "type": "array", "items": { "$ref": "#/$defs/plugin" } }
+    "plugins": { "type": "array", "items": { "$ref": "#/$defs/plugin" } },
+    "processors": { "type": "array", "items": { "$ref": "#/$defs/processor" } }
   },
   "$defs": {
     "id": {
@@ -343,6 +344,10 @@
         "type": { "$ref": "#/$defs/outputType" },
         "url": { "description": "Where the output sends; its form depends on the output type.", "type": "string", "minLength": 1 },
         "token": { "$ref": "#/$defs/secretRef" },
+        "config": {
+          "description": "Plugin-defined settings, for plugin:<id> output types only. Any key equal to or ending with password, token, secret or api_key must hold a secret reference.",
+          "$ref": "#/$defs/connection"
+        },
         "route": {
           "description": "Which samples the output receives: patterns matched against device/signal; * alone matches everything and a pattern without / means device/*.",
           "type": "object",
@@ -398,10 +403,62 @@
           "default": {}
         }
       },
-      "if": { "properties": { "type": { "const": "laraplate-http" } }, "required": ["type"] },
-      "then": {
-        "required": ["url", "token"],
-        "properties": { "url": { "$ref": "#/$defs/httpURL" } }
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "laraplate-http" } }, "required": ["type"] },
+          "then": {
+            "required": ["url", "token"],
+            "properties": { "url": { "$ref": "#/$defs/httpURL" } }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "pattern": "^plugin:" } }, "required": ["type"] },
+          "else": { "properties": { "config": false } }
+        }
+      ]
+    },
+    "processor": {
+      "description": "A plugin processor: observes copies of the samples and device events of the devices it names and derives signals on devices of its own. It never changes, drops or delays machine data.",
+      "type": "object",
+      "required": ["id", "plugin", "observe", "devices"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "plugin": { "description": "The id of a plugin of the plugins list.", "$ref": "#/$defs/id" },
+        "observe": {
+          "description": "Device names of the inputs the processor receives.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/deviceName" }
+        },
+        "devices": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/derivedDevice" } },
+        "death_tolerance": {
+          "description": "How long the processor may be down before its derived devices are reported dead.",
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "config": { "$ref": "#/$defs/connection" }
+      }
+    },
+    "derivedDevice": {
+      "description": "A device the processor derives. Its name is not the name of a real device nor of another processor's derived device.",
+      "type": "object",
+      "required": ["device", "signals"],
+      "additionalProperties": false,
+      "properties": {
+        "device": { "$ref": "#/$defs/deviceName" },
+        "signals": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/derivedSignal" } }
+      }
+    },
+    "derivedSignal": {
+      "type": "object",
+      "required": ["signal", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "signal": { "$ref": "#/$defs/signalName" },
+        "type": { "enum": ["int", "float", "bool", "string"] },
+        "priority": { "$ref": "#/$defs/priority" },
+        "unit": { "type": "string", "maxLength": 16 }
       }
     },
     "plugin": {

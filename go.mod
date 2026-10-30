@@ -5,7 +5,7 @@ go 1.27
 toolchain go1.27.2
 
 require (
-	github.com/getlaraplate/laraedge-sdk v0.1.0
+	github.com/getlaraplate/laraedge-sdk v0.1.1
 	github.com/gopcua/opcua v0.9.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/simonvetter/modbus v1.6.4
