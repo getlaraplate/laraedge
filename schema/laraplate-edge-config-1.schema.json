@@ -413,6 +413,7 @@
         },
         {
           "if": { "properties": { "type": { "pattern": "^plugin:" } }, "required": ["type"] },
+          "then": { "properties": { "url": false, "token": false } },
           "else": { "properties": { "config": false } }
         }
       ]

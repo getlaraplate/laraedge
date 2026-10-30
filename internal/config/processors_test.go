@@ -79,6 +79,8 @@ func TestParseProcessorRefusals(t *testing.T) {
 		{"plain secret in processor config", edit(t, procBase, "config: {mode: fast}", "config: {nested: {db_password: hunter2}}"), "processors.0.config.nested.db_password"},
 		{"plain secret in output config", edit(t, base, "type: laraplate-http\n    url: https://erp.example.com\n    token: secret://env/TOKEN", "type: 'plugin:kafka'\n    config: {API_KEY: hunter2}"), "outputs.0.config."},
 		{"no observe", edit(t, procBase, "observe: [press-07]", "observe: []"), "processors.0.observe"},
+		{"url on a plugin output", edit(t, base, "type: laraplate-http\n    url: https://erp.example.com\n    token: secret://env/TOKEN", "type: 'plugin:kafka'\n    url: https://erp.example.com"), "outputs.0.url"},
+		{"token on a plugin output", edit(t, base, "type: laraplate-http\n    url: https://erp.example.com\n    token: secret://env/TOKEN", "type: 'plugin:kafka'\n    token: secret://env/TOKEN"), "outputs.0.token"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

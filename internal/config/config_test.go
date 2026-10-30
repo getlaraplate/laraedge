@@ -594,7 +594,7 @@ func TestCheckBuild(t *testing.T) {
 		{"opcua", edit(t, base, "driver: simulated", "driver: opcua"), nil},
 		{"plugin driver", edit(t, base, "driver: simulated", "driver: 'plugin:fanuc'"), nil},
 		{"mqtt output", edit(t, base, "type: laraplate-http", "type: laraplate-mqtt"), []string{"outputs.0.type: not available in this build"}},
-		{"plugin output", edit(t, base, "type: laraplate-http", "type: 'plugin:kafka'"), nil},
+		{"plugin output", edit(t, base, "type: laraplate-http\n    url: https://erp.example.com\n    token: secret://env/TOKEN", "type: 'plugin:kafka'"), nil},
 		{"keystore token", edit(t, base, "secret://env/TOKEN", "secret://keystore/main"), []string{"outputs.0.token: not available in this build"}},
 		{"keystore in a connection list", edit(t, base, "scenario: s.json", "scenario: s.json\n      peers: [{a: {secret: 'secret://keystore/x'}}]"), []string{"inputs.0.connection.peers.0.a.secret: not available in this build"}},
 		{"keystore under an odd key", edit(t, base, "scenario: s.json", "scenario: s.json\n      Odd-Key: {token: 'secret://keystore/x'}"), []string{"inputs.0.connection.*.token: not available in this build"}},
