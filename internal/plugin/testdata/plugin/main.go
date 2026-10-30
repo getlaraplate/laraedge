@@ -42,6 +42,23 @@
 // Configure of an output honours refuse_config (at config.port),
 // refuse_echo (quoting config.token), config_file and trace_file; Send
 // appends "send <id> <message_id>" to trace_file.
+//
+// Processor behaviour (processor true serves the Processor kind):
+//
+//	processor       serve a Processor
+//	records_file    append every record received, as one JSON line
+//	process_script  samples emitted when Process starts, in order
+//	derive_device   device of the sample echoed per observed sample
+//	                (default line-1)
+//	derive_signal   signal of the echoed sample (default count)
+//	derive_kind     value kind of the echoed sample: int (default) or string
+//	stop_reading    Process never reads its records (a hung processor)
+//
+// An echoed sample carries the value, ts and quality of the observed
+// sample, with priority bulk. Configure of a processor honours
+// refuse_config (at config.port), refuse_echo (quoting config.token),
+// config_file, configure_block and trace_file; Process appends
+// "process <id>" and, when it returns, "process end <id>" to trace_file.
 package main
 
 import (
@@ -103,6 +120,14 @@ type behaviour struct {
 	BatchesFile string `json:"batches_file"`
 	Dedupe      bool   `json:"dedupe"`
 	SendBlock   bool   `json:"send_block"`
+
+	Processor     bool     `json:"processor"`
+	RecordsFile   string   `json:"records_file"`
+	ProcessScript []sample `json:"process_script"`
+	DeriveDevice  string   `json:"derive_device"`
+	DeriveSignal  string   `json:"derive_signal"`
+	DeriveKind    string   `json:"derive_kind"`
+	StopReading   bool     `json:"stop_reading"`
 }
 
 // event is one event of the script: exactly one field is set.
@@ -116,12 +141,14 @@ type event struct {
 }
 
 // sample is an integer sample; quality is good unless "bad" is given.
+// kind string, float or bool turns the value into that kind.
 type sample struct {
 	Device  string `json:"device"`
 	Signal  string `json:"signal"`
 	Value   int64  `json:"value"`
 	TS      string `json:"ts"`
 	Quality string `json:"quality"`
+	Kind    string `json:"kind"`
 }
 
 func main() {
@@ -159,6 +186,11 @@ func main() {
 	}
 	if b.Output {
 		sdk.ServeOutput(name, version, &output{b: b, dir: dir}, configKind())
+
+		return
+	}
+	if b.Processor {
+		sdk.ServeProcessor(name, version, &processor{b: b, dir: dir}, configKind())
 
 		return
 	}
@@ -301,8 +333,17 @@ func (s sample) sdk() sdk.Sample {
 	if s.Quality == "bad" {
 		quality = sdk.QualityBad
 	}
+	value := sdk.IntValue(s.Value)
+	switch s.Kind {
+	case "string":
+		value = sdk.StringValue(strconv.FormatInt(s.Value, 10))
+	case "float":
+		value = sdk.Value{Kind: sdk.ValueKindFloat, Float: float64(s.Value)}
+	case "bool":
+		value = sdk.BoolValue(s.Value != 0)
+	}
 
-	return sdk.Sample{Device: s.Device, Signal: s.Signal, TS: ts, Value: sdk.IntValue(s.Value), Quality: quality, Priority: sdk.PriorityCritical}
+	return sdk.Sample{Device: s.Device, Signal: s.Signal, TS: ts, Value: value, Quality: quality, Priority: sdk.PriorityCritical}
 }
 
 func (in input) Probe(ctx context.Context, id string) ([]sdk.Sample, error) {
@@ -472,4 +513,89 @@ func (o *output) seen(id string) bool {
 	}
 
 	return false
+}
+
+// processor is a Processor driven by the behaviour file.
+type processor struct {
+	b   behaviour
+	dir string
+	mu  sync.Mutex
+}
+
+func (p *processor) trace(line string) { input{b: p.b, dir: p.dir}.trace(line) }
+
+func (p *processor) Configure(ctx context.Context, id string, cfg json.RawMessage) []sdk.ConfigError {
+	return (&output{b: p.b, dir: p.dir}).Configure(ctx, id, cfg)
+}
+
+func (p *processor) Process(ctx context.Context, id string, in <-chan sdk.Record, out func(sdk.Sample) error) error {
+	p.trace("process " + id)
+	defer p.trace("process end " + id)
+
+	for _, s := range p.b.ProcessScript {
+		if err := out(s.sdk()); err != nil {
+			return err
+		}
+	}
+	if p.b.StopReading {
+		<-ctx.Done()
+
+		return nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case rec, ok := <-in:
+			if !ok {
+				return nil
+			}
+			p.record(rec)
+			if rec.Sample == nil {
+				continue
+			}
+			if err := out(p.echo(*rec.Sample)); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// echo is the derived sample of an observed sample.
+func (p *processor) echo(s sdk.Sample) sdk.Sample {
+	device, signal := p.b.DeriveDevice, p.b.DeriveSignal
+	if device == "" {
+		device = "line-1"
+	}
+	if signal == "" {
+		signal = "count"
+	}
+	value := sdk.IntValue(s.Value.Int)
+	if p.b.DeriveKind == "string" {
+		value = sdk.StringValue(strconv.FormatInt(s.Value.Int, 10))
+	}
+
+	return sdk.Sample{Device: device, Signal: signal, TS: s.TS, Value: value, Quality: s.Quality, Priority: sdk.PriorityBulk}
+}
+
+// record appends rec to records_file.
+func (p *processor) record(rec sdk.Record) {
+	if p.b.RecordsFile == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	line, err := json.Marshal(rec)
+	if err != nil {
+		fail(err)
+	}
+	f, err := os.OpenFile(filepath.Join(p.dir, p.b.RecordsFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		fail(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		fail(err)
+	}
 }

@@ -73,12 +73,14 @@ type ConfigProblem struct {
 	Message string
 }
 
-// ConfigRefusedError is the error of an input the plugin refused to
-// configure, or whose secrets cannot be resolved. It names paths, never
-// values.
+// ConfigRefusedError is the error of an input or a processor the plugin
+// refused to configure, or whose secrets cannot be resolved. It names
+// paths, never values.
 type ConfigRefusedError struct {
-	// Input is the id of the input.
+	// Input is the id of the input, or of the component of Section.
 	Input string
+	// Section is the document section of the component, inputs when empty.
+	Section string
 	// Problems are the problems found, never empty.
 	Problems []ConfigProblem
 }
@@ -99,11 +101,16 @@ func (e *ConfigRefusedError) Messages(prefix string) []string {
 	return out
 }
 
-// Error lists the problems under the prefix inputs.<id>: the supervisor,
-// which knows the position of the input in the document, can render them
-// again with Messages.
+// Error lists the problems under the prefix <section>.<id> (inputs.<id> for
+// an input): the supervisor, which knows the position of the component in
+// the document, can render them again with Messages.
 func (e *ConfigRefusedError) Error() string {
-	return strings.Join(e.Messages("inputs."+e.Input), "; ")
+	section := e.Section
+	if section == "" {
+		section = "inputs"
+	}
+
+	return strings.Join(e.Messages(section+"."+e.Input), "; ")
 }
 
 // InputFactory returns the factory of the inputs of the plugin h runs. It
@@ -570,9 +577,15 @@ func (in *pluginInput) run(ctx context.Context, emit func(model.Record), life *i
 // wait blocks until the plugin has a new generation, the backoff (when
 // given) elapses, or ctx ends; it returns false when ctx ended.
 func (in *pluginInput) wait(ctx context.Context, changes <-chan uint64, backoff *driverkit.Backoff) bool {
+	return waitForPlugin(ctx, in.clk, changes, backoff)
+}
+
+// waitForPlugin blocks until the plugin has a new generation, the backoff
+// (when given) elapses on clk, or ctx ends; it returns false when ctx ended.
+func waitForPlugin(ctx context.Context, clk clock.Clock, changes <-chan uint64, backoff *driverkit.Backoff) bool {
 	var elapsed <-chan time.Time
 	if backoff != nil {
-		timer := in.clk.NewTimer(backoff.Next())
+		timer := clk.NewTimer(backoff.Next())
 		defer timer.Stop()
 		elapsed = timer.C()
 	}
