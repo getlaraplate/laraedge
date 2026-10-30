@@ -166,6 +166,23 @@ func (s *OutputSender) outcome(res *pb.SendResult) output.Outcome {
 	}
 }
 
+// Configure configures the instance synchronously, within the Configure
+// deadline of 10 s, when the plugin is up (ruling R6): the supervisor calls
+// it when it applies a document, before the Loop runs, so a refusal rolls
+// the document back as a refused plugin input does. A refusal or a secret
+// that cannot be resolved is a *ConfigRefusedError naming paths under
+// outputs.<id>, never values. A plugin that is down or fails the call is an
+// error of another type: the Loop configures the instance at its next Send.
+// It must not run concurrently with Send.
+func (s *OutputSender) Configure(ctx context.Context) error {
+	conn, gen := s.h.Conn()
+	if conn == nil {
+		return fmt.Errorf("plugin output %q: the plugin %q is not running", s.cfg.ID, s.h.spec.ID)
+	}
+
+	return s.configure(ctx, conn, gen)
+}
+
 // ensureConfigured configures the instance unless it is configured for the
 // running generation of the plugin. ok false gives the outcome of the
 // attempt: Suspend when a secret cannot be resolved (ReloadCredentials is
@@ -176,17 +193,51 @@ func (s *OutputSender) ensureConfigured(ctx context.Context, conn *grpc.ClientCo
 	if s.cfgGen == gen {
 		return output.Outcome{}, true
 	}
+
+	err := s.configure(ctx, conn, gen)
+	if err == nil {
+		return output.Outcome{}, true
+	}
+
+	var (
+		unresolved *secretsError
+		refused    *ConfigRefusedError
+	)
+	switch {
+	case errors.As(err, &unresolved):
+		messages := strings.Join(unresolved.Messages(s.prefix()), "; ")
+		s.log.Warn("plugin output secrets cannot be resolved, the output is suspended", "problems", messages)
+
+		return output.Outcome{Kind: output.Suspend, Reason: messages}, false
+	case errors.As(err, &refused):
+		messages := strings.Join(refused.Messages(s.prefix()), "; ")
+		s.log.Warn("plugin refused the configuration of the output, retrying", "problems", messages)
+
+		return retry("the plugin refused the configuration: " + messages), false
+	default:
+		return retry(err.Error()), false
+	}
+}
+
+// secretsError is the refusal of an output whose secrets cannot be
+// resolved: the plugin was not contacted.
+type secretsError struct{ *ConfigRefusedError }
+
+func (e *secretsError) Unwrap() error { return e.ConfigRefusedError }
+
+// configure sends the output section, its secrets resolved now, to the
+// instance of generation gen. A refusal is a *ConfigRefusedError, wrapped
+// in a *secretsError when a secret cannot be resolved; any other error is
+// fixed text.
+func (s *OutputSender) configure(ctx context.Context, conn *grpc.ClientConn, gen uint64) error {
 	s.cfgGen = 0
 
 	payload, values, problems, err := s.payload(ctx)
 	switch {
 	case len(problems) > 0:
-		messages := strings.Join((&ConfigRefusedError{Input: s.cfg.ID, Problems: problems}).Messages(s.prefix()), "; ")
-		s.log.Warn("plugin output secrets cannot be resolved, the output is suspended", "problems", messages)
-
-		return output.Outcome{Kind: output.Suspend, Reason: messages}, false
+		return &secretsError{s.refusal(problems)}
 	case err != nil:
-		return retry(err.Error()), false
+		return err
 	}
 
 	callCtx, release := deadline(s.clk, ctx, configureTimeout)
@@ -194,25 +245,27 @@ func (s *OutputSender) ensureConfigured(ctx context.Context, conn *grpc.ClientCo
 
 	resp, err := pb.NewOutputClient(conn).Configure(callCtx, &pb.ConfigureRequest{InstanceId: s.cfg.ID, Config: payload})
 	if err != nil {
-		return retry(callFailure(ctx, callCtx, "configure", err)), false
+		return errors.New(callFailure(ctx, callCtx, "configure", err))
 	}
 	if len(resp.GetErrors()) > 0 {
-		refused := &ConfigRefusedError{Input: s.cfg.ID}
+		refused := s.refusal(nil)
 		for _, e := range resp.GetErrors() {
 			refused.Problems = append(refused.Problems, ConfigProblem{
 				Path:    redact(e.GetPath(), values),
 				Message: redact(e.GetMessage(), values),
 			})
 		}
-		messages := strings.Join(refused.Messages(s.prefix()), "; ")
-		s.log.Warn("plugin refused the configuration of the output, retrying", "problems", messages)
 
-		return retry("the plugin refused the configuration: " + messages), false
+		return refused
 	}
 
 	s.cfgGen, s.secretValues = gen, values
 
-	return output.Outcome{}, true
+	return nil
+}
+
+func (s *OutputSender) refusal(problems []ConfigProblem) *ConfigRefusedError {
+	return &ConfigRefusedError{Input: s.cfg.ID, Section: "outputs", Problems: problems}
 }
 
 // prefix is the document path of the output in messages.

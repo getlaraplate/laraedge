@@ -3,8 +3,10 @@ package plugin_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -400,4 +402,97 @@ func TestNewOutputSenderRefusesAPluginWithoutTheOutputKind(t *testing.T) {
 	if _, err := plugin.NewOutputSender(host, testOutput(`{}`), nil, clock.NewFake(epoch), nil); err == nil {
 		t.Fatal("the sender accepted a plugin without the output kind")
 	}
+}
+
+// TestOutputConfigureAtApply is ruling R6: the supervisor configures a
+// plugin output synchronously when it applies a document, so a refusal or
+// an unresolvable secret rolls the document back. The error names paths
+// under outputs.<id>, never values; a configured instance is not configured
+// again by the first Send.
+func TestOutputConfigureAtApply(t *testing.T) {
+	tests := []struct {
+		name      string
+		behaviour string
+		config    string
+		want      []string // Messages("outputs.3"), nil for success
+	}{
+		{"accepted", outputBehaviour(""), `{"token":"secret://env/TOKEN"}`, nil},
+		{
+			"refused", outputBehaviour(`,"refuse_config":true,"refuse_echo":true`), `{"token":"secret://env/TOKEN"}`,
+			[]string{"outputs.3.config.port: bad value ***"},
+		},
+		{
+			"unresolvable secret", outputBehaviour(""), `{"auth":{"api_key":"secret://env/MISSING"}}`,
+			[]string{"outputs.3.config.auth.api_key: the secret cannot be resolved"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newOutputHarness(t, tc.behaviour)
+			s := h.sender(t, testOutput(tc.config))
+
+			err := s.Configure(context.Background())
+
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("Configure() = %v, want nil", err)
+				}
+				if got := send(s, testBatch("m-1", 1)); got.Kind != output.Confirmed {
+					t.Fatalf("Send() = %+v", got)
+				}
+				if got := h.read("trace"); got != "configure o1\nsend o1 m-1\n" {
+					t.Fatalf("trace = %q, want the Send to reuse the Configure", got)
+				}
+
+				return
+			}
+			var refused *plugin.ConfigRefusedError
+			if !errors.As(err, &refused) {
+				t.Fatalf("Configure() = %v, want a *ConfigRefusedError", err)
+			}
+			if got := refused.Messages("outputs.3"); !slices.Equal(got, tc.want) {
+				t.Fatalf("Messages() = %q, want %q", got, tc.want)
+			}
+			if !strings.HasPrefix(err.Error(), "outputs.o1.") || strings.Contains(err.Error(), secretValue) {
+				t.Fatalf("Error() = %q, want paths under outputs.o1 and no value", err.Error())
+			}
+		})
+	}
+}
+
+// TestOutputConfigureAtApplyPluginProblems: a plugin that is down or does
+// not answer within 10 s is an error that is not a refusal: the Loop
+// configures the instance at its next Send.
+func TestOutputConfigureAtApplyPluginProblems(t *testing.T) {
+	t.Run("past 10 seconds", func(t *testing.T) {
+		h := newOutputHarness(t, outputBehaviour(`,"configure_block":true`))
+		s := h.sender(t, testOutput(`{}`))
+
+		result := make(chan error, 1)
+		go func() { result <- s.Configure(context.Background()) }()
+		h.waitTrace("configure o1")
+		h.outClk.Advance(10 * time.Second)
+
+		var err error
+		select {
+		case err = <-result:
+		case <-time.After(guard):
+			t.Fatal("Configure did not give up")
+		}
+		var refused *plugin.ConfigRefusedError
+		if err == nil || errors.As(err, &refused) || !strings.Contains(err.Error(), "did not answer in time") {
+			t.Fatalf("Configure() = %v, want a timeout that is not a refusal", err)
+		}
+	})
+	t.Run("plugin down", func(t *testing.T) {
+		h := newOutputHarness(t, outputBehaviour(""))
+		s := h.sender(t, testOutput(`{}`))
+		h.stop()
+
+		err := s.Configure(context.Background())
+		var refused *plugin.ConfigRefusedError
+		if err == nil || errors.As(err, &refused) || !strings.Contains(err.Error(), "not running") {
+			t.Fatalf("Configure() = %v, want the plugin down, not a refusal", err)
+		}
+	})
 }
