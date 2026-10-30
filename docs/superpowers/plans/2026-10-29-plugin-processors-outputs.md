@@ -166,13 +166,13 @@ references from `@v0.1.0` to `@v0.1.1`.
 - Produces: `plugin.NewOutputSender(h *Host, cfg config.Output, resolver SecretResolver, clk clock.Clock, log
   *slog.Logger) (*OutputSender, error)` implementing `output.Sender`, with `Close()` (ends its `Watch`).
 
-- [ ] **Step 1: Failing tests** (against the test plugin): the batch reaches the plugin with `message_id`,
+- [x] **Step 1: Failing tests** (against the test plugin): the batch reaches the plugin with `message_id`,
   `source_seq`, records and losses; each SDK outcome maps per Global Constraints; a `Send` past 30 s is a retry; the
   plugin down is a retry and the next `Send` after its restart is preceded by `Configure`; a refused `Configure`
   keeps the output retrying and logs the paths; `ReloadCredentials` configures again with re-resolved secrets;
   resolved secret values appear in no log or error.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 5: Processor adapter
 
