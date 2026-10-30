@@ -49,7 +49,7 @@ type ProcessorStats struct {
 	// type.
 	Refused uint64
 	// Dropped counts the copies of observed records the queue had no room
-	// for.
+	// for, those over the message limit and the one a failed Send lost.
 	Dropped uint64
 }
 
@@ -506,7 +506,8 @@ func (p *Processor) stream(ctx context.Context, conn *grpc.ClientConn, emit func
 }
 
 // feed sends the queued copies until ctx ends or the stream fails. A copy
-// over the message limit of the protocol is dropped and counted.
+// over the message limit of the protocol, or the one a failed Send lost, is
+// dropped and counted.
 func (p *Processor) feed(ctx context.Context, stream pb.Processor_ProcessClient) {
 	for {
 		select {
@@ -520,6 +521,8 @@ func (p *Processor) feed(ctx context.Context, stream pb.Processor_ProcessClient)
 				continue
 			}
 			if stream.Send(msg) != nil {
+				p.dropped.Add(1)
+
 				return
 			}
 		}

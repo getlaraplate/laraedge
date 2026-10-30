@@ -45,7 +45,8 @@ type ProcessorStatus struct {
 	State string
 	// Refused counts what the plugin sent outside the declared derived
 	// devices and signals, or with another value kind; Dropped counts the
-	// copies of observed records the queue had no room for. Both count
+	// copies of observed records the queue had no room for, those over the
+	// message limit and the one a failed send lost. Both count
 	// since the processor instance started.
 	Refused uint64
 	Dropped uint64
