@@ -1,7 +1,7 @@
 # Configuration document `laraplate-edge-config/1`
 
-The configuration document says what the agent reads (inputs), where it sends (outputs) and how much it
-may buffer. It comes from a local file or from Laraplate (see the providers in [USAGE.md](USAGE.md)).
+The configuration document says what the agent reads (inputs), what it derives from them (processors),
+where it sends (outputs) and how much it may buffer. It comes from a local file or from Laraplate (see the providers in [USAGE.md](USAGE.md)).
 Its JSON Schema, draft 2020-12, is [`schema/laraplate-edge-config-1.schema.json`](../schema/laraplate-edge-config-1.schema.json),
 embedded in the binary.
 
@@ -21,10 +21,10 @@ laraplate-edge config validate config.yaml
   a schema cannot express (unique ids, durations and sizes in range, the URL rule), then what this build
   provides, with the type check of every transform chain (see "Transforms"). Every problem is reported
   with its path (`outputs.0.batch.max_samples: must be at most 5000`), never with its value.
-- An unknown key is an error everywhere but inside `connection`.
+- An unknown key is an error everywhere but inside `connection` and `config`.
 - Durations are positive, written as `500ms`, `2s`, `1m`, `1h30m`. Sizes are positive, written as
   `512KiB`, `16MiB`, `1GiB` (or `B`).
-- Ids (`inputs[].id`, `outputs[].id`, `plugins[].id`) match `^[a-z0-9][a-z0-9._-]{0,63}$` and are
+- Ids (`inputs[].id`, `outputs[].id`, `plugins[].id`, `processors[].id`) match `^[a-z0-9][a-z0-9._-]{0,63}$` and are
   unique in their list. An output id names its buffer directory.
 
 ## Top level
@@ -35,7 +35,8 @@ laraplate-edge config validate config.yaml
 | `version` | no | integer from 1. A document older than the applied one is refused; a missing version counts as 0. Laraplate writes the published version into the document it serves. |
 | `inputs` | yes | list of inputs, may be empty |
 | `outputs` | yes | list of outputs, may be empty |
-| `plugins` | no | external driver processes, see [Plugins](#plugins) |
+| `plugins` | no | external plugin processes, see [Plugins](#plugins) |
+| `processors` | no | plugin components deriving signals from the devices of the inputs, see [Processors](#processors) |
 
 ## Inputs
 
@@ -648,9 +649,10 @@ written atomically (directory mode `0700`, file `0600`) on every count:
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | output id, also its buffer directory `data_dir/outputs/{id}` |
-| `type` | yes | | `laraplate-http` in this build. The schema also knows `laraplate-mqtt` and `plugin:<id>`, which this build refuses. |
+| `type` | yes | | `laraplate-http` or `plugin:<id>` (an output served by a plugin, see [Plugin outputs](#plugin-outputs)) in this build. The schema also knows `laraplate-mqtt`, which this build refuses. |
 | `url` | with `laraplate-http` | | Laraplate base URL: `https`, or `http` only for a loopback host; no user or password. The agent posts to `{url}/api/v1/insert/mes/machine-messages`; a query or fragment is ignored. |
 | `token` | with `laraplate-http` | | `secret://` reference to the token of the source's service account |
+| `config` | no, `plugin:<id>` only | | the plugin's settings, an object the schema does not interpret (see the secret rule below); refused on any other type |
 | `route.include` | no | `["*"]` | patterns matched against `device/signal` (Go `path.Match`: `*`, `?`, `[...]`). `*` alone matches everything; a pattern without `/` means `<pattern>/*`. A device's `birth` and `death` go to every output routing at least one of its signals, and the `birth` lists only those. |
 | `batch.max_samples` | no | `1000` | records per batch, 1 to 5000 (the backend default of `mes.machine.max_samples`) |
 | `batch.max_body` | no | `1024KiB` | bytes per request body, at most `1024KiB` (`mes.machine.max_body_kb`) |
@@ -667,20 +669,22 @@ Secrets are only `secret://env/NAME`, `secret://file/PATH` or `secret://keystore
 they resolve: [USAGE.md](USAGE.md#secret-references)); a plain value is refused. The secret fields are:
 
 - `outputs[].token`;
-- inside an input's `connection`, at any depth, every key equal to or ending with `password`, `token`,
-  `secret` or `api_key`, in any letter case (`password`, `db_password`, `Token`, `API_KEY`).
+- inside an input's `connection`, a processor's `config` and a plugin output's `config`, at any depth,
+  every key equal to or ending with `password`, `token`, `secret` or `api_key`, in any letter case
+  (`password`, `db_password`, `Token`, `API_KEY`).
 
 Other spellings such as `apikey`, `api-key` or `apiKey` are not recognised as secret keys: do not use
 them for a credential.
 
 ## Plugins
 
-`plugins` lists the external processes that provide drivers (`plugin:<id>`), built on
-`laraedge-sdk`. Keys of an entry:
+`plugins` lists the external processes, built on `laraedge-sdk`, that provide input drivers
+(`driver: plugin:<id>`), processors (`processors[].plugin`) and outputs (`type: plugin:<id>`). One plugin
+may offer several of these kinds. Keys of an entry:
 
 | Key | Required | Meaning |
 |---|---|---|
-| `id` | yes | the id used as `plugin:<id>` |
+| `id` | yes | the id used as `plugin:<id>` and in `processors[].plugin` |
 | `path` | yes | the plugin binary. Where it resolves and what may contain it depends on the provider and on `plugins_dir` of the bootstrap, see "Where plugins may live" below. |
 | `sha256` | yes | lowercase hex SHA-256 of the binary |
 | `manifest_sha256` | yes | lowercase hex SHA-256 of the `plugin.json` file next to the binary |
@@ -708,8 +712,8 @@ the binary named in `<dir>/plugin.json` (with `.exe` on Windows) and the manifes
 values into the entry; run it again after every rebuild of the plugin.
 
 The manifest is the file `plugin.json` in the same directory as the binary at `path`. It names the
-plugin and says which inputs it provides (the address syntax, the read modes, the types, whether it can
-`browse`). The agent hashes the binary and the manifest at every start of the plugin and refuses to run
+plugin and says which kinds it provides: for an input the address syntax, the read modes, the types and
+whether it can `browse`; for a processor and an output the schema of their `config`. The agent hashes the binary and the manifest at every start of the plugin and refuses to run
 a plugin whose files do not match the entry. The binary at `path` need not carry the manifest's name,
 but `plugin hash` looks for the binary by that name.
 
@@ -728,7 +732,7 @@ An input uses a plugin with `driver: plugin:<id>`, where `<id>` is an entry of `
 key (`devices`, `points`, `death_tolerance`, `transforms`, ...) is the same as for the other drivers.
 Which values are valid is the plugin's: `connection` and each point's `address`, `type` and `read` are
 checked against the schemas, types and read modes its `plugin.json` declares, and the plugin checks the
-section again when it is configured. A plugin that no input uses is not started.
+section again when it is configured. A plugin that no input, processor or output uses is not started.
 
 `config validate` checks the plugin entries (files present, both hashes, manifest) and the inputs
 against the manifest, without starting the plugin. A problem is reported with its path, for instance
@@ -742,23 +746,128 @@ config error at start, naming its path and never its value. A reference is resol
 (see "Secret fields"); anywhere else the plugin receives the `secret://` text as it is and refuses it at
 start, which offline validation does not report.
 
+### Processors
+
+A processor observes the samples and device events of some devices of the inputs and derives signals on
+devices of its own, through a plugin that offers the processor kind (the SDK's example is `line-state`,
+which derives the state of a line from the state of its machines). It never changes, drops or delays
+machine data: it receives copies, and the machine data reaches the outputs whether the processor runs
+or not.
+
+| Key | Required | Default | Meaning |
+|---|---|---|---|
+| `id` | yes | | processor id |
+| `plugin` | yes | | the id of a `plugins` entry whose manifest offers the processor kind |
+| `observe` | yes | | at least one device name; each must be a device of an input |
+| `devices` | yes | | the derived devices, at least one |
+| `death_tolerance` | no | `30s` | how long the processor may be down before its derived devices are reported dead |
+| `config` | no | `{}` | the plugin's settings, checked against the `config` schema of its manifest (see the secret rule above) |
+
+A **derived device** has `device` (its name, as for a device of an input) and `signals` (at least one).
+Its name is neither the name of a device of an input nor that of another processor's derived device.
+A **derived signal** has:
+
+| Key | Required | Default | Meaning |
+|---|---|---|---|
+| `signal` | yes | | signal name, unique on its derived device |
+| `type` | yes | | `int`, `float`, `bool` or `string`; the `birth` announces it as `number`, `number`, `boolean` or `string` |
+| `priority` | no | `critical` | buffer class: `critical` or `bulk` |
+| `unit` | no | | engineering unit, at most 16 characters |
+
+```yaml
+processors:
+  - id: line
+    plugin: line-state
+    observe: [press-1, press-2]
+    devices:
+      - device: line-1
+        signals:
+          - {signal: state, type: int, priority: critical}
+    death_tolerance: 10s
+```
+
+What the agent does with it:
+
+- **Copies.** After an input's transforms, a copy of every sample and device event of an observed device
+  goes to the processor through a queue of 1,000 records. The input never waits for it: when the queue
+  is full the copy is dropped and counted (`dropped` in `/status`).
+- **Derived samples.** A sample the plugin sends for a declared derived device and signal, with a value
+  of the declared `type`, is routed to the outputs like a machine sample: it keeps the plugin's `ts` and
+  quality and takes the declared `priority`. Anything else (a device it did not declare, an undeclared
+  signal of a declared device, a value of another kind) is refused, never routed, and counted
+  (`refused` in `/status`).
+- **Births and deaths.** The agent, not the plugin, sends the `birth` of the derived devices, within a
+  second of the processor's stream to the plugin opening. A derived device is alive while that stream
+  is up, whether or not it sends samples. When the stream goes down (the plugin died, restarts, or
+  refused its configuration after a restart), each derived signal is sent `bad` once, with the zero
+  value of its type, and the derived devices are reported dead after `death_tolerance`. When the
+  stream is back they are born again.
+
+`config validate` checks `observe`, the derived names and the `config` against the plugin's manifest
+offline, reporting each problem with its path, for instance `processors.0.observe.1: is not a device of
+any input` or `processors.0.devices.0.device: is the name of a device of an input`.
+
+### Plugin outputs
+
+An output with `type: plugin:<id>` delivers its batches through a plugin that offers the output kind
+(the SDK's example is `jsonl`, which appends each batch to a file). Every key of an output applies as
+for `laraplate-http` (`route`, `batch`, `buffer`) except `url` and `token`, which it does not use: leave
+them out. The plugin's own settings go in `config`, checked against the `config` schema of its manifest. A plugin output has its own disk
+buffer, its own `source_seq` and the same delivery loop as `laraplate-http` (see "Buffer"): the plugin
+never buffers.
+
+| The plugin answers | Effect |
+|---|---|
+| `ACCEPTED`, `DUPLICATE` | confirmed; the next batch is sealed |
+| `RETRY_AFTER` | `backoff` from 1 second to 5 minutes with jitter, at least the wait the plugin asked for (capped at 5 minutes) |
+| `SPLIT` | split in two; the first half keeps the refused `source_seq`. One record is dropped with a `rejected_invalid` marker. |
+| `REJECT_INVALID` | dropped with a `rejected_invalid` loss marker; the plugin's reason is logged |
+| `SUSPEND_AUTH` | `suspended_auth`: records keep buffering; retried every 5 minutes, at once on `SIGHUP` |
+| no answer within 30 seconds, plugin down or restarting | `backoff` as for `RETRY_AFTER`; the batch stays in the buffer and is resent identical, under the same `message_id`, once the plugin is back |
+
+A batch resent after a plugin crash may already have been stored by the plugin: the plugin is expected
+to answer `DUPLICATE` for a `message_id` it already holds, which confirms it. The secrets of `config`
+are resolved at every configuration of the instance (at apply, after a plugin restart, at `SIGHUP`);
+one that cannot be resolved at run time suspends the output (`suspended_auth`) until a `SIGHUP`
+resolves it.
+
+```yaml
+outputs:
+  - id: file
+    type: plugin:jsonl
+    config:
+      path: /var/lib/laraplate-edge/machine.jsonl
+    batch: {max_samples: 100, max_wait: 1s}
+```
+
+A relative path in a plugin's `config` means whatever the plugin makes of it: plugins run in the
+directory of their binary.
+
 ### Starting, restarting and applying
 
-- A plugin restarts, with all its inputs, only when its `plugins` entry changes or when the hash of its
-  binary on disk differs from the running one. A change in an input's section reconfigures only that
-  input's instance and leaves the plugin process and its other inputs running.
+- A plugin restarts, with all its inputs, processors and outputs, only when its `plugins` entry changes
+  or when the hash of its binary on disk differs from the running one. A change in the section of an
+  input, a processor or an output reconfigures only that instance and leaves the plugin process and its
+  other components running; a restarted plugin output keeps its buffer.
 - A plugin the new document no longer uses is stopped; one it newly uses is started.
 - A new document whose plugin files do not match their hashes, or whose manifest does not accept the
-  inputs, is `rejected` before anything changes: the previous document keeps running.
+  inputs, processors or outputs, is `rejected` before anything changes: the previous document keeps
+  running.
+- At apply the agent configures every new or changed processor and plugin output on its running plugin.
+  A plugin that refuses the section, or a secret of `config` that cannot be resolved, rolls the
+  document back (`rolled_back`, naming the path, never the value). A plugin that is down at that moment
+  does not: the agent logs it and configures the instance when the plugin is up.
 - A plugin that dies, fails three health checks in a row or exceeds `max_memory` restarts on its own,
   with a backoff from 1 second to 1 minute (see [USAGE.md](USAGE.md#running-plugins)). After a restart
-  the agent configures every input again; if the plugin then refuses an input's section, that input
-  stays down (its devices die after the `death_tolerance`) and the document is not rolled back.
+  the agent configures every input, processor and output again. If the plugin then refuses an input's
+  or a processor's section, that component stays down (its devices die after the `death_tolerance`);
+  if it refuses an output's section, the output stays in `backoff` and logs the paths. The document is
+  not rolled back.
 
 ## Applying a document
 
-A document is applied by difference: each input and output is compared with the running one by its
-content. Unchanged components keep running untouched (an unchanged output keeps its buffer and its
+A document is applied by difference: each input, processor and output is compared with the running one
+by its content. Unchanged components keep running untouched (an unchanged output keeps its buffer and its
 `source_seq`, an unchanged input the state of its transform chains); changed ones restart (a restarted
 input starts its transforms clean, except the `edge_counter` counts, see "Transforms"); removed ones
 stop (an output's directory is kept); added ones start. While a changed output restarts, the records
@@ -781,10 +890,9 @@ Outcomes, as reported to Laraplate:
 | Part | Comes with |
 |---|---|
 | drivers other than `simulated`, `modbus` and `opcua` | the driver plans, in the design's order: `mqtt`, `serial` and `file` |
-| output types other than `laraplate-http` | the MQTT output plan (`laraplate-mqtt`) and the plugin plan (`plugin:<id>`) |
-| `plugin:<id>` outputs | the plugin output plan (design section 8) |
+| output types other than `laraplate-http` and `plugin:<id>` | the MQTT output plan (`laraplate-mqtt`) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
-| `secret://keystore/...` references | a later plan with the OS keystore |
+| `secret://keystore/...` references, `outputs[].config` and `processors[].config` included | a later plan with the OS keystore |
 
 ## Buffer
 
@@ -868,7 +976,16 @@ is exact, but its `ts` range can span records that are still in the buffer.
 - The state of the time-driven transforms (a held `min_interval` or `debounce` sample, the `heartbeat`
   timer) is lost when the input restarts; only the `edge_counter` counts are kept.
 - A `death` from one input marks the device dead for every input that reads it.
-- Connection keys spelled `apikey`, `api-key` or `apiKey` are not treated as secrets.
+- Connection and `config` keys spelled `apikey`, `api-key` or `apiKey` are not treated as secrets.
+- A processor or plugin output removed from the document, or renamed, keeps its state inside the
+  running plugin until the plugin restarts: the agent stops using the instance but does not ask the
+  plugin to release it.
+- A processor's `refused` and `dropped` counts start from 0 again when the processor restarts (a changed
+  section, a restart of its plugin by a new document, a rollback); a plugin crash alone does not reset
+  them.
+- On Unix the path of a plugin's socket, a file under `data_dir/run/plugins/<id>/`, must fit the
+  platform's limit (107 bytes on Linux): a deep `data_dir` makes every plugin fail to start with `socket path too
+  long`. Use a short absolute `data_dir`.
 - A corrupt record of the buffer, found when it opens (inside an older segment) or while it runs
   (anywhere), drops the rest of that segment with an error log and
   `laraplate_edge_corrupt_records_total`, without a loss marker (the protocol has no reason for it).

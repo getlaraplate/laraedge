@@ -1,0 +1,78 @@
+# Configuration document of the plugin pipeline demo: the three example
+# plugins of the plugin SDK, one of each kind.
+#
+# - simulated-counter (input) reads a state counter on two presses;
+# - line-state (processor) observes both presses and derives the state of the
+#   line, the highest state of its presses, on the device line-1;
+# - jsonl (output) appends every batch, machine and derived samples alike, to
+#   a file, one JSON object per line.
+#
+# The counters stand in for state codes: they only grow, which is enough to
+# watch the derived signal follow them. Plugin paths are resolved against the
+# directory of this file. The jsonl plugin runs in its own directory, so the
+# relative config.path below is plugins/jsonl/machine.jsonl.
+#
+# Build the plugins and fill the six hashes below first (README.md):
+#   laraplate-edge plugin hash plugins/<id>
+# Then check the document offline:
+#   laraplate-edge config validate config.yaml
+
+schema: laraplate-edge-config/1
+version: 1
+
+plugins:
+  # Replace every sha256 and manifest_sha256 with the values printed by
+  # "plugin hash" for that plugin.
+  - id: simulated-counter
+    path: plugins/simulated-counter/simulated-counter
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    max_memory: 64MiB
+  - id: line-state
+    path: plugins/line-state/line-state
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    max_memory: 64MiB
+  - id: jsonl
+    path: plugins/jsonl/jsonl
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    max_memory: 64MiB
+
+inputs:
+  - id: counter-line
+    driver: plugin:simulated-counter
+    connection: {}
+    devices:
+      # The address counter:<n> is the increment of the counter at every poll.
+      # line-state reads the integer signal named state of every device it
+      # observes.
+      - device: press-1
+        points:
+          - {signal: state, address: "counter:1", type: int32, read: {poll: 1s}, priority: critical}
+      - device: press-2
+        points:
+          - {signal: state, address: "counter:3", type: int32, read: {poll: 2s}, priority: critical}
+
+processors:
+  - id: line
+    plugin: line-state
+    # Copies of the records of these devices reach the processor; the machine
+    # data itself goes to the outputs untouched.
+    observe: [press-1, press-2]
+    # The derived device and its one signal, as line-state requires.
+    devices:
+      - device: line-1
+        signals:
+          - {signal: state, type: int, priority: critical}
+    # While line-state is down its derived signal is bad, and line-1 is
+    # reported dead after this long.
+    death_tolerance: 10s
+    config: {}
+
+outputs:
+  - id: file
+    type: plugin:jsonl
+    config:
+      path: machine.jsonl
+    batch: {max_samples: 100, max_wait: 1s}
