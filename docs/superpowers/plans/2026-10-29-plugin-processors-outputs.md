@@ -6,7 +6,7 @@ created_on: 2026-10-29
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block.
 
-**Status:** Open. Approved (2026-10-29), not started.
+**Status:** Open. Approved (2026-10-29), in progress.
 
 **Goal:** the agent runs the two remaining plugin kinds: a processor (`processors[]`) observes copies of the records of
 named devices and emits samples for derived devices it declares, never touching machine data; a plugin output
@@ -109,14 +109,14 @@ references from `@v0.1.0` to `@v0.1.1`.
   []DerivedSignal}`, `config.DerivedSignal{Signal, Type, Priority, Unit string}`; `config.Output.Config
   json.RawMessage`.
 
-- [ ] **Step 1: Failing tests:** schema and `Parse` accept a processor and a plugin output with `config`; refuse
+- [x] **Step 1: Failing tests:** schema and `Parse` accept a processor and a plugin output with `config`; refuse
   `config` on `laraplate-http`; refuse, at their dotted paths: an `observe` device no input has, a derived device
   equal to a real device or to another processor's derived device, duplicate derived signals, a bad `type` or
   `priority`, a processor id equal to another processor's, a non-reference value under a secret key inside any
   `config`; `CheckBuild` accepts plugin outputs and processors, still refuses `laraplate-mqtt`; secrets in `config`
   are reported by the existing secret check.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 2: Offline validation of processors and plugin outputs
 
