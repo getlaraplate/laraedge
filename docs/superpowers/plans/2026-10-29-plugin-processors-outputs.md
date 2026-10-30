@@ -148,12 +148,12 @@ references from `@v0.1.0` to `@v0.1.1`.
   `LastError() (string, time.Time)`, `LastConfirmation() time.Time`, `ReloadCredentials()`; `output.HTTP` keeps its
   constructor and `ClockOffset()` and runs on a `Loop`.
 
-- [ ] **Step 1: Failing tests:** a fake `Sender` drives each outcome through the loop: confirm advances, retry backs
+- [x] **Step 1: Failing tests:** a fake `Sender` drives each outcome through the loop: confirm advances, retry backs
   off honouring `RetryAfter` within 1 s to 5 min, split shrinks reusing `source_seq`, invalid drops with a
   `rejected_invalid` marker, suspend waits 5 minutes or `ReloadCredentials`; `OnReconnect` on the first confirm after
   backoff or suspension. All existing `internal/output` tests pass unchanged.
-- [ ] **Step 2: Implement** (move, do not rewrite: the HTTP status mapping becomes `HTTP`'s `Send`).
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement** (move, do not rewrite: the HTTP status mapping becomes `HTTP`'s `Send`).
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 4: Plugin output adapter
 
