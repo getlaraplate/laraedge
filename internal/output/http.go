@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"slices"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/docrules"
-	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/secrets"
 	"github.com/getlaraplate/laraedge/internal/version"
 )
@@ -30,51 +28,11 @@ const (
 	ingestPath = "/api/v1/insert/mes/machine-messages"
 	// requestTimeout bounds one request, response body included.
 	requestTimeout = 30 * time.Second
-	// authRetry is the wait of a suspended output before it tries again.
-	authRetry = 5 * time.Minute
 	// skewThreshold is the clock offset above which a warning is logged.
 	skewThreshold = 2 * time.Second
 	// maxResponseBody bounds how much of a response is read.
 	maxResponseBody = 64 << 10
 )
-
-// State is the sending state of an output (spec 6.8).
-type State int32
-
-const (
-	// Sending is the normal state: batches are sent as they are sealed.
-	Sending State = iota
-	// Backoff waits after a temporary error before resending the batch.
-	Backoff
-	// SuspendedAuth waits after the backend refused the token, or the token
-	// could not be resolved; records keep buffering.
-	SuspendedAuth
-)
-
-// String returns the state's metric name.
-func (s State) String() string {
-	switch s {
-	case Sending:
-		return "sending"
-	case Backoff:
-		return "backoff"
-	case SuspendedAuth:
-		return "suspended_auth"
-	default:
-		return fmt.Sprintf("state(%d)", int32(s))
-	}
-}
-
-// Output delivers the batches of one output to its destination.
-type Output interface {
-	// Run sends until ctx is done.
-	Run(ctx context.Context) error
-	// State returns the current sending state; safe for concurrent use.
-	State() State
-	// ReloadCredentials resolves the credentials again before the next
-	// attempt and ends a suspension at once; safe for concurrent use.
-	ReloadCredentials()
-}
 
 // SecretResolver resolves a secret:// reference (*secrets.Resolver).
 type SecretResolver interface {
@@ -112,38 +70,37 @@ type HTTPConfig struct {
 	Rand func() float64
 }
 
-// HTTP is the laraplate-http output: it sends the sealed batches of its
-// Batcher to the backend ingest route, one at a time, and settles each one
-// from the response (spec 6.5).
+// HTTP is the laraplate-http output: a Loop over the sealed batches of its
+// Batcher whose Sender posts each one to the backend ingest route and maps
+// the response to an Outcome (spec 6.5).
 type HTTP struct {
-	id          string
-	endpoint    string
-	tokenRef    string
-	resolver    SecretResolver
-	batcher     *Batcher
-	clk         clock.Clock
-	log         *slog.Logger
-	onReconnect func()
-	client      *http.Client
-
-	reload        chan struct{}
-	reloadPending atomic.Bool
-
-	// Owned by the Run goroutine.
-	token      string
-	backoff    backoff
-	recovering bool
-
-	mu          sync.Mutex
-	state       State
-	lastConfirm time.Time
-	lastErr     string
-	lastErrAt   time.Time
-	offset      time.Duration
-	skewed      bool
+	sender *httpSender
+	loop   *Loop
 }
 
 var _ Output = (*HTTP)(nil)
+
+// httpSender is the Sender of an HTTP output.
+type httpSender struct {
+	id       string
+	endpoint string
+	tokenRef string
+	resolver SecretResolver
+	clk      clock.Clock
+	log      *slog.Logger
+	client   *http.Client
+
+	reloadPending atomic.Bool
+
+	// Owned by the Run goroutine.
+	token string
+
+	mu     sync.Mutex
+	offset time.Duration
+	skewed bool
+}
+
+var _ Sender = (*httpSender)(nil)
 
 // NewHTTP validates cfg and returns the output. Nothing is sent before Run.
 func NewHTTP(cfg HTTPConfig) (*HTTP, error) {
@@ -177,38 +134,36 @@ func NewHTTP(cfg HTTPConfig) (*HTTP, error) {
 		return nil, fail("client: %w", err)
 	}
 
-	h := &HTTP{
-		id:          cfg.ID,
-		endpoint:    endpoint,
-		tokenRef:    cfg.Token,
-		resolver:    cfg.Resolver,
-		batcher:     cfg.Batcher,
-		clk:         cfg.Clock,
-		log:         cfg.Logger,
-		onReconnect: cfg.OnReconnect,
-		client:      client,
-		reload:      make(chan struct{}, 1),
-		backoff:     backoff{rand: cfg.Rand},
-		state:       Sending,
+	clk, log := cfg.Clock, cfg.Logger
+	if clk == nil {
+		clk = clock.Real()
 	}
 
-	if h.clk == nil {
-		h.clk = clock.Real()
+	if log == nil {
+		log = slog.Default()
 	}
 
-	if h.log == nil {
-		h.log = slog.Default()
+	s := &httpSender{
+		id:       cfg.ID,
+		endpoint: endpoint,
+		tokenRef: cfg.Token,
+		resolver: cfg.Resolver,
+		clk:      clk,
+		log:      log,
+		client:   client,
 	}
 
-	if h.onReconnect == nil {
-		h.onReconnect = func() {}
-	}
+	loop := NewLoop(LoopConfig{
+		ID:          cfg.ID,
+		Sender:      s,
+		Batcher:     cfg.Batcher,
+		Clock:       clk,
+		Logger:      log,
+		OnReconnect: cfg.OnReconnect,
+		Rand:        cfg.Rand,
+	})
 
-	if h.backoff.rand == nil {
-		h.backoff.rand = rand.Float64
-	}
-
-	return h, nil
+	return &HTTP{sender: s, loop: loop}, nil
 }
 
 // ingestEndpoint validates the base URL and returns the ingest route below it.
@@ -260,50 +215,77 @@ func NewClient(c *http.Client) (*http.Client, error) {
 // one-record 413; every other answer and every local failure keeps it in
 // flight to be resent identical after a backoff or a suspension.
 func (h *HTTP) Run(ctx context.Context) error {
-	for ctx.Err() == nil {
-		if h.reloadPending.Swap(false) {
-			h.token = ""
-		}
+	return h.loop.Run(ctx)
+}
 
-		if h.token == "" && !h.resolveToken(ctx) {
-			h.suspend(ctx)
+// ReloadCredentials makes the next attempt resolve the token again and ends
+// a suspension at once (bootstrap reload, SIGHUP).
+func (h *HTTP) ReloadCredentials() {
+	h.loop.ReloadCredentials()
+}
 
-			continue
-		}
+// State returns the current sending state.
+func (h *HTTP) State() State {
+	return h.loop.State()
+}
 
-		b, err := h.batcher.Next(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				break
-			}
+// ClockOffset returns the backend clock minus the agent clock estimated
+// from the Date header of the last response, zero before any (ruling R4).
+func (h *HTTP) ClockOffset() time.Duration {
+	h.sender.mu.Lock()
+	defer h.sender.mu.Unlock()
 
-			h.log.Error("output: cannot seal the next batch", "output", h.id, "error", err)
-			h.recordError("next batch: " + err.Error())
-			h.backOff(ctx, 0)
+	return h.sender.offset
+}
 
-			continue
-		}
+// LastConfirmation returns when the last batch was confirmed, zero before any.
+func (h *HTTP) LastConfirmation() time.Time {
+	return h.loop.LastConfirmation()
+}
 
-		switch res := h.send(ctx, b); res.kind {
-		case resultSettled:
-			h.setState(Sending)
-		case resultRetry:
-			h.backOff(ctx, res.retryAfter)
-		case resultSuspend:
-			h.suspend(ctx)
-		}
+// LastError returns the last error, a short text without secrets, and when
+// it happened; empty before any.
+func (h *HTTP) LastError() (string, time.Time) {
+	return h.loop.LastError()
+}
+
+// prepare is the token step before the next batch is sealed: after
+// ReloadCredentials or a suspension the token is resolved again, and an
+// output whose token cannot be resolved suspends without sealing a batch.
+func (s *httpSender) prepare(ctx context.Context) (Outcome, bool) {
+	if s.reloadPending.Swap(false) {
+		s.token = ""
 	}
 
-	return nil
+	return s.tokenStep(ctx)
+}
+
+// tokenStep resolves the token when none is held; a failure suspends.
+func (s *httpSender) tokenStep(ctx context.Context) (Outcome, bool) {
+	if s.token != "" {
+		return Outcome{}, true
+	}
+
+	if reason, ok := s.resolveToken(ctx); !ok {
+		return Outcome{Kind: Suspend, Reason: reason}, false
+	}
+
+	return Outcome{}, true
+}
+
+// ReloadCredentials makes the next attempt resolve the token again.
+func (s *httpSender) ReloadCredentials() {
+	s.reloadPending.Store(true)
 }
 
 // resolveToken resolves the token reference and reports whether a usable
-// token is now held. Errors name the reference, never a value.
-func (h *HTTP) resolveToken(ctx context.Context) bool {
-	token, err := h.resolver.Resolve(ctx, h.tokenRef)
+// token is now held, or the error to record. Errors name the reference,
+// never a value.
+func (s *httpSender) resolveToken(ctx context.Context) (string, bool) {
+	token, err := s.resolver.Resolve(ctx, s.tokenRef)
 	if err != nil {
 		if ctx.Err() != nil {
-			return false
+			return "", false
 		}
 
 		level := slog.LevelWarn
@@ -311,22 +293,20 @@ func (h *HTTP) resolveToken(ctx context.Context) bool {
 			level = slog.LevelError
 		}
 
-		h.log.Log(ctx, level, "output: cannot resolve the token; sending suspended", "output", h.id, "error", err)
-		h.recordError("token unavailable: " + err.Error())
+		s.log.Log(ctx, level, "output: cannot resolve the token; sending suspended", "output", s.id, "error", err)
 
-		return false
+		return "token unavailable: " + err.Error(), false
 	}
 
 	if !validHeaderValue(token) {
-		h.log.Warn("output: the token is not a valid HTTP header value; sending suspended", "output", h.id, "token_ref", h.tokenRef)
-		h.recordError("token unavailable: not a valid HTTP header value")
+		s.log.Warn("output: the token is not a valid HTTP header value; sending suspended", "output", s.id, "token_ref", s.tokenRef)
 
-		return false
+		return "token unavailable: not a valid HTTP header value", false
 	}
 
-	h.token = token
+	s.token = token
 
-	return true
+	return "", true
 }
 
 // validHeaderValue reports whether s can be sent in a header unchanged.
@@ -340,93 +320,81 @@ func validHeaderValue(s string) bool {
 	return s != ""
 }
 
-// resultKind is what Run does after a request.
-type resultKind int
+// Send posts b and maps the answer to an Outcome: 2xx Confirmed, 401 and
+// 403 Suspend, 413 Split, 422 Invalid, anything else and every local
+// failure Retry, with the Retry-After of the response.
+func (s *httpSender) Send(ctx context.Context, b *Batch) Outcome {
+	if out, ok := s.tokenStep(ctx); !ok {
+		return out
+	}
 
-const (
-	// resultSettled: the batch is confirmed, split or dropped; go on at once.
-	resultSettled resultKind = iota
-	// resultRetry: back off, then resend the batch in flight.
-	resultRetry
-	// resultSuspend: suspend, then resend with the token resolved again.
-	resultSuspend
-	// resultStopped: ctx is done.
-	resultStopped
-)
-
-type result struct {
-	kind       resultKind
-	retryAfter time.Duration
-}
-
-// send posts b and settles it from the answer.
-func (h *HTTP) send(ctx context.Context, b *Batch) result {
 	rctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(rctx, http.MethodPost, h.endpoint, bytes.NewReader(b.Body))
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, s.endpoint, bytes.NewReader(b.Body))
 	if err != nil {
-		h.log.Error("output: cannot build the request", "output", h.id, "error", err)
-		h.recordError("request: " + err.Error())
+		s.log.Error("output: cannot build the request", "output", s.id, "error", err)
 
-		return result{kind: resultRetry}
+		return Outcome{Kind: Retry, Reason: "request: " + err.Error()}
 	}
 
-	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("Authorization", "Bearer "+s.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "laraplate-edge/"+version.String())
 
-	sentAt := h.clk.Now()
-	resp, err := h.client.Do(req)
+	sentAt := s.clk.Now()
+	resp, err := s.client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return result{kind: resultStopped}
+			return Outcome{Kind: Retry}
 		}
 
-		h.log.Warn("output: request failed; backing off", "output", h.id, "seq", b.Seq, "error", err)
-		h.recordError("network error: " + err.Error())
+		s.log.Warn("output: request failed; backing off", "output", s.id, "seq", b.Seq, "error", err)
 
-		return result{kind: resultRetry}
+		return Outcome{Kind: Retry, Reason: "network error: " + err.Error()}
 	}
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	_ = resp.Body.Close()
-	recvAt := h.clk.Now()
-	h.observeDate(resp.Header.Get("Date"), sentAt, recvAt)
+	recvAt := s.clk.Now()
+	s.observeDate(resp.Header.Get("Date"), sentAt, recvAt)
 	if readErr != nil {
-		h.log.Debug("output: cannot read the response body", "output", h.id, "status", resp.StatusCode, "error", readErr)
+		s.log.Debug("output: cannot read the response body", "output", s.id, "status", resp.StatusCode, "error", readErr)
 	}
 
 	code := resp.StatusCode
 	switch {
 	case code >= 200 && code < 300:
-		return h.confirm(b, code, body)
-	case code == http.StatusUnauthorized || code == http.StatusForbidden:
-		h.log.Warn("output: the backend refused the token; sending suspended", "output", h.id, "status", code, "retry_in", authRetry.String())
-		h.recordError(fmt.Sprintf("HTTP %d: token refused", code))
+		s.confirmed(b, code, body)
 
-		return result{kind: resultSuspend}
+		return Outcome{Kind: Confirmed}
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		s.log.Warn("output: the backend refused the token; sending suspended", "output", s.id, "status", code, "retry_in", authRetry.String())
+		s.token = ""
+
+		return Outcome{Kind: Suspend, Reason: fmt.Sprintf("HTTP %d: token refused", code)}
 	case code == http.StatusRequestEntityTooLarge:
-		return h.tooLarge(b)
+		return Outcome{Kind: Split, Reason: "HTTP 413"}
 	case code == http.StatusUnprocessableEntity:
-		return h.invalid(b, body)
+		s.invalid(b, body)
+
+		return Outcome{Kind: Invalid, Reason: "HTTP 422"}
 	}
 
 	wait, _ := retryAfter(resp.Header.Get("Retry-After"), recvAt)
 	if code == http.StatusTooManyRequests || code >= 500 {
-		h.log.Warn("output: temporary backend error; backing off", "output", h.id, "seq", b.Seq, "status", code)
+		s.log.Warn("output: temporary backend error; backing off", "output", s.id, "seq", b.Seq, "status", code)
 	} else {
-		h.log.Error("output: unexpected backend response; check the output url and that the backend API is enabled", "output", h.id, "seq", b.Seq, "status", code)
+		s.log.Error("output: unexpected backend response; check the output url and that the backend API is enabled", "output", s.id, "seq", b.Seq, "status", code)
 	}
 
-	h.recordError(fmt.Sprintf("HTTP %d", code))
-
-	return result{kind: resultRetry, retryAfter: wait}
+	return Outcome{Kind: Retry, RetryAfter: wait, Reason: fmt.Sprintf("HTTP %d", code)}
 }
 
-// confirm settles b as delivered after a 2xx.
-func (h *HTTP) confirm(b *Batch, code int, body []byte) result {
+// confirmed checks a 2xx against the contract, 202 or a 200 duplicate, and
+// warns about any other; the batch is confirmed either way.
+func (s *httpSender) confirmed(b *Batch, code int, body []byte) {
 	contract := code == http.StatusAccepted
 	if code == http.StatusOK {
 		var answer struct {
@@ -437,65 +405,13 @@ func (h *HTTP) confirm(b *Batch, code int, body []byte) result {
 	}
 
 	if !contract {
-		h.log.Warn("output: unexpected success response; batch confirmed", "output", h.id, "seq", b.Seq, "status", code)
+		s.log.Warn("output: unexpected success response; batch confirmed", "output", s.id, "seq", b.Seq, "status", code)
 	}
-
-	if err := h.batcher.Confirm(b); err != nil {
-		h.log.Error("output: cannot settle a delivered batch; it will be resent", "output", h.id, "seq", b.Seq, "error", err)
-		h.recordError("confirm: " + err.Error())
-
-		return result{kind: resultRetry}
-	}
-
-	h.log.Debug("output: batch delivered", "output", h.id, "seq", b.Seq, "records", b.Len(), "status", code)
-
-	h.backoff.reset()
-	if h.recovering {
-		h.recovering = false
-		h.onReconnect()
-	}
-
-	now := h.clk.Now()
-	h.mu.Lock()
-	h.lastConfirm, h.state = now, Sending
-	h.mu.Unlock()
-
-	return result{kind: resultSettled}
 }
 
-// tooLarge answers a 413: split b in two, or drop a one-record batch, which
-// cannot be split, with a rejected_invalid loss marker.
-func (h *HTTP) tooLarge(b *Batch) result {
-	if b.Len() <= 1 {
-		h.log.Warn("output: the backend refused a one-record batch as too large; dropping it with a rejected_invalid loss marker", "output", h.id, "seq", b.Seq)
-		if err := h.batcher.Drop(b, model.LossRejectedInvalid); err != nil {
-			h.log.Error("output: cannot drop the refused batch; it will be resent", "output", h.id, "seq", b.Seq, "error", err)
-			h.recordError("drop: " + err.Error())
-
-			return result{kind: resultRetry}
-		}
-
-		h.recordError("HTTP 413: one record dropped as rejected_invalid")
-
-		return result{kind: resultSettled}
-	}
-
-	n := b.Len() / 2
-	if _, err := h.batcher.Shrink(b, n); err != nil {
-		h.log.Error("output: cannot split the refused batch; it will be resent", "output", h.id, "seq", b.Seq, "error", err)
-		h.recordError("split: " + err.Error())
-
-		return result{kind: resultRetry}
-	}
-
-	h.log.Warn("output: the backend refused the batch as too large; split", "output", h.id, "seq", b.Seq, "records", b.Len(), "kept", n)
-
-	return result{kind: resultSettled}
-}
-
-// invalid answers a 422: drop b with a rejected_invalid loss marker. The
-// field paths of the errors are logged at warn, the body only at debug.
-func (h *HTTP) invalid(b *Batch, body []byte) result {
+// invalid logs a 422: the field paths of the errors at warn, the body only
+// at debug. The Loop drops the batch.
+func (s *httpSender) invalid(b *Batch, body []byte) {
 	var answer struct {
 		Errors map[string]json.RawMessage `json:"errors"`
 	}
@@ -508,82 +424,13 @@ func (h *HTTP) invalid(b *Batch, body []byte) result {
 
 	slices.Sort(fields)
 
-	h.log.Warn("output: the backend refused the batch as invalid; dropping it with a rejected_invalid loss marker", "output", h.id, "seq", b.Seq, "records", b.Len(), "fields", fields)
-	h.log.Debug("output: invalid batch response", "output", h.id, "seq", b.Seq, "body", string(body))
-
-	if err := h.batcher.Drop(b, model.LossRejectedInvalid); err != nil {
-		h.log.Error("output: cannot drop the refused batch; it will be resent", "output", h.id, "seq", b.Seq, "error", err)
-		h.recordError("drop: " + err.Error())
-
-		return result{kind: resultRetry}
-	}
-
-	h.recordError("HTTP 422: batch dropped as rejected_invalid")
-
-	return result{kind: resultSettled}
-}
-
-// backOff waits the next backoff step, at least retryAfter (capped).
-func (h *HTTP) backOff(ctx context.Context, retryAfter time.Duration) {
-	wait := max(h.backoff.next(), min(retryAfter, backoffMax))
-
-	h.setState(Backoff)
-	h.recovering = true
-	h.log.Debug("output: waiting before resending", "output", h.id, "wait", wait.String())
-	h.pause(ctx, wait, false)
-}
-
-// suspend waits authRetry, or until ReloadCredentials; the token is
-// resolved again afterwards.
-func (h *HTTP) suspend(ctx context.Context) {
-	h.setState(SuspendedAuth)
-	h.recovering = true
-	h.token = ""
-	h.pause(ctx, authRetry, true)
-}
-
-// pause waits d on the clock, until ctx is done or, when wakeOnReload,
-// until ReloadCredentials is called.
-func (h *HTTP) pause(ctx context.Context, d time.Duration, wakeOnReload bool) {
-	if wakeOnReload && h.reloadPending.Load() {
-		return
-	}
-
-	timer := h.clk.NewTimer(d)
-	defer timer.Stop()
-
-	var reload <-chan struct{}
-	if wakeOnReload {
-		reload = h.reload
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C():
-			return
-		case <-reload:
-			if h.reloadPending.Load() {
-				return
-			}
-		}
-	}
-}
-
-// ReloadCredentials makes the next attempt resolve the token again and ends
-// a suspension at once (bootstrap reload, SIGHUP).
-func (h *HTTP) ReloadCredentials() {
-	h.reloadPending.Store(true)
-	select {
-	case h.reload <- struct{}{}:
-	default:
-	}
+	s.log.Warn("output: the backend refused the batch as invalid; dropping it with a rejected_invalid loss marker", "output", s.id, "seq", b.Seq, "records", b.Len(), "fields", fields)
+	s.log.Debug("output: invalid batch response", "output", s.id, "seq", b.Seq, "body", string(body))
 }
 
 // observeDate updates the clock offset from a response Date header: the
 // server time minus the midpoint of the local send and receive times.
-func (h *HTTP) observeDate(date string, sentAt, recvAt time.Time) {
+func (s *httpSender) observeDate(date string, sentAt, recvAt time.Time) {
 	if date == "" {
 		return
 	}
@@ -596,60 +443,12 @@ func (h *HTTP) observeDate(date string, sentAt, recvAt time.Time) {
 	offset := server.Sub(sentAt.Add(recvAt.Sub(sentAt) / 2))
 	skewed := offset > skewThreshold || offset < -skewThreshold
 
-	h.mu.Lock()
-	crossed := skewed && !h.skewed
-	h.offset, h.skewed = offset, skewed
-	h.mu.Unlock()
+	s.mu.Lock()
+	crossed := skewed && !s.skewed
+	s.offset, s.skewed = offset, skewed
+	s.mu.Unlock()
 
 	if crossed {
-		h.log.Warn("output: the agent clock differs from the backend's; check NTP", "output", h.id, "offset", offset.String(), "threshold", skewThreshold.String())
+		s.log.Warn("output: the agent clock differs from the backend's; check NTP", "output", s.id, "offset", offset.String(), "threshold", skewThreshold.String())
 	}
-}
-
-func (h *HTTP) setState(s State) {
-	h.mu.Lock()
-	h.state = s
-	h.mu.Unlock()
-}
-
-func (h *HTTP) recordError(msg string) {
-	now := h.clk.Now()
-
-	h.mu.Lock()
-	h.lastErr, h.lastErrAt = msg, now
-	h.mu.Unlock()
-}
-
-// State returns the current sending state.
-func (h *HTTP) State() State {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	return h.state
-}
-
-// ClockOffset returns the backend clock minus the agent clock estimated
-// from the Date header of the last response, zero before any (ruling R4).
-func (h *HTTP) ClockOffset() time.Duration {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	return h.offset
-}
-
-// LastConfirmation returns when the last batch was confirmed, zero before any.
-func (h *HTTP) LastConfirmation() time.Time {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	return h.lastConfirm
-}
-
-// LastError returns the last error, a short text without secrets, and when
-// it happened; empty before any.
-func (h *HTTP) LastError() (string, time.Time) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	return h.lastErr, h.lastErrAt
 }
