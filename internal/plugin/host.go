@@ -670,8 +670,15 @@ func (h *Host) setState(s State) {
 
 // deadline returns a context cancelled after d on the host clock.
 func (h *Host) deadline(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return deadline(h.clk, parent, d)
+}
+
+// deadline returns a context cancelled with the cause
+// context.DeadlineExceeded once d has passed on clk, and the function that
+// releases it.
+func deadline(clk clock.Clock, parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(parent)
-	timer := h.clk.NewTimer(d)
+	timer := clk.NewTimer(d)
 	released := make(chan struct{})
 	go func() {
 		select {

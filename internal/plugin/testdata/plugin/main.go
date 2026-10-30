@@ -26,6 +26,22 @@
 //	configure_block  Configure blocks until its context ends, then refuses
 //
 // trace_file also gets "stop <id>" lines.
+//
+// Output behaviour (output true serves the Output kind instead of the
+// Input kind):
+//
+//	output        serve an Output
+//	outcome       the outcome of every Send: accepted (default), duplicate,
+//	              retry_after, split, reject_invalid or suspend_auth
+//	retry_after   the wait sent with retry_after, a Go duration
+//	reason        the reason sent with reject_invalid
+//	batches_file  append every batch received, as one JSON line
+//	dedupe        answer duplicate for a message_id already in batches_file
+//	send_block    Send blocks until its context ends
+//
+// Configure of an output honours refuse_config (at config.port),
+// refuse_echo (quoting config.token), config_file and trace_file; Send
+// appends "send <id> <message_id>" to trace_file.
 package main
 
 import (
@@ -38,6 +54,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -78,6 +95,14 @@ type behaviour struct {
 	ProbeBlock   bool     `json:"probe_block"`
 	ConfigBlock  bool     `json:"configure_block"`
 	BusyRuns     int64    `json:"busy_runs"`
+
+	Output      bool   `json:"output"`
+	Outcome     string `json:"outcome"`
+	RetryAfter  string `json:"retry_after"`
+	Reason      string `json:"reason"`
+	BatchesFile string `json:"batches_file"`
+	Dedupe      bool   `json:"dedupe"`
+	SendBlock   bool   `json:"send_block"`
 }
 
 // event is one event of the script: exactly one field is set.
@@ -132,6 +157,11 @@ func main() {
 
 		return
 	}
+	if b.Output {
+		sdk.ServeOutput(name, version, &output{b: b, dir: dir}, configKind())
+
+		return
+	}
 	in := input{b: b, dir: dir, runs: new(atomic.Int64)}
 	if b.Browse {
 		sdk.ServeInput(name, version, browsingInput{in}, inputKind(b))
@@ -174,6 +204,12 @@ func inputKind(b behaviour) manifest.InputKind {
 		ReadModes:        []string{"poll"},
 		Types:            []string{"int32"},
 		Browse:           b.Browse,
+	}
+}
+
+func configKind() manifest.ConfigKind {
+	return manifest.ConfigKind{
+		ConfigSchema: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}`),
 	}
 }
 
@@ -326,4 +362,114 @@ func (s *stubborn) Info(context.Context, *pb.InfoRequest) (*pb.InfoResponse, err
 
 func (s *stubborn) Shutdown(context.Context, *pb.ShutdownRequest) (*pb.ShutdownResponse, error) {
 	return &pb.ShutdownResponse{}, nil
+}
+
+// output is an Output driven by the behaviour file.
+type output struct {
+	b   behaviour
+	dir string
+	mu  sync.Mutex
+}
+
+func (o *output) trace(line string) { input{b: o.b, dir: o.dir}.trace(line) }
+
+func (o *output) Configure(ctx context.Context, id string, cfg json.RawMessage) []sdk.ConfigError {
+	o.trace("configure " + id)
+	if o.b.ConfigBlock {
+		<-ctx.Done()
+
+		return []sdk.ConfigError{{Message: "interrupted"}}
+	}
+	if o.b.ConfigFile != "" {
+		if err := os.WriteFile(filepath.Join(o.dir, o.b.ConfigFile), cfg, 0o600); err != nil {
+			fail(err)
+		}
+	}
+	if !o.b.RefuseConfig {
+		return nil
+	}
+	message := "must be an integer"
+	if o.b.RefuseEcho {
+		var c struct {
+			Config struct {
+				Token string `json:"token"`
+			} `json:"config"`
+		}
+		_ = json.Unmarshal(cfg, &c)
+		message = "bad value " + c.Config.Token
+	}
+
+	return []sdk.ConfigError{{Path: "config.port", Message: message}}
+}
+
+func (o *output) Send(ctx context.Context, id string, b sdk.Batch) sdk.Outcome {
+	o.trace("send " + id + " " + b.MessageID)
+	if o.b.SendBlock {
+		<-ctx.Done()
+
+		return sdk.Outcome{Kind: sdk.OutcomeRetryAfter}
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.b.Dedupe && o.seen(b.MessageID) {
+		return sdk.Outcome{Kind: sdk.OutcomeDuplicate}
+	}
+	if o.b.BatchesFile != "" {
+		line, err := json.Marshal(b)
+		if err != nil {
+			fail(err)
+		}
+		f, err := os.OpenFile(filepath.Join(o.dir, o.b.BatchesFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			fail(err)
+		}
+		defer f.Close()
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			fail(err)
+		}
+	}
+
+	switch o.b.Outcome {
+	case "duplicate":
+		return sdk.Outcome{Kind: sdk.OutcomeDuplicate}
+	case "retry_after":
+		var wait time.Duration
+		if o.b.RetryAfter != "" {
+			d, err := time.ParseDuration(o.b.RetryAfter)
+			if err != nil {
+				fail(err)
+			}
+			wait = d
+		}
+
+		return sdk.Outcome{Kind: sdk.OutcomeRetryAfter, RetryAfter: wait}
+	case "split":
+		return sdk.Outcome{Kind: sdk.OutcomeSplit}
+	case "reject_invalid":
+		return sdk.Outcome{Kind: sdk.OutcomeRejectInvalid, Reason: o.b.Reason}
+	case "suspend_auth":
+		return sdk.Outcome{Kind: sdk.OutcomeSuspendAuth}
+	default:
+		return sdk.Outcome{Kind: sdk.OutcomeAccepted}
+	}
+}
+
+// seen reports whether batches_file holds a batch with id.
+func (o *output) seen(id string) bool {
+	if o.b.BatchesFile == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(o.dir, o.b.BatchesFile))
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		var b struct{ MessageID string }
+		if json.Unmarshal([]byte(line), &b) == nil && b.MessageID == id {
+			return true
+		}
+	}
+
+	return false
 }
