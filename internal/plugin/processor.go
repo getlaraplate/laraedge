@@ -555,46 +555,33 @@ func (p *Processor) handle(out *pb.ProcessorOut, emit func(model.Record), life *
 	wire := out.GetSample()
 	device, signal := wire.GetDevice(), wire.GetSignal()
 
-	signals, ok := p.declared[device]
+	s, err := sampleFromWire(wire)
+	if err != nil {
+		p.refuse("the sample is invalid", device, signal)
+
+		return false
+	}
+	signals, ok := p.declared[s.Device]
 	if !ok {
 		p.refuse("the device is not a derived device of the processor", device, signal)
 
 		return false
 	}
-	declared, ok := signals[signal]
+	declared, ok := signals[s.Signal]
 	if !ok {
 		p.refuse("the signal is not declared on the derived device", device, signal)
 
 		return false
-	}
-
-	s := model.Sample{Device: device, Signal: signal, Quality: model.Quality(wire.GetQuality()), Priority: declared.priority}
-	switch v := wire.GetValue().GetKind().(type) {
-	case *pb.Value_DoubleValue:
-		s.Value = model.Value{Kind: model.KindFloat, Float: v.DoubleValue}
-	case *pb.Value_IntValue:
-		s.Value = model.IntValue(v.IntValue)
-	case *pb.Value_BoolValue:
-		s.Value = model.BoolValue(v.BoolValue)
-	case *pb.Value_StringValue:
-		s.Value = model.StringValue(v.StringValue)
 	}
 	if s.Value.Kind != declared.kind {
 		p.refuse("the value kind is not the declared type", device, signal)
 
 		return false
 	}
-	if ts := wire.GetTs(); ts != nil && ts.CheckValid() == nil {
-		s.TS = ts.AsTime()
-	}
-	if s.Validate() != nil {
-		p.refuse("the sample is invalid", device, signal)
-
-		return false
-	}
+	s.Priority = declared.priority
 
 	p.down.Store(false)
-	life.Read(device)
+	life.Read(s.Device)
 	emit(model.SampleRecord(s))
 
 	return true
