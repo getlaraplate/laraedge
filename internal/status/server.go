@@ -19,6 +19,7 @@ import (
 
 	"github.com/getlaraplate/laraedge/internal/buffer"
 	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/supervisor"
 )
 
@@ -284,14 +285,26 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 
 // statusDoc is the body of /status.
 type statusDoc struct {
-	AgentID       string      `json:"agent_id"`
-	AgentVersion  string      `json:"agent_version"`
-	UptimeSeconds float64     `json:"uptime_seconds"`
-	ConfigApplied bool        `json:"config_applied"`
-	ConfigVersion int64       `json:"config_version"`
-	Inputs        []inputDoc  `json:"inputs"`
-	Outputs       []outputDoc `json:"outputs"`
-	Plugins       []pluginDoc `json:"plugins"`
+	AgentID       string         `json:"agent_id"`
+	AgentVersion  string         `json:"agent_version"`
+	UptimeSeconds float64        `json:"uptime_seconds"`
+	ConfigApplied bool           `json:"config_applied"`
+	ConfigVersion int64          `json:"config_version"`
+	Inputs        []inputDoc     `json:"inputs"`
+	Outputs       []outputDoc    `json:"outputs"`
+	Plugins       []pluginDoc    `json:"plugins"`
+	Processors    []processorDoc `json:"processors"`
+}
+
+// processorDoc is a processor of the applied document. Refused and Dropped
+// count since the processor instance started.
+type processorDoc struct {
+	ID        string `json:"id"`
+	Plugin    string `json:"plugin"`
+	State     string `json:"state"`
+	Refused   uint64 `json:"refused"`
+	Dropped   uint64 `json:"dropped"`
+	LastError string `json:"last_error,omitempty"`
 }
 
 // pluginDoc is a plugin the applied document uses. Restarts is the total;
@@ -317,10 +330,12 @@ type inputDoc struct {
 }
 
 type outputDoc struct {
-	ID                 string            `json:"id"`
-	Type               string            `json:"type"`
-	State              string            `json:"state"`
-	ClockOffsetSeconds float64           `json:"clock_offset_seconds"`
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	State string `json:"state"`
+	// ClockOffsetSeconds is absent for an output of type plugin:<id>,
+	// which has no clock offset.
+	ClockOffsetSeconds *float64          `json:"clock_offset_seconds,omitempty"`
 	Buffer             bufferDoc         `json:"buffer"`
 	Dropped            map[string]uint64 `json:"dropped"`
 	CorruptRecords     uint64            `json:"corrupt_records"`
@@ -353,6 +368,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		Inputs:        make([]inputDoc, 0, len(st.Inputs)),
 		Outputs:       make([]outputDoc, 0, len(st.Outputs)),
 		Plugins:       make([]pluginDoc, 0, len(st.Plugins)),
+		Processors:    make([]processorDoc, 0, len(st.Processors)),
 	}
 	for _, in := range st.Inputs {
 		d := inputDoc{
@@ -373,11 +389,16 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		for reason, n := range out.Buffer.Dropped {
 			dropped[reason] = n
 		}
+		var offset *float64
+		if hasClockOffset(out) {
+			seconds := out.ClockOffset.Seconds()
+			offset = &seconds
+		}
 		doc.Outputs = append(doc.Outputs, outputDoc{
 			ID:                 out.ID,
 			Type:               out.Type,
 			State:              out.State,
-			ClockOffsetSeconds: out.ClockOffset.Seconds(),
+			ClockOffsetSeconds: offset,
 			Buffer: bufferDoc{
 				Critical: queueOf(out.Buffer.Critical, now),
 				Bulk:     queueOf(out.Buffer.Bulk, now),
@@ -393,8 +414,19 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	for _, p := range st.Plugins {
 		doc.Plugins = append(doc.Plugins, pluginDoc{ID: p.ID, State: p.State, Pid: p.Pid, Restarts: p.Restarts, LastError: p.LastError})
 	}
+	for _, p := range st.Processors {
+		doc.Processors = append(doc.Processors, processorDoc{
+			ID: p.ID, Plugin: p.Plugin, State: p.State, Refused: p.Refused, Dropped: p.Dropped, LastError: p.LastError,
+		})
+	}
 
 	s.writeJSON(w, http.StatusOK, doc)
+}
+
+// hasClockOffset reports whether out estimates the backend clock: every
+// output but those of type plugin:<id>.
+func hasClockOffset(out supervisor.OutputStatus) bool {
+	return !strings.HasPrefix(out.Type, plugin.DriverPrefix)
 }
 
 func queueOf(q buffer.QueueStats, now time.Time) queueDoc {

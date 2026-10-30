@@ -102,6 +102,23 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		}
 	}
 
+	if len(st.Processors) > 0 {
+		w.family("processor_up", "gauge", "1 when the processor's stream to its plugin is open, 0 otherwise; machine data flows either way.")
+		for _, p := range st.Processors {
+			w.sample("processor_up", boolValue(p.State == supervisor.ProcessorUp), "processor", p.ID)
+		}
+
+		w.family("processor_refused_total", "counter", "What the processor's plugin sent outside its declared derived devices and signals, or with another value kind, refused; reset to 0 when the processor restarts.")
+		for _, p := range st.Processors {
+			w.sample("processor_refused_total", float64(p.Refused), "processor", p.ID)
+		}
+
+		w.family("processor_dropped_total", "counter", "Copies of observed records dropped because the processor's queue was full; reset to 0 when the processor restarts.")
+		for _, p := range st.Processors {
+			w.sample("processor_dropped_total", float64(p.Dropped), "processor", p.ID)
+		}
+	}
+
 	queues := func(name, help string, value func(buffer.QueueStats) float64) {
 		w.family(name, "gauge", help)
 		for _, out := range running {
@@ -146,8 +163,11 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		}
 	}
 
-	w.family("clock_offset_seconds", "gauge", "Backend clock minus agent clock, estimated from the last response.")
+	w.family("clock_offset_seconds", "gauge", "Backend clock minus agent clock, estimated from the last response; not for plugin outputs.")
 	for _, out := range st.Outputs {
+		if !hasClockOffset(out) {
+			continue
+		}
 		w.sample("clock_offset_seconds", out.ClockOffset.Seconds(), "output", out.ID)
 	}
 
