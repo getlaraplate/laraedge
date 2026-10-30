@@ -129,11 +129,11 @@ references from `@v0.1.0` to `@v0.1.1`.
   `output`; `{id, config}` against `Manifest.ValidateOutput`); problems prefixed `processors.<i>` / `outputs.<i>`;
   plan 2's R5 drop rule (secret key or `secret://` value) applied to `config`.
 
-- [ ] **Step 1: Failing tests:** an unknown plugin, a plugin without the kind, a `config` the manifest refuses, at
+- [x] **Step 1: Failing tests:** an unknown plugin, a plugin without the kind, a `config` the manifest refuses, at
   their paths; a `secret://` value where the schema wants an integer is not reported offline; `config validate`
   reports them; no message contains a value.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 3: One output loop behind a `Sender`
 
