@@ -1,12 +1,12 @@
 ---
-status: open
+status: closed
 created_on: 2026-10-29
 ---
 # Plugin processors and plugin outputs. Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block.
 
-**Status:** Open. Approved (2026-10-29), in progress.
+**Status:** Closed (2026-10-30). See the delivery status at the end.
 
 **Goal:** the agent runs the two remaining plugin kinds: a processor (`processors[]`) observes copies of the records of
 named devices and emits samples for derived devices it declares, never touching machine data; a plugin output
@@ -229,5 +229,65 @@ and `jsonl`), `docs/CONFIGURATION.md` (`processors`, plugin outputs, secret fiel
   `suspended_auth` and removing it resumes; killing `line-state` leaves machine data flowing, derived signals `bad`
   then `death`, and after the restart derived data again.
 - [x] **Step 2: Docs.**
-- [ ] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, index; the
+- [x] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, index; the
   stack spec status line; commit.
+
+## Delivery status (2026-10-30): shipped
+
+All seven tasks are built on branch `feat/plugin-processors-outputs`, each reviewed, then a whole-branch review and one
+fix wave. The agent runs the two remaining plugin kinds on `laraedge-sdk` v0.1.1. Configuration: top-level
+`processors[]` (`observe`, derived `devices` with typed signals, `death_tolerance`, `config`) and `outputs[].config`
+for `plugin:<id>` types only, with the secret-key rule in every `config` and the refusals of the Review Focus at their
+paths; `config validate` checks processors and plugin outputs against their manifests. `output.HTTP`'s delivery loop
+moved into `output.Loop` behind a `Sender`, with no behaviour change for `laraplate-http`; a plugin output is an
+`OutputSender` on the same loop (outcomes mapped as in the Global Constraints, `Send` past 30 s a retry, re-`Configure`
+after a plugin restart, `ReloadCredentials` on SIGHUP). A processor gets copies of its observed devices' records,
+births included, through a 1,000-record non-blocking tap after the transforms; it emits only declared derived samples
+(refusals counted), and its derived devices live as a virtual input keyed `processor:<id>`, with the agent sending
+births and deaths. The supervisor starts the plugins used by inputs, processors and outputs, applies and rolls back
+processors and plugin outputs by difference, and reports them in `/status` and in `laraplate_edge_processor_up`,
+`laraplate_edge_processor_refused_total` and `laraplate_edge_processor_dropped_total`. The end-to-end test runs the
+SDK's `simulated-counter`, `line-state` and `jsonl` through a jsonl kill, a suspension and a line-state kill past the
+tolerance, and checks that nothing is lost or repeated. Commits from `3705aac` to `b105a95`, and the closing commit. The
+divergences from the plan, each with its reason:
+
+- **Branch.** The work ran on `feat/plugin-processors-outputs`, branched from `develop`, not on `develop`, so the pull
+  request follows the repository's branch-and-review flow.
+- **The token step stays in HTTP.** `output.Loop` knows no token; HTTP resolves it in an unexported `preparer` hook the
+  loop calls before sealing a batch, so an HTTP output without a usable token still suspends before sealing. A plugin
+  output seals first and gets `Retry` or `Suspend` from `Send`. `LoopConfig` also has `Rand`, for deterministic jitter.
+- **Unresolvable secrets in a plugin output's `config` suspend the output**, as an unresolvable HTTP token does; the
+  plugin refusing the configuration after a restart is a retry (Q2). At apply, `OutputSender.Configure` runs
+  synchronously, so a refusal or an unresolvable secret rolls the document back; a plugin down or timing out at apply
+  only logs, the rule of plan 2's plugin inputs.
+- **A batch over 16 MB is split before sending**, checked against the handshake's message limit; a one-record batch over
+  it is dropped with a `rejected_invalid` marker.
+- **Processor details.** After a restart a derived device is born at the first 1 s tick of the new stream; derived
+  samples take the declared priority, not the plugin's; copies queued while the stream is down go to the next stream; a
+  copy lost to a failed stream send is counted as dropped; processor counters restart from zero with the instance.
+- **Births reach processors.** The router's births of observed devices are offered to the tap when an input registers,
+  and a processor that starts after its inputs is offered their current births; such a birth can come after a sample
+  sent at the same moment, or twice.
+- **Restarts are done by the adapters.** On a plugin crash its processors and plugin outputs configure again and reopen
+  their streams on the new generation, as plugin inputs do; the supervisor does not stop and start them.
+- **Close order unchanged**: inputs, processors, plugins, outputs. A plugin output's last send during shutdown is a retry
+  and its batch stays buffered.
+- **`url` and `token` are refused on plugin outputs** (`outputs.<i>.url: is not allowed`), so the documentation's "leave
+  them out" is enforced.
+
+Left open, for decisions outside this plan:
+
+- **Derived signals after a short outage.** After a processor outage shorter than `death_tolerance` its derived signals
+  stay `bad` until the plugin emits again, and the new stream starts without history; documented as a known limit. A
+  follow-up could offer the reopened stream the last sample of each observed signal.
+- **Births after a plugin restart.** A processor whose plugin restarts on its own is not offered the births of its
+  observed devices again; documented as a known limit.
+- **Plugin output backoff after a plugin recovery.** A plugin output in backoff after a crash loop is not woken by the
+  plugin's new generation, so delivery can resume up to 5 minutes later than it could; nothing is lost.
+- **Socket path length.** With a relative `data_dir` in a deep checkout the plugin socket path can exceed the 107 bytes
+  Linux allows (plan 2 host behaviour); documented in the troubleshooting table and `examples/plugin-line`. A shorter
+  socket directory is a follow-up.
+- **`Release` stays deferred** (Q7): a removed processor or output instance keeps its state in the plugin until the
+  plugin restarts; documented as a known limit.
+
+**Documented in:** `docs/CONFIGURATION.md`, `docs/USAGE.md` (and `README.md`, `examples/plugin-line/`).
