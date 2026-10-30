@@ -223,11 +223,11 @@ and `jsonl`), `docs/CONFIGURATION.md` (`processors`, plugin outputs, secret fiel
 `docs/USAGE.md` (running plugins, status and metrics, troubleshooting), `README.md`, this plan,
 `docs/superpowers/plans/INDEX.md`.
 
-- [ ] **Step 1: End to end.** The built agent with the SDK's `simulated-counter`, `line-state` and `jsonl` (built
+- [x] **Step 1: End to end.** The built agent with the SDK's `simulated-counter`, `line-state` and `jsonl` (built
   from the SDK module at v0.1.1): machine and derived samples land in the `jsonl` file; killing `jsonl` loses nothing
   (the file holds every record after the restart, `DUPLICATE` tolerated); the `.suspend` file puts the output in
   `suspended_auth` and removing it resumes; killing `line-state` leaves machine data flowing, derived signals `bad`
   then `death`, and after the restart derived data again.
-- [ ] **Step 2: Docs.**
+- [x] **Step 2: Docs.**
 - [ ] **Step 3: Close.** Delivery status with divergences, `**Documented in:**`, ticks, `status: closed`, index; the
   stack spec status line; commit.
