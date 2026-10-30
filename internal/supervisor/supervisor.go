@@ -201,54 +201,82 @@ type inputInstance struct {
 
 // emit routes rec once the instance is registered; after retire it drops
 // it. A routed record, as the input's transforms left it, is then offered
-// to the running processors, with no lock of the instance or the
-// supervisor held: Offer never blocks, and machine data never waits for a
-// processor (decision Q4).
+// to the running processors, after the births its registration sent, with
+// no lock of the instance or the supervisor held: Offer never blocks, and
+// machine data never waits for a processor (decision Q4).
 func (i *inputInstance) emit(rec model.Record) {
-	if !i.route(rec) || i.taps == nil {
+	births, ok := i.route(rec)
+	if !ok {
+		return
+	}
+	i.offer(births)
+	i.offer([]model.Record{rec})
+}
+
+// offer offers recs to the running processors. The caller holds no lock.
+func (i *inputInstance) offer(recs []model.Record) {
+	if i.taps == nil || len(recs) == 0 {
 		return
 	}
 	if taps := i.taps.Load(); taps != nil {
 		for _, p := range *taps {
-			p.Offer(rec)
+			for _, rec := range recs {
+				p.Offer(rec)
+			}
 		}
 	}
 }
 
 // route routes rec unless the instance is retired, and reports whether it
-// did.
-func (i *inputInstance) route(rec model.Record) bool {
+// did, with the births its registration sent when rec registered it.
+func (i *inputInstance) route(rec model.Record) ([]model.Record, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	if !i.registerLocked() {
-		return false
+	births, ok := i.registerLocked()
+	if !ok {
+		return nil, false
 	}
 	i.router.Emit(rec)
 
-	return true
+	return births, true
 }
 
 // register registers the instance's devices and sends their births, once,
-// unless it is retired.
+// unless it is retired; the births are then offered to the running
+// processors, the instance's lock released.
 func (i *inputInstance) register() {
 	i.mu.Lock()
-	defer i.mu.Unlock()
+	births, _ := i.registerLocked()
+	i.mu.Unlock()
 
-	i.registerLocked()
+	i.offer(births)
 }
 
-func (i *inputInstance) registerLocked() bool {
+// registerLocked registers the instance on its first call while it is
+// live, and returns the births it sent then, as records. It reports
+// whether the instance is live. The caller holds i.mu.
+func (i *inputInstance) registerLocked() ([]model.Record, bool) {
 	if !i.live {
-		return false
+		return nil, false
 	}
-	if !i.registered {
-		i.registered = true
-		i.token = i.router.SetInput(i.cfg)
-		i.router.BirthInput(i.cfg.ID)
+	if i.registered {
+		return nil, true
+	}
+	i.registered = true
+	i.token = i.router.SetInput(i.cfg)
+
+	return birthRecords(i.router.BirthInput(i.cfg.ID)), true
+}
+
+// birthRecords returns births as records.
+func birthRecords(births []model.DeviceEvent) []model.Record {
+	recs := make([]model.Record, 0, len(births))
+	for _, ev := range births {
+		recs = append(recs, model.EventRecord(ev))
 	}
 
-	return true
+	return recs
 }
 
 // retire ends the instance's emits and removes its own registration. Later

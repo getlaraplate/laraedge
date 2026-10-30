@@ -319,22 +319,50 @@ func (r *Router) Emit(rec model.Record) {
 }
 
 // BirthInput sends the birth of every device of input id to every output
-// routing some of its signals: at the input's start.
-func (r *Router) BirthInput(id string) {
+// routing some of its signals: at the input's start. It returns the births
+// it built, every signal of the device listed, so the caller can offer them
+// to the processors once it holds no lock.
+func (r *Router) BirthInput(id string) []model.DeviceEvent {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	reg, ok := r.inputs[id]
 	if !ok {
-		return
+		return nil
 	}
 
+	var births []model.DeviceEvent
 	for _, device := range devicesOf(reg.cfg) {
 		ev := r.birth(device)
+		births = append(births, ev)
 		for _, out := range r.order {
 			r.event(out, ev)
 		}
 	}
+
+	return births
+}
+
+// Births returns the birth of every device of the running inputs, once
+// each, in input id order, at the clock time; it sends nothing. A processor
+// starting after the inputs is offered them.
+func (r *Router) Births() []model.DeviceEvent {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var births []model.DeviceEvent
+	seen := map[string]bool{}
+	for _, inID := range r.inputIDs() {
+		for _, device := range devicesOf(r.inputs[inID].cfg) {
+			if seen[device] {
+				continue
+			}
+			seen[device] = true
+			births = append(births, r.birth(device))
+		}
+	}
+
+	return births
 }
 
 // BirthTo sends to output id the birth of every device of the running inputs

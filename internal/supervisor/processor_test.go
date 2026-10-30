@@ -429,3 +429,41 @@ func TestProcessorWithTheIDOfAnInput(t *testing.T) {
 		t.Fatalf("line-1 born %d times, want 2: the removed processor's devices are forgotten", got)
 	}
 }
+
+// TestProcessorReceivesTheFirstBirthsOfItsObservedDevices is decision Q4
+// for births: a processor receives the birth an input sends at its start,
+// whether the input starts with it or was already running when a later
+// document added the processor.
+func TestProcessorReceivesTheFirstBirthsOfItsObservedDevices(t *testing.T) {
+	const birthOfA1 = `"Event":{"Kind":1,"Device":"a1"`
+	tests := []struct {
+		name  string
+		apply func(f *fixture, proc installedPlugin, processorDoc func(int64) config.Document)
+	}{
+		{"input started with the processor", func(f *fixture, _ installedPlugin, processorDoc func(int64) config.Document) {
+			f.mustApply(processorDoc(1))
+		}},
+		{"processor added to a running input", func(f *fixture, proc installedPlugin, processorDoc func(int64) config.Document) {
+			f.mustApply(f.extendedDocument(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}),
+				extras{plugins: []any{proc.entry(nil)}}))
+			f.be.waitDetail(f.t, "main", "birth a1 [state:string count:number]", 1)
+			f.mustApply(processorDoc(2))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _ := newPluginFixture(t)
+			proc := installPlugin(t, "proc", `{"processor":true,"trace_file":"trace","records_file":"records"}`)
+			processorDoc := func(version int64) config.Document {
+				return f.extendedDocument(f.document(version, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}), extras{
+					plugins:    []any{proc.entry(nil)},
+					processors: []any{processorSection("line", "proc", nil, "a1")},
+				})
+			}
+
+			tc.apply(f, proc, processorDoc)
+
+			proc.waitFile(t, "records", "the birth of a1", func(s string) bool { return strings.Contains(s, birthOfA1) })
+		})
+	}
+}

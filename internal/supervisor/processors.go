@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/plugin"
 )
 
@@ -111,6 +112,13 @@ func (s *Supervisor) startProcessor(ctx context.Context, cfg config.Processor) e
 	delete(s.failedProc, cfg.ID)
 	s.setTapsLocked()
 	s.mu.Unlock()
+
+	// The inputs registering from now on offer it their births; those
+	// already running are offered theirs here, the supervisor's lock
+	// released. A device registering in between may be offered twice.
+	for _, ev := range s.router.Births() {
+		proc.Offer(model.EventRecord(ev))
+	}
 
 	return nil
 }
