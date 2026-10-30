@@ -113,11 +113,20 @@ func installPlugin(t *testing.T, id, behaviour string) installedPlugin {
 	dir := shortTempDir(t)
 	p := installedPlugin{id: id, dir: dir, binary: filepath.Join(dir, exeName("testplugin"))}
 	writeTestFile(t, p.binary, data, 0o700)
-	writeTestFile(t, filepath.Join(dir, plugin.ManifestFile), manifestJSON, 0o600)
 	if behaviour == "" {
 		behaviour = "{}"
 	}
 	writeTestFile(t, filepath.Join(dir, "behaviour.json"), []byte(behaviour), 0o600)
+	if strings.Contains(behaviour, `"output":true`) || strings.Contains(behaviour, `"processor":true`) {
+		// The kind the plugin serves comes from its behaviour, and so does
+		// its manifest.
+		out, err := exec.Command(p.binary, "--manifest").Output()
+		if err != nil {
+			t.Fatalf("test plugin manifest: %v", err)
+		}
+		manifestJSON = bytes.TrimSuffix(out, []byte("\n"))
+	}
+	writeTestFile(t, filepath.Join(dir, plugin.ManifestFile), manifestJSON, 0o600)
 
 	if p.sha, err = plugin.HashFile(p.binary); err != nil {
 		t.Fatal(err)
@@ -181,7 +190,25 @@ func pluginInput(id, pluginID, device string, variant int, signals ...string) ma
 func (f *fixture) pluginDocument(base config.Document, plugins []any, inputs ...map[string]any) config.Document {
 	f.t.Helper()
 
-	tree := map[string]any{"schema": config.SchemaName, "version": base.Version, "plugins": plugins}
+	var ins []any
+	for _, in := range inputs {
+		ins = append(ins, in)
+	}
+
+	return f.extendedDocument(base, extras{plugins: plugins, inputs: ins})
+}
+
+// extras are the sections extendedDocument adds to a document.
+type extras struct {
+	plugins, inputs, outputs, processors []any
+}
+
+// extendedDocument is base (a document of the fixture) with the plugins and
+// processors of x, and the inputs and outputs of x appended to its own.
+func (f *fixture) extendedDocument(base config.Document, x extras) config.Document {
+	f.t.Helper()
+
+	tree := map[string]any{"schema": config.SchemaName, "version": base.Version, "plugins": orEmpty(x.plugins)}
 	var ins, outs []any
 	for _, in := range base.Inputs {
 		var raw any
@@ -190,9 +217,7 @@ func (f *fixture) pluginDocument(base config.Document, plugins []any, inputs ...
 		}
 		ins = append(ins, raw)
 	}
-	for _, in := range inputs {
-		ins = append(ins, in)
-	}
+	ins = append(ins, x.inputs...)
 	for _, out := range base.Outputs {
 		var raw any
 		if err := json.Unmarshal(out.Raw, &raw); err != nil {
@@ -200,7 +225,11 @@ func (f *fixture) pluginDocument(base config.Document, plugins []any, inputs ...
 		}
 		outs = append(outs, raw)
 	}
+	outs = append(outs, x.outputs...)
 	tree["inputs"], tree["outputs"] = orEmpty(ins), orEmpty(outs)
+	if len(x.processors) > 0 {
+		tree["processors"] = x.processors
+	}
 
 	return f.parse(tree)
 }
