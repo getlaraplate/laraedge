@@ -179,6 +179,9 @@ type runningInput struct {
 // Lock order: the input's transform processor, then inputInstance.mu, then
 // the router's locks (Router.mu, then a hold queue's), then an output
 // buffer's lock inside Append or AddLoss.
+// The processors are offered a routed record after inputInstance.mu is
+// released, through Supervisor.taps, read without a lock; Offer never
+// blocks (decision Q4).
 // Supervisor.mu is taken before a buffer's lock (Status reads the buffer
 // figures under it) and before a plugin host's lock (Status reads the plugin
 // states under it), and never while an instance's or the router's lock is
@@ -355,8 +358,8 @@ func New(cfg Config) (*Supervisor, error) {
 
 // plan is what an Apply changes: components to stop (changed or removed,
 // by id) and to start (changed or added, by index in the new document).
-// Plugins count as components: only the plugins an input of the document
-// uses run.
+// Plugins count as components: only the plugins a component of the
+// document uses run.
 type plan struct {
 	stopInputs      []string
 	stopOutputs     []string
@@ -410,11 +413,13 @@ type journal struct {
 // version counts as 0; ruling R9). Otherwise it applies by difference,
 // comparing each component's Raw by id: unchanged inputs and outputs keep
 // running untouched, changed ones are restarted, removed ones stop (an
-// output's directory is kept) and added ones start. A plugin runs while an
-// input of the document uses it: it starts before those inputs, restarts
-// with all of them when its entry or its binary changes, and stops after
-// the last of them (decision H5). When a component fails to start, or an
-// input does not start within the start timeout, what this Apply started is
+// output's directory is kept) and added ones start; processors likewise. A
+// plugin runs while an input, a processor or an output of the document uses
+// it: it starts before them, restarts with all of them when its entry or its
+// binary changes, and stops after the last of them (decisions H5, Q6). A
+// plugin output or a processor whose plugin refuses its section fails to
+// start (ruling R6). When a component fails to start, or an input or a
+// processor does not start within the start timeout, what this Apply started is
 // stopped and what it stopped is started again: ResultRolledBack with the
 // errors. When ctx is cancelled during a failed apply, the rollback still
 // runs but there is no outcome: Apply returns the context error. On success
