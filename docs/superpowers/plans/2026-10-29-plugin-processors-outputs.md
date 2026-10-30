@@ -187,13 +187,13 @@ echo a derived sample per observed sample, emit an undeclared device or signal o
   `Close() error`, `Input() config.Input` (the virtual input of the derived devices, for the router's births),
   `Stats() ProcessorStats{Up bool; Refused, Dropped uint64}`.
 
-- [ ] **Step 1: Failing tests:** observed samples reach the plugin, derived samples come back and are emitted with
+- [x] **Step 1: Failing tests:** observed samples reach the plugin, derived samples come back and are emitted with
   the plugin's ts and quality; refusals and counts per the Review Focus; `Offer` never blocks with a hung plugin and
   counts drops beyond 1,000; on a plugin crash one `bad` sample per derived signal then `death` after the tolerance,
   and after the restart `Configure` and `Process` again then birth; `Close` ends the stream and nothing is emitted
   afterwards.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks (also `-race -count=5 ./internal/plugin`); commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks (also `-race -count=5 ./internal/plugin`); commit.**
 
 ### Task 6: Supervisor, status and metrics
 
