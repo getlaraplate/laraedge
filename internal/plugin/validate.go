@@ -221,6 +221,101 @@ func Validate(doc config.Document, specs []Spec) []string {
 		}
 	}
 
+	for i, pr := range doc.Processors {
+		prefix := fmt.Sprintf("processors.%d", i)
+		spec, msgs2, ok := componentSpec(pr.Plugin, prefix+".plugin", declared, byID)
+		msgs = append(msgs, msgs2...)
+		if !ok || spec.Manifest.Kinds.Processor == nil {
+			if ok {
+				msgs = append(msgs, prefix+".plugin: the plugin does not offer the processor kind")
+			}
+			continue
+		}
+		section := processorSection(pr)
+		msgs = append(msgs, configProblems(prefix, section, spec.Manifest.ValidateProcessor(section))...)
+	}
+
+	for i, out := range doc.Outputs {
+		id, isPlugin := strings.CutPrefix(out.Type, DriverPrefix)
+		if !isPlugin {
+			continue
+		}
+		prefix := fmt.Sprintf("outputs.%d", i)
+		spec, msgs2, ok := componentSpec(id, prefix+".type", declared, byID)
+		msgs = append(msgs, msgs2...)
+		if !ok || spec.Manifest.Kinds.Output == nil {
+			if ok {
+				msgs = append(msgs, prefix+".type: the plugin does not offer the output kind")
+			}
+			continue
+		}
+		section := outputSection(out)
+		msgs = append(msgs, configProblems(prefix, section, spec.Manifest.ValidateOutput(section))...)
+	}
+
+	return msgs
+}
+
+// componentSpec looks up the plugin a processor or output names. ok is false
+// when the plugin is undeclared (a message is returned) or its files failed
+// Resolve (no message: Resolve already reported it).
+func componentSpec(id, path string, declared map[string]bool, byID map[string]Spec) (Spec, []string, bool) {
+	if !declared[id] {
+		return Spec{}, []string{path + ": no plugin entry with this id"}, false
+	}
+	spec, found := byID[id]
+
+	return spec, nil, found
+}
+
+// processorSection is the {id, observe, devices, config} object the manifest
+// validates; the agent-owned fields come from the canonical processor.
+func processorSection(pr config.Processor) json.RawMessage {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(pr.Raw, &fields)
+	section := map[string]any{"id": pr.ID, "observe": pr.Observe}
+	if devices, ok := fields["devices"]; ok {
+		section["devices"] = devices
+	}
+	section["config"] = configOrEmpty(pr.Config)
+	out, _ := json.Marshal(section)
+
+	return out
+}
+
+// outputSection is the {id, config} object the manifest validates.
+func outputSection(out config.Output) json.RawMessage {
+	raw, _ := json.Marshal(map[string]any{"id": out.ID, "config": configOrEmpty(out.Config)})
+
+	return raw
+}
+
+func configOrEmpty(c json.RawMessage) json.RawMessage {
+	if len(c) == 0 {
+		return json.RawMessage("{}")
+	}
+
+	return c
+}
+
+// configProblems renders manifest problems under prefix, leaving secret
+// values and keys to Configure (decision H3).
+func configProblems(prefix string, raw json.RawMessage, problems []manifest.Problem) []string {
+	var section any
+	_ = json.Unmarshal(raw, &section)
+
+	var msgs []string
+	for _, problem := range problems {
+		if dropped(section, problem.Path) {
+			continue
+		}
+		if problem.Path == "" {
+			msgs = append(msgs, prefix+": "+problem.Message)
+		} else {
+			msgs = append(msgs, prefix+"."+dotted(problem.Path)+": "+problem.Message)
+		}
+	}
+
 	return msgs
 }
 
