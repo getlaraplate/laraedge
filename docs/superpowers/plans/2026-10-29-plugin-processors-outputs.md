@@ -208,13 +208,13 @@ the router as virtual inputs; `used` per Q6), `internal/supervisor/status.go`, `
   `laraplate_edge_processor_refused_total{processor}`, `laraplate_edge_processor_dropped_total{processor}`; output
   series unchanged and filled for plugin outputs.
 
-- [ ] **Step 1: Failing tests:** a document with a processor and a plugin output runs end to end inside the
+- [x] **Step 1: Failing tests:** a document with a processor and a plugin output runs end to end inside the
   supervisor (machine data and derived data reach the output); a processor or plugin output failing to start rolls
   the document back; Review Focus reload of one output's `config` keeps the pid; a plugin crash restarts its
   processors and outputs, the buffer keeps everything; removing the last component stops the plugin; status and
   metric families; `Close` stops processors before their plugin, outputs after the inputs as today.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit.**
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit.**
 
 ### Task 7: End to end, documentation, closing
 
