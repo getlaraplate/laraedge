@@ -789,8 +789,10 @@ processors:
 What the agent does with it:
 
 - **Copies.** After an input's transforms, a copy of every sample and device event of an observed device
-  goes to the processor through a queue of 1,000 records. The input never waits for it: when the queue
-  is full the copy is dropped and counted (`dropped` in `/status`).
+  goes to the processor through a queue of 1,000 records, the `birth` an input sends when it starts
+  included. A processor that starts after its inputs (a new or changed processor, a rollback) is sent
+  the current `birth` of each device it observes. The input never waits for it: when the queue is full
+  the copy is dropped and counted (`dropped` in `/status`).
 - **Derived samples.** A sample the plugin sends for a declared derived device and signal, with a value
   of the declared `type`, is routed to the outputs like a machine sample: it keeps the plugin's `ts` and
   quality and takes the declared `priority`. Anything else (a device it did not declare, an undeclared
@@ -799,9 +801,15 @@ What the agent does with it:
 - **Births and deaths.** The agent, not the plugin, sends the `birth` of the derived devices, within a
   second of the processor's stream to the plugin opening. A derived device is alive while that stream
   is up, whether or not it sends samples. When the stream goes down (the plugin died, restarts, or
-  refused its configuration after a restart), each derived signal is sent `bad` once, with the zero
-  value of its type, and the derived devices are reported dead after `death_tolerance`. When the
-  stream is back they are born again.
+  refused its configuration after a restart), each derived signal is sent `bad` once per outage, with
+  the zero value of its type, and the derived devices are reported dead once the stream has been down
+  for `death_tolerance`. A derived device is born again only after it died: when the stream is back
+  after a death, it is born again within a second. After an outage shorter than `death_tolerance` the
+  derived devices stay alive and are not born again, and their signals keep the `bad` value until the
+  plugin sends a new sample for them. The new stream does not replay what the plugin missed: it
+  receives the copies still in the queue (those beyond its 1,000 records were dropped and counted) and
+  the copies from then on; a plugin that restarted has lost its own state and is not sent the births of
+  the observed devices again.
 
 `config validate` checks `observe`, the derived names and the `config` against the plugin's manifest
 offline, reporting each problem with its path, for instance `processors.0.observe.1: is not a device of
@@ -811,8 +819,8 @@ any input` or `processors.0.devices.0.device: is the name of a device of an inpu
 
 An output with `type: plugin:<id>` delivers its batches through a plugin that offers the output kind
 (the SDK's example is `jsonl`, which appends each batch to a file). Every key of an output applies as
-for `laraplate-http` (`route`, `batch`, `buffer`) except `url` and `token`, which it does not use: leave
-them out. The plugin's own settings go in `config`, checked against the `config` schema of its manifest. A plugin output has its own disk
+for `laraplate-http` (`route`, `batch`, `buffer`) except `url` and `token`, which it does not use: they
+are refused (`outputs.0.url: is not allowed`). The plugin's own settings go in `config`, checked against the `config` schema of its manifest. A plugin output has its own disk
 buffer, its own `source_seq` and the same delivery loop as `laraplate-http` (see "Buffer"): the plugin
 never buffers.
 
@@ -980,6 +988,12 @@ is exact, but its `ts` range can span records that are still in the buffer.
 - A processor or plugin output removed from the document, or renamed, keeps its state inside the
   running plugin until the plugin restarts: the agent stops using the instance but does not ask the
   plugin to release it.
+- After a processor's stream was down for less than its `death_tolerance` (a plugin crash with a quick
+  restart, for instance), its derived signals stay at the `bad` value sent at the outage until the plugin
+  sends a new sample for each of them: the derived devices are not born again, nothing tells the plugin
+  to send its current values, and the new stream replays nothing beyond the copies still queued. A
+  plugin that restarted on its own is not sent the births of the observed devices again; it receives
+  them only at the next `birth` of each device, or when a document restarts the processor.
 - A processor's `refused` and `dropped` counts start from 0 again when the processor restarts (a changed
   section, a restart of its plugin by a new document, a rollback); a plugin crash alone does not reset
   them.
