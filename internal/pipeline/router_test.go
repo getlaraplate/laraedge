@@ -230,6 +230,48 @@ func TestRouterBirths(t *testing.T) {
 	}
 }
 
+// TestRouterReturnsTheBirths: BirthInput returns the births it sent, every
+// signal listed, and Births returns those of every running input without
+// sending anything; both feed the processors (decision Q4).
+func TestRouterReturnsTheBirths(t *testing.T) {
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
+	ovens := &sink{}
+	r.SetOutput("ovens", config.Route{Include: []string{"oven-02/temp"}}, ovens)
+	r.SetInput(line())
+	r.SetInput(config.Input{ID: "mixer", Devices: []config.Device{{Device: "mixer-1", Points: []config.Point{{Signal: "rpm"}}}}})
+
+	render := func(births []model.DeviceEvent) []string {
+		var out []string
+		for _, ev := range births {
+			var signals []string
+			for _, si := range ev.Signals {
+				signals = append(signals, si.Signal)
+			}
+			out = append(out, fmt.Sprintf("%s %s %v %s", ev.Kind, ev.Device, signals, ev.TS.Format(time.RFC3339)))
+		}
+
+		return out
+	}
+
+	got := render(r.BirthInput("line"))
+	want := []string{"birth press-07 [state temp] 2026-10-19T08:00:00Z", "birth oven-02 [temp] 2026-10-19T08:00:00Z"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BirthInput() = %q, want %q", got, want)
+	}
+	if got := r.BirthInput("missing"); got != nil {
+		t.Fatalf("BirthInput(missing) = %v, want nil", got)
+	}
+
+	got = render(r.Births())
+	want = []string{"birth press-07 [state temp] 2026-10-19T08:00:00Z", "birth oven-02 [temp] 2026-10-19T08:00:00Z", "birth mixer-1 [rpm] 2026-10-19T08:00:00Z"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Births() = %q, want %q", got, want)
+	}
+	if got := ovens.got(); !reflect.DeepEqual(got, []string{"birth oven-02 [temp]"}) {
+		t.Fatalf("ovens got %q, want the one birth of BirthInput: Births sends nothing", got)
+	}
+}
+
 func TestRouterBirthCarriesTypesUnitsAndClockTime(t *testing.T) {
 	clk := clock.NewFake(start)
 	r := pipeline.NewRouter(clk, slog.New(slog.DiscardHandler))

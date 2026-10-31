@@ -513,3 +513,57 @@ func TestMetricsHaveNoPluginFamiliesWithoutPlugins(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsExposeProcessorsAndPluginOutputs(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(pluginStatus())
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+	families := parseExposition(t, body)
+
+	for _, tc := range []struct {
+		name, typ string
+		want      map[string]float64
+	}{
+		{"laraplate_edge_processor_up", "gauge", map[string]float64{
+			`{processor="line-state"}`: 1, `{processor="spare-state"}`: 0, `{processor="stuck"}`: 0,
+		}},
+		{"laraplate_edge_processor_refused_total", "counter", map[string]float64{
+			`{processor="line-state"}`: 4, `{processor="spare-state"}`: 0, `{processor="stuck"}`: 0,
+		}},
+		{"laraplate_edge_processor_dropped_total", "counter", map[string]float64{
+			`{processor="line-state"}`: 9, `{processor="spare-state"}`: 0, `{processor="stuck"}`: 0,
+		}},
+		{"laraplate_edge_buffer_records", "gauge", map[string]float64{
+			`{output="sink",priority="critical"}`: 2, `{output="sink",priority="bulk"}`: 0,
+		}},
+		{"laraplate_edge_output_state", "gauge", map[string]float64{
+			`{output="sink",state="sending"}`: 1, `{output="sink",state="backoff"}`: 0,
+			`{output="sink",state="suspended_auth"}`: 0, `{output="sink",state="failed"}`: 0,
+		}},
+		{"laraplate_edge_last_confirmation_timestamp_seconds", "gauge", map[string]float64{
+			`{output="sink"}`: float64(epoch.Add(-time.Minute).Unix()),
+		}},
+		{"laraplate_edge_clock_offset_seconds", "gauge", map[string]float64{}},
+	} {
+		f := families[tc.name]
+		if f == nil || f.typ != tc.typ {
+			t.Errorf("%s = %+v, want a %s", tc.name, f, tc.typ)
+
+			continue
+		}
+		if !maps.Equal(f.samples, tc.want) {
+			t.Errorf("%s = %v, want %v", tc.name, f.samples, tc.want)
+		}
+	}
+}
+
+func TestMetricsHaveNoProcessorFamiliesWithoutProcessors(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+
+	if strings.Contains(body, "laraplate_edge_processor_") {
+		t.Errorf("/metrics mentions processors although the configuration has none")
+	}
+}

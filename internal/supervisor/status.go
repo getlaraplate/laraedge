@@ -22,6 +22,36 @@ type Status struct {
 	Outputs []OutputStatus
 	// Plugins are the plugins the applied document uses, by id.
 	Plugins []PluginStatus
+	// Processors are the processors of the applied document, by id.
+	Processors []ProcessorStatus
+}
+
+// States of a processor besides StateFailed.
+const (
+	// ProcessorUp is a processor whose Process stream is open.
+	ProcessorUp = "up"
+	// ProcessorDown is a running processor whose stream is not open: its
+	// plugin is down or restarting; its derived signals are bad.
+	ProcessorDown = "down"
+)
+
+// ProcessorStatus describes one processor.
+type ProcessorStatus struct {
+	// ID is the processor id.
+	ID string
+	// Plugin is the id of the plugin providing it.
+	Plugin string
+	// State is ProcessorUp, ProcessorDown or StateFailed.
+	State string
+	// Refused counts what the plugin sent outside the declared derived
+	// devices and signals, or with another value kind; Dropped counts the
+	// copies of observed records the queue had no room for, those over the
+	// message limit and the one a failed send lost. Both count
+	// since the processor instance started.
+	Refused uint64
+	Dropped uint64
+	// LastError is why a failed processor is not running.
+	LastError string
 }
 
 // InputStatus describes one input.
@@ -75,7 +105,8 @@ type OutputStatus struct {
 	State string
 	// Buffer holds the figures of the output's buffer, zero when failed.
 	Buffer buffer.Stats
-	// ClockOffset is the backend clock minus the agent clock.
+	// ClockOffset is the backend clock minus the agent clock; always zero
+	// for an output of type plugin:<id>, which has no clock offset.
 	ClockOffset time.Duration
 	// LastConfirmation is when a batch was last confirmed, zero before any.
 	LastConfirmation time.Time
@@ -85,7 +116,8 @@ type OutputStatus struct {
 	LastErrorAt time.Time
 }
 
-// Status returns the current state of the inputs, outputs and plugins.
+// Status returns the current state of the inputs, outputs, plugins and
+// processors.
 func (s *Supervisor) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -116,16 +148,19 @@ func (s *Supervisor) Status() Status {
 
 	for id, ro := range s.outputs {
 		lastErr, lastErrAt := ro.out.LastError()
-		st.Outputs = append(st.Outputs, OutputStatus{
+		out := OutputStatus{
 			ID:               id,
 			Type:             ro.cfg.Type,
 			State:            ro.out.State().String(),
 			Buffer:           ro.buf.Stats(),
-			ClockOffset:      ro.out.ClockOffset(),
 			LastConfirmation: ro.out.LastConfirmation(),
 			LastError:        lastErr,
 			LastErrorAt:      lastErrAt,
-		})
+		}
+		if co, ok := ro.out.(clockOffsetter); ok {
+			out.ClockOffset = co.ClockOffset()
+		}
+		st.Outputs = append(st.Outputs, out)
 	}
 	for id, f := range s.failedOut {
 		st.Outputs = append(st.Outputs, OutputStatus{ID: id, Type: f.kind, State: StateFailed, LastError: f.err})
@@ -142,9 +177,24 @@ func (s *Supervisor) Status() Status {
 		st.Plugins = append(st.Plugins, PluginStatus{ID: id, State: StateFailed, LastError: f.err})
 	}
 
+	for id, rp := range s.processors {
+		ps := rp.proc.Stats()
+		state := ProcessorDown
+		if ps.Up {
+			state = ProcessorUp
+		}
+		st.Processors = append(st.Processors, ProcessorStatus{
+			ID: id, Plugin: rp.cfg.Plugin, State: state, Refused: ps.Refused, Dropped: ps.Dropped,
+		})
+	}
+	for id, f := range s.failedProc {
+		st.Processors = append(st.Processors, ProcessorStatus{ID: id, Plugin: f.kind, State: StateFailed, LastError: f.err})
+	}
+
 	slices.SortFunc(st.Inputs, func(a, b InputStatus) int { return strings.Compare(a.ID, b.ID) })
 	slices.SortFunc(st.Outputs, func(a, b OutputStatus) int { return strings.Compare(a.ID, b.ID) })
 	slices.SortFunc(st.Plugins, func(a, b PluginStatus) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(st.Processors, func(a, b ProcessorStatus) int { return strings.Compare(a.ID, b.ID) })
 
 	return st
 }

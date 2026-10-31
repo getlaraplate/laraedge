@@ -22,10 +22,13 @@ transforms of points are built too, with `probe` and `config test` to try them o
 drivers, derived signals, the MQTT output and packages come with later plans. The design lives in the
 Laraplate stack: `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
-Drivers can also run as external **plugins**, separate processes built on the plugin SDK
-(`laraedge-sdk`): the agent pins each one by the SHA-256 of its binary and manifest, supervises and restarts
-it, and reports it in `/status` and the metrics. See [Plugins in the configuration](docs/CONFIGURATION.md#plugins),
-[Running plugins](docs/USAGE.md#running-plugins) and the demo in `examples/simulated-counter`.
+Input drivers, processors and outputs can also run as external **plugins**, separate processes built on the
+plugin SDK (`laraedge-sdk`): the agent pins each one by the SHA-256 of its binary and manifest, supervises and
+restarts it, and reports it in `/status` and the metrics. A processor derives signals on devices of its own
+from copies of the machine data, which it can never change, drop or delay; a plugin output gets the same disk
+buffer and delivery guarantees as the HTTP output. See [Plugins in the configuration](docs/CONFIGURATION.md#plugins),
+[Running plugins](docs/USAGE.md#running-plugins) and the demos in `examples/simulated-counter` (an input) and
+`examples/plugin-line` (an input, a processor and an output).
 
 - [docs/USAGE.md](docs/USAGE.md): build, run, bootstrap file, signals, `probe` and `config test`, plugins, status
   endpoint and metrics, logs, systemd, troubleshooting.

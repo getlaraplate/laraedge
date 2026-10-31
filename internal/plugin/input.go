@@ -73,12 +73,14 @@ type ConfigProblem struct {
 	Message string
 }
 
-// ConfigRefusedError is the error of an input the plugin refused to
-// configure, or whose secrets cannot be resolved. It names paths, never
-// values.
+// ConfigRefusedError is the error of an input or a processor the plugin
+// refused to configure, or whose secrets cannot be resolved. It names
+// paths, never values.
 type ConfigRefusedError struct {
-	// Input is the id of the input.
+	// Input is the id of the input, or of the component of Section.
 	Input string
+	// Section is the document section of the component, inputs when empty.
+	Section string
 	// Problems are the problems found, never empty.
 	Problems []ConfigProblem
 }
@@ -99,11 +101,16 @@ func (e *ConfigRefusedError) Messages(prefix string) []string {
 	return out
 }
 
-// Error lists the problems under the prefix inputs.<id>: the supervisor,
-// which knows the position of the input in the document, can render them
-// again with Messages.
+// Error lists the problems under the prefix <section>.<id> (inputs.<id> for
+// an input): the supervisor, which knows the position of the component in
+// the document, can render them again with Messages.
 func (e *ConfigRefusedError) Error() string {
-	return strings.Join(e.Messages("inputs."+e.Input), "; ")
+	section := e.Section
+	if section == "" {
+		section = "inputs"
+	}
+
+	return strings.Join(e.Messages(section+"."+e.Input), "; ")
 }
 
 // InputFactory returns the factory of the inputs of the plugin h runs. It
@@ -412,7 +419,7 @@ func (in *pluginInput) payload(ctx context.Context) ([]byte, []string, error) {
 		problems []ConfigProblem
 	)
 	if connection, ok := section["connection"]; ok {
-		section["connection"] = in.resolveSecrets(ctx, connection, "connection", &values, &problems)
+		section["connection"] = resolveSecrets(ctx, in.resolver, connection, "connection", &values, &problems)
 	}
 	if len(problems) > 0 {
 		return nil, nil, &ConfigRefusedError{Input: in.cfg.ID, Problems: problems}
@@ -426,9 +433,10 @@ func (in *pluginInput) payload(ctx context.Context) ([]byte, []string, error) {
 	return out, values, nil
 }
 
-// resolveSecrets walks v, resolving the references held by secret keys, and
-// returns the new tree. A failure is a problem naming the path only.
-func (in *pluginInput) resolveSecrets(ctx context.Context, v any, path string, values *[]string, problems *[]ConfigProblem) any {
+// resolveSecrets walks v, resolving with resolver the references held by
+// secret keys, and returns the new tree. A failure is a problem naming the
+// path only.
+func resolveSecrets(ctx context.Context, resolver SecretResolver, v any, path string, values *[]string, problems *[]ConfigProblem) any {
 	switch node := v.(type) {
 	case map[string]any:
 		keys := make([]string, 0, len(node))
@@ -440,28 +448,28 @@ func (in *pluginInput) resolveSecrets(ctx context.Context, v any, path string, v
 			child := node[key]
 			childPath := path + "." + key
 			if ref, ok := child.(string); ok && config.IsSecretKey(key) && secrets.IsReference(ref) {
-				node[key] = in.resolveOne(ctx, ref, childPath, values, problems)
+				node[key] = resolveSecret(ctx, resolver, ref, childPath, values, problems)
 
 				continue
 			}
-			node[key] = in.resolveSecrets(ctx, child, childPath, values, problems)
+			node[key] = resolveSecrets(ctx, resolver, child, childPath, values, problems)
 		}
 	case []any:
 		for i, child := range node {
-			node[i] = in.resolveSecrets(ctx, child, fmt.Sprintf("%s.%d", path, i), values, problems)
+			node[i] = resolveSecrets(ctx, resolver, child, fmt.Sprintf("%s.%d", path, i), values, problems)
 		}
 	}
 
 	return v
 }
 
-func (in *pluginInput) resolveOne(ctx context.Context, ref, path string, values *[]string, problems *[]ConfigProblem) any {
-	if in.resolver == nil {
+func resolveSecret(ctx context.Context, resolver SecretResolver, ref, path string, values *[]string, problems *[]ConfigProblem) any {
+	if resolver == nil {
 		*problems = append(*problems, ConfigProblem{Path: path, Message: "the secret cannot be resolved: no secret resolver"})
 
 		return ref
 	}
-	value, err := in.resolver.Resolve(ctx, ref)
+	value, err := resolver.Resolve(ctx, ref)
 	if err != nil {
 		*problems = append(*problems, ConfigProblem{Path: path, Message: "the secret cannot be resolved"})
 
@@ -569,9 +577,15 @@ func (in *pluginInput) run(ctx context.Context, emit func(model.Record), life *i
 // wait blocks until the plugin has a new generation, the backoff (when
 // given) elapses, or ctx ends; it returns false when ctx ended.
 func (in *pluginInput) wait(ctx context.Context, changes <-chan uint64, backoff *driverkit.Backoff) bool {
+	return waitForPlugin(ctx, in.clk, changes, backoff)
+}
+
+// waitForPlugin blocks until the plugin has a new generation, the backoff
+// (when given) elapses on clk, or ctx ends; it returns false when ctx ended.
+func waitForPlugin(ctx context.Context, clk clock.Clock, changes <-chan uint64, backoff *driverkit.Backoff) bool {
 	var elapsed <-chan time.Time
 	if backoff != nil {
-		timer := in.clk.NewTimer(backoff.Next())
+		timer := clk.NewTimer(backoff.Next())
 		defer timer.Stop()
 		elapsed = timer.C()
 	}

@@ -26,6 +26,39 @@
 //	configure_block  Configure blocks until its context ends, then refuses
 //
 // trace_file also gets "stop <id>" lines.
+//
+// Output behaviour (output true serves the Output kind instead of the
+// Input kind):
+//
+//	output        serve an Output
+//	outcome       the outcome of every Send: accepted (default), duplicate,
+//	              retry_after, split, reject_invalid or suspend_auth
+//	retry_after   the wait sent with retry_after, a Go duration
+//	reason        the reason sent with reject_invalid
+//	batches_file  append every batch received, as one JSON line
+//	dedupe        answer duplicate for a message_id already in batches_file
+//	send_block    Send blocks until its context ends
+//
+// Configure of an output honours refuse_config (at config.port),
+// refuse_echo (quoting config.token), config_file and trace_file; Send
+// appends "send <id> <message_id>" to trace_file.
+//
+// Processor behaviour (processor true serves the Processor kind):
+//
+//	processor       serve a Processor
+//	records_file    append every record received, as one JSON line
+//	process_script  samples emitted when Process starts, in order
+//	derive_device   device of the sample echoed per observed sample
+//	                (default line-1)
+//	derive_signal   signal of the echoed sample (default count)
+//	derive_kind     value kind of the echoed sample: int (default) or string
+//	stop_reading    Process never reads its records (a hung processor)
+//
+// An echoed sample carries the value, ts and quality of the observed
+// sample, with priority bulk. Configure of a processor honours
+// refuse_config (at config.port), refuse_echo (quoting config.token),
+// config_file, configure_block and trace_file; Process appends
+// "process <id>" and, when it returns, "process end <id>" to trace_file.
 package main
 
 import (
@@ -38,6 +71,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -78,6 +112,22 @@ type behaviour struct {
 	ProbeBlock   bool     `json:"probe_block"`
 	ConfigBlock  bool     `json:"configure_block"`
 	BusyRuns     int64    `json:"busy_runs"`
+
+	Output      bool   `json:"output"`
+	Outcome     string `json:"outcome"`
+	RetryAfter  string `json:"retry_after"`
+	Reason      string `json:"reason"`
+	BatchesFile string `json:"batches_file"`
+	Dedupe      bool   `json:"dedupe"`
+	SendBlock   bool   `json:"send_block"`
+
+	Processor     bool     `json:"processor"`
+	RecordsFile   string   `json:"records_file"`
+	ProcessScript []sample `json:"process_script"`
+	DeriveDevice  string   `json:"derive_device"`
+	DeriveSignal  string   `json:"derive_signal"`
+	DeriveKind    string   `json:"derive_kind"`
+	StopReading   bool     `json:"stop_reading"`
 }
 
 // event is one event of the script: exactly one field is set.
@@ -91,12 +141,14 @@ type event struct {
 }
 
 // sample is an integer sample; quality is good unless "bad" is given.
+// kind string, float or bool turns the value into that kind.
 type sample struct {
 	Device  string `json:"device"`
 	Signal  string `json:"signal"`
 	Value   int64  `json:"value"`
 	TS      string `json:"ts"`
 	Quality string `json:"quality"`
+	Kind    string `json:"kind"`
 }
 
 func main() {
@@ -129,6 +181,16 @@ func main() {
 	}
 	if b.IgnoreShutdown {
 		serveIgnoringShutdown()
+
+		return
+	}
+	if b.Output {
+		sdk.ServeOutput(name, version, &output{b: b, dir: dir}, configKind())
+
+		return
+	}
+	if b.Processor {
+		sdk.ServeProcessor(name, version, &processor{b: b, dir: dir}, configKind())
 
 		return
 	}
@@ -174,6 +236,12 @@ func inputKind(b behaviour) manifest.InputKind {
 		ReadModes:        []string{"poll"},
 		Types:            []string{"int32"},
 		Browse:           b.Browse,
+	}
+}
+
+func configKind() manifest.ConfigKind {
+	return manifest.ConfigKind{
+		ConfigSchema: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}`),
 	}
 }
 
@@ -265,8 +333,17 @@ func (s sample) sdk() sdk.Sample {
 	if s.Quality == "bad" {
 		quality = sdk.QualityBad
 	}
+	value := sdk.IntValue(s.Value)
+	switch s.Kind {
+	case "string":
+		value = sdk.StringValue(strconv.FormatInt(s.Value, 10))
+	case "float":
+		value = sdk.Value{Kind: sdk.ValueKindFloat, Float: float64(s.Value)}
+	case "bool":
+		value = sdk.BoolValue(s.Value != 0)
+	}
 
-	return sdk.Sample{Device: s.Device, Signal: s.Signal, TS: ts, Value: sdk.IntValue(s.Value), Quality: quality, Priority: sdk.PriorityCritical}
+	return sdk.Sample{Device: s.Device, Signal: s.Signal, TS: ts, Value: value, Quality: quality, Priority: sdk.PriorityCritical}
 }
 
 func (in input) Probe(ctx context.Context, id string) ([]sdk.Sample, error) {
@@ -326,4 +403,199 @@ func (s *stubborn) Info(context.Context, *pb.InfoRequest) (*pb.InfoResponse, err
 
 func (s *stubborn) Shutdown(context.Context, *pb.ShutdownRequest) (*pb.ShutdownResponse, error) {
 	return &pb.ShutdownResponse{}, nil
+}
+
+// output is an Output driven by the behaviour file.
+type output struct {
+	b   behaviour
+	dir string
+	mu  sync.Mutex
+}
+
+func (o *output) trace(line string) { input{b: o.b, dir: o.dir}.trace(line) }
+
+func (o *output) Configure(ctx context.Context, id string, cfg json.RawMessage) []sdk.ConfigError {
+	o.trace("configure " + id)
+	if o.b.ConfigBlock {
+		<-ctx.Done()
+
+		return []sdk.ConfigError{{Message: "interrupted"}}
+	}
+	if o.b.ConfigFile != "" {
+		if err := os.WriteFile(filepath.Join(o.dir, o.b.ConfigFile), cfg, 0o600); err != nil {
+			fail(err)
+		}
+	}
+	if !o.b.RefuseConfig {
+		return nil
+	}
+	message := "must be an integer"
+	if o.b.RefuseEcho {
+		var c struct {
+			Config struct {
+				Token string `json:"token"`
+			} `json:"config"`
+		}
+		_ = json.Unmarshal(cfg, &c)
+		message = "bad value " + c.Config.Token
+	}
+
+	return []sdk.ConfigError{{Path: "config.port", Message: message}}
+}
+
+func (o *output) Send(ctx context.Context, id string, b sdk.Batch) sdk.Outcome {
+	o.trace("send " + id + " " + b.MessageID)
+	if o.b.SendBlock {
+		<-ctx.Done()
+
+		return sdk.Outcome{Kind: sdk.OutcomeRetryAfter}
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.b.Dedupe && o.seen(b.MessageID) {
+		return sdk.Outcome{Kind: sdk.OutcomeDuplicate}
+	}
+	if o.b.BatchesFile != "" {
+		line, err := json.Marshal(b)
+		if err != nil {
+			fail(err)
+		}
+		f, err := os.OpenFile(filepath.Join(o.dir, o.b.BatchesFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			fail(err)
+		}
+		defer f.Close()
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			fail(err)
+		}
+	}
+
+	switch o.b.Outcome {
+	case "duplicate":
+		return sdk.Outcome{Kind: sdk.OutcomeDuplicate}
+	case "retry_after":
+		var wait time.Duration
+		if o.b.RetryAfter != "" {
+			d, err := time.ParseDuration(o.b.RetryAfter)
+			if err != nil {
+				fail(err)
+			}
+			wait = d
+		}
+
+		return sdk.Outcome{Kind: sdk.OutcomeRetryAfter, RetryAfter: wait}
+	case "split":
+		return sdk.Outcome{Kind: sdk.OutcomeSplit}
+	case "reject_invalid":
+		return sdk.Outcome{Kind: sdk.OutcomeRejectInvalid, Reason: o.b.Reason}
+	case "suspend_auth":
+		return sdk.Outcome{Kind: sdk.OutcomeSuspendAuth}
+	default:
+		return sdk.Outcome{Kind: sdk.OutcomeAccepted}
+	}
+}
+
+// seen reports whether batches_file holds a batch with id.
+func (o *output) seen(id string) bool {
+	if o.b.BatchesFile == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(o.dir, o.b.BatchesFile))
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		var b struct{ MessageID string }
+		if json.Unmarshal([]byte(line), &b) == nil && b.MessageID == id {
+			return true
+		}
+	}
+
+	return false
+}
+
+// processor is a Processor driven by the behaviour file.
+type processor struct {
+	b   behaviour
+	dir string
+	mu  sync.Mutex
+}
+
+func (p *processor) trace(line string) { input{b: p.b, dir: p.dir}.trace(line) }
+
+func (p *processor) Configure(ctx context.Context, id string, cfg json.RawMessage) []sdk.ConfigError {
+	return (&output{b: p.b, dir: p.dir}).Configure(ctx, id, cfg)
+}
+
+func (p *processor) Process(ctx context.Context, id string, in <-chan sdk.Record, out func(sdk.Sample) error) error {
+	p.trace("process " + id)
+	defer p.trace("process end " + id)
+
+	for _, s := range p.b.ProcessScript {
+		if err := out(s.sdk()); err != nil {
+			return err
+		}
+	}
+	if p.b.StopReading {
+		<-ctx.Done()
+
+		return nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case rec, ok := <-in:
+			if !ok {
+				return nil
+			}
+			p.record(rec)
+			if rec.Sample == nil {
+				continue
+			}
+			if err := out(p.echo(*rec.Sample)); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// echo is the derived sample of an observed sample.
+func (p *processor) echo(s sdk.Sample) sdk.Sample {
+	device, signal := p.b.DeriveDevice, p.b.DeriveSignal
+	if device == "" {
+		device = "line-1"
+	}
+	if signal == "" {
+		signal = "count"
+	}
+	value := sdk.IntValue(s.Value.Int)
+	if p.b.DeriveKind == "string" {
+		value = sdk.StringValue(strconv.FormatInt(s.Value.Int, 10))
+	}
+
+	return sdk.Sample{Device: device, Signal: signal, TS: s.TS, Value: value, Quality: s.Quality, Priority: sdk.PriorityBulk}
+}
+
+// record appends rec to records_file.
+func (p *processor) record(rec sdk.Record) {
+	if p.b.RecordsFile == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	line, err := json.Marshal(rec)
+	if err != nil {
+		fail(err)
+	}
+	f, err := os.OpenFile(filepath.Join(p.dir, p.b.RecordsFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		fail(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		fail(err)
+	}
 }

@@ -456,3 +456,34 @@ func TestConfigValidatePluginsDir(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigValidateChecksPluginProcessorsAndOutputs(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "demo")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The manifest offers the input kind only: processor and output are refused.
+	writeFile(t, filepath.Join(pluginDir, "plugin.json"), validateManifest)
+	writeFile(t, filepath.Join(pluginDir, "demo"), "not really a binary")
+
+	doc := filepath.Join(dir, "config.json")
+	writeFile(t, doc, `{"schema":"laraplate-edge-config/1","version":1,
+"plugins":[{"id":"demo","path":"plugins/demo/demo","sha256":"`+hashHex([]byte("not really a binary"))+`","manifest_sha256":"`+hashHex([]byte(validateManifest))+`"}],
+"outputs":[{"id":"o0","type":"plugin:demo","route":{"include":["*"]}}],
+"inputs":[{"id":"i0","driver":"plugin:demo","devices":[{"device":"d","points":[{"signal":"s","type":"int16","address":"x","read":{"poll":"1s"}}]}]}],
+"processors":[{"id":"p0","plugin":"demo","observe":["d"],"devices":[{"device":"dd","signals":[{"signal":"x","type":"float"}]}]}]}`)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "validate", doc}, &stdout, &stderr); code != exitFailure {
+		t.Fatalf("exit code = %d, want 1 (stderr: %q)", code, stderr.String())
+	}
+	for _, want := range []string{
+		doc + ": processors.0.plugin: the plugin does not offer the processor kind",
+		doc + ": outputs.0.type: the plugin does not offer the output kind",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}

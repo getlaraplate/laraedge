@@ -71,8 +71,9 @@ func (b *Batch) Len() int {
 	return len(b.Entries[model.Critical]) + len(b.Entries[model.Bulk])
 }
 
-// records returns the records in envelope order.
-func (b *Batch) records() []model.Record {
+// Records returns the records of the batch in envelope order: critical
+// first, then bulk, each in queue order.
+func (b *Batch) Records() []model.Record {
 	out := make([]model.Record, 0, b.Len())
 	for _, p := range priorities {
 		for _, e := range b.Entries[p] {
@@ -518,7 +519,7 @@ func (bt *Batcher) Shrink(b *Batch, n int) (*Batch, error) {
 
 	id := bt.ids.New()
 	nb := newBatch(id, b.Seq, nil, kept, b.Losses)
-	body, err := envelope.Build(id, b.Seq, bt.clk.Now(), nb.records(), nb.Losses)
+	body, err := envelope.Build(id, b.Seq, bt.clk.Now(), nb.Records(), nb.Losses)
 	if err != nil {
 		return nil, fmt.Errorf("output: build the shrunk envelope: %w", err)
 	}

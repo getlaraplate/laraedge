@@ -16,6 +16,8 @@ coverage.*
 /examples/opcua/data/
 /examples/simulated-counter/data/
 /examples/simulated-counter/plugins/
+/examples/plugin-line/data/
+/examples/plugin-line/plugins/
 /bootstrap.local.yaml
 
 # Environment and secrets

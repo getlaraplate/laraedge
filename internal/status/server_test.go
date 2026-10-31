@@ -458,7 +458,8 @@ func TestStatusJSON(t *testing.T) {
 				"last_error_at":     nil,
 			},
 		},
-		"plugins": []any{},
+		"plugins":    []any{},
+		"processors": []any{},
 	}
 
 	gotJSON, _ := json.MarshalIndent(got, "", "  ")
@@ -571,6 +572,16 @@ func pluginStatus() supervisor.Status {
 			{ID: "demo", State: "up", Pid: 4242, Restarts: 2, RestartsByReason: map[string]uint64{"exit": 1, "memory": 1}, LastError: "the plugin used more memory than max_memory"},
 			{ID: "gone", State: supervisor.StateFailed, LastError: "the plugin files on disk do not match their hashes"},
 		},
+		Processors: []supervisor.ProcessorStatus{
+			{ID: "line-state", Plugin: "demo", State: supervisor.ProcessorUp, Refused: 4, Dropped: 9},
+			{ID: "spare-state", Plugin: "demo", State: supervisor.ProcessorDown},
+			{ID: "stuck", Plugin: "gone", State: supervisor.StateFailed, LastError: "its plugin is not running"},
+		},
+		Outputs: []supervisor.OutputStatus{{
+			ID: "sink", Type: "plugin:demo", State: "sending",
+			Buffer:           buffer.Stats{Critical: buffer.QueueStats{Records: 2, Bytes: 200}},
+			LastConfirmation: epoch.Add(-time.Minute),
+		}},
 	}
 }
 
@@ -592,5 +603,34 @@ func TestStatusJSONReportsPlugins(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Plugins, want) {
 		t.Fatalf("plugins = %v, want %v", got.Plugins, want)
+	}
+}
+
+func TestStatusJSONReportsProcessorsAndPluginOutputs(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(pluginStatus())
+
+	_, _, body := h.get(t, http.MethodGet, "/status", "")
+
+	var got struct {
+		Processors []map[string]any `json:"processors"`
+		Outputs    []map[string]any `json:"outputs"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("body is not JSON: %v\n%s", err, body)
+	}
+	want := []map[string]any{
+		{"id": "line-state", "plugin": "demo", "state": "up", "refused": 4.0, "dropped": 9.0},
+		{"id": "spare-state", "plugin": "demo", "state": "down", "refused": 0.0, "dropped": 0.0},
+		{"id": "stuck", "plugin": "gone", "state": "failed", "refused": 0.0, "dropped": 0.0, "last_error": "its plugin is not running"},
+	}
+	if !reflect.DeepEqual(got.Processors, want) {
+		t.Fatalf("processors = %v, want %v", got.Processors, want)
+	}
+	if len(got.Outputs) != 1 || got.Outputs[0]["type"] != "plugin:demo" || got.Outputs[0]["state"] != "sending" {
+		t.Fatalf("outputs = %v, want sink of type plugin:demo", got.Outputs)
+	}
+	if _, ok := got.Outputs[0]["clock_offset_seconds"]; ok {
+		t.Fatalf("output %v has a clock offset, want none for a plugin output", got.Outputs[0])
 	}
 }

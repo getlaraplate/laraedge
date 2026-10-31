@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/getlaraplate/laraedge/internal/buffer"
@@ -116,6 +117,10 @@ type Supervisor struct {
 	timeout    time.Duration
 	client     *http.Client
 	router     *pipeline.Router
+	// taps holds the running processors, which the input instances offer
+	// their records to (decision Q4). It is replaced, never modified, under
+	// mu; the emit path reads it without a lock.
+	taps atomic.Pointer[[]*plugin.Processor]
 
 	// ctx is the lifetime of every component; wg counts every goroutine the
 	// supervisor starts.
@@ -140,6 +145,10 @@ type Supervisor struct {
 	// rollback could not start again.
 	plugins       map[string]*runningPlugin
 	failedPlugins map[string]failure
+	// processors holds the started processors, by id; failedProc those a
+	// rollback could not start again.
+	processors map[string]*runningProcessor
+	failedProc map[string]failure
 	// appliedInputs holds the input ids of the applied document.
 	appliedInputs map[string]bool
 	// transformErrors holds, by input id, the runtime errors counted by the
@@ -170,6 +179,9 @@ type runningInput struct {
 // Lock order: the input's transform processor, then inputInstance.mu, then
 // the router's locks (Router.mu, then a hold queue's), then an output
 // buffer's lock inside Append or AddLoss.
+// The processors are offered a routed record after inputInstance.mu is
+// released, through Supervisor.taps, read without a lock; Offer never
+// blocks (decision Q4).
 // Supervisor.mu is taken before a buffer's lock (Status reads the buffer
 // figures under it) and before a plugin host's lock (Status reads the plugin
 // states under it), and never while an instance's or the router's lock is
@@ -177,6 +189,9 @@ type runningInput struct {
 type inputInstance struct {
 	router *pipeline.Router
 	cfg    config.Input
+	// taps are the processors offered a copy of every record routed, nil
+	// for the instance of a processor: derived records are not observed.
+	taps *atomic.Pointer[[]*plugin.Processor]
 
 	mu         sync.Mutex
 	live       bool
@@ -184,36 +199,84 @@ type inputInstance struct {
 	token      pipeline.InputToken
 }
 
-// emit routes rec once the instance is registered; after retire it drops it.
+// emit routes rec once the instance is registered; after retire it drops
+// it. A routed record, as the input's transforms left it, is then offered
+// to the running processors, after the births its registration sent, with
+// no lock of the instance or the supervisor held: Offer never blocks, and
+// machine data never waits for a processor (decision Q4).
 func (i *inputInstance) emit(rec model.Record) {
+	births, ok := i.route(rec)
+	if !ok {
+		return
+	}
+	i.offer(births)
+	i.offer([]model.Record{rec})
+}
+
+// offer offers recs to the running processors. The caller holds no lock.
+func (i *inputInstance) offer(recs []model.Record) {
+	if i.taps == nil || len(recs) == 0 {
+		return
+	}
+	if taps := i.taps.Load(); taps != nil {
+		for _, p := range *taps {
+			for _, rec := range recs {
+				p.Offer(rec)
+			}
+		}
+	}
+}
+
+// route routes rec unless the instance is retired, and reports whether it
+// did, with the births its registration sent when rec registered it.
+func (i *inputInstance) route(rec model.Record) ([]model.Record, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	if i.registerLocked() {
-		i.router.Emit(rec)
+	births, ok := i.registerLocked()
+	if !ok {
+		return nil, false
 	}
+	i.router.Emit(rec)
+
+	return births, true
 }
 
 // register registers the instance's devices and sends their births, once,
-// unless it is retired.
+// unless it is retired; the births are then offered to the running
+// processors, the instance's lock released.
 func (i *inputInstance) register() {
 	i.mu.Lock()
-	defer i.mu.Unlock()
+	births, _ := i.registerLocked()
+	i.mu.Unlock()
 
-	i.registerLocked()
+	i.offer(births)
 }
 
-func (i *inputInstance) registerLocked() bool {
+// registerLocked registers the instance on its first call while it is
+// live, and returns the births it sent then, as records. It reports
+// whether the instance is live. The caller holds i.mu.
+func (i *inputInstance) registerLocked() ([]model.Record, bool) {
 	if !i.live {
-		return false
+		return nil, false
 	}
-	if !i.registered {
-		i.registered = true
-		i.token = i.router.SetInput(i.cfg)
-		i.router.BirthInput(i.cfg.ID)
+	if i.registered {
+		return nil, true
+	}
+	i.registered = true
+	i.token = i.router.SetInput(i.cfg)
+
+	return birthRecords(i.router.BirthInput(i.cfg.ID)), true
+}
+
+// birthRecords returns births as records.
+func birthRecords(births []model.DeviceEvent) []model.Record {
+	recs := make([]model.Record, 0, len(births))
+	for _, ev := range births {
+		recs = append(recs, model.EventRecord(ev))
 	}
 
-	return true
+	return recs
 }
 
 // retire ends the instance's emits and removes its own registration. Later
@@ -236,13 +299,31 @@ type runningPlugin struct {
 	host *plugin.Host
 }
 
+// runningOutput is a started output: an HTTP output, or a plugin output
+// whose output.Loop sends through sender (ruling R3).
 type runningOutput struct {
 	cfg    config.Output
 	dir    string
 	buf    *buffer.Buffer
-	out    *output.HTTP
+	out    outputLoop
+	sender *plugin.OutputSender
 	cancel context.CancelFunc
 	done   chan struct{}
+}
+
+// outputLoop is what the supervisor uses of a running output's delivery:
+// *output.HTTP and *output.Loop.
+type outputLoop interface {
+	Run(ctx context.Context) error
+	State() output.State
+	LastConfirmation() time.Time
+	LastError() (string, time.Time)
+	ReloadCredentials()
+}
+
+// clockOffsetter is an output that estimates the backend clock (HTTP).
+type clockOffsetter interface {
+	ClockOffset() time.Duration
 }
 
 type failure struct {
@@ -281,6 +362,8 @@ func New(cfg Config) (*Supervisor, error) {
 
 		plugins:         map[string]*runningPlugin{},
 		failedPlugins:   map[string]failure{},
+		processors:      map[string]*runningProcessor{},
+		failedProc:      map[string]failure{},
 		transformErrors: map[string]uint64{},
 	}
 	if s.store == nil {
@@ -303,17 +386,19 @@ func New(cfg Config) (*Supervisor, error) {
 
 // plan is what an Apply changes: components to stop (changed or removed,
 // by id) and to start (changed or added, by index in the new document).
-// Plugins count as components: only the plugins an input of the document
-// uses run.
+// Plugins count as components: only the plugins a component of the
+// document uses run.
 type plan struct {
-	stopInputs     []string
-	stopOutputs    []string
-	stopPlugins    []string
-	removedOutputs map[string]bool
-	startInputs    []int
-	startOutputs   []int
-	startPlugins   []int
-	kept           int
+	stopInputs      []string
+	stopOutputs     []string
+	stopPlugins     []string
+	stopProcessors  []string
+	removedOutputs  map[string]bool
+	startInputs     []int
+	startOutputs    []int
+	startPlugins    []int
+	startProcessors []int
+	kept            int
 }
 
 // outputStop says what follows the stop of an output.
@@ -331,17 +416,21 @@ const (
 
 // journal records what an Apply did, so that a rollback can undo it.
 type journal struct {
-	stoppedInputs  []config.Input
-	stoppedOutputs []config.Output
-	stoppedPlugins []plugin.Spec
-	startedInputs  []string
-	startedOutputs []string
-	startedPlugins []string
-	// failedIn, failedOut and failedPlugins are the failed components before
-	// the Apply: a rollback puts back those this Apply started.
+	stoppedInputs     []config.Input
+	stoppedOutputs    []config.Output
+	stoppedPlugins    []plugin.Spec
+	stoppedProcessors []config.Processor
+	startedInputs     []string
+	startedOutputs    []string
+	startedPlugins    []string
+	startedProcessors []string
+	// failedIn, failedOut, failedPlugins and failedProc are the failed
+	// components before the Apply: a rollback puts back those this Apply
+	// started.
 	failedIn      map[string]failure
 	failedOut     map[string]failure
 	failedPlugins map[string]failure
+	failedProc    map[string]failure
 }
 
 // Apply makes doc the running document. It refuses, with ResultRejected and
@@ -352,11 +441,13 @@ type journal struct {
 // version counts as 0; ruling R9). Otherwise it applies by difference,
 // comparing each component's Raw by id: unchanged inputs and outputs keep
 // running untouched, changed ones are restarted, removed ones stop (an
-// output's directory is kept) and added ones start. A plugin runs while an
-// input of the document uses it: it starts before those inputs, restarts
-// with all of them when its entry or its binary changes, and stops after
-// the last of them (decision H5). When a component fails to start, or an
-// input does not start within the start timeout, what this Apply started is
+// output's directory is kept) and added ones start; processors likewise. A
+// plugin runs while an input, a processor or an output of the document uses
+// it: it starts before them, restarts with all of them when its entry or its
+// binary changes, and stops after the last of them (decisions H5, Q6). A
+// plugin output or a processor whose plugin refuses its section fails to
+// start (ruling R6). When a component fails to start, or an input or a
+// processor does not start within the start timeout, what this Apply started is
 // stopped and what it stopped is started again: ResultRolledBack with the
 // errors. When ctx is cancelled during a failed apply, the rollback still
 // runs but there is no outcome: Apply returns the context error. On success
@@ -421,6 +512,7 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	s.applied, s.version, s.appliedInputs = true, doc.Version, inputIDs(doc)
 	clear(s.failedIn)
 	clear(s.failedPlugins)
+	clear(s.failedProc)
 	failedOut := sortedKeys(s.failedOut)
 	clear(s.failedOut)
 	s.mu.Unlock()
@@ -434,8 +526,8 @@ func (s *Supervisor) Apply(ctx context.Context, doc config.Document) (Outcome, e
 	}
 
 	s.log.Info("supervisor: configuration applied", "version", doc.Version,
-		"started", len(p.startInputs)+len(p.startOutputs)+len(p.startPlugins),
-		"stopped", len(p.stopInputs)+len(p.stopOutputs)+len(p.stopPlugins),
+		"started", len(p.startInputs)+len(p.startOutputs)+len(p.startPlugins)+len(p.startProcessors),
+		"stopped", len(p.stopInputs)+len(p.stopOutputs)+len(p.stopPlugins)+len(p.stopProcessors),
 		"unchanged", p.kept)
 
 	s.pruneInputStates(inputIDs(doc))
@@ -528,23 +620,19 @@ func pluginOf(driver string) (string, bool) {
 }
 
 // diff compares doc with what runs. Only Apply changes the running maps, so
-// reading them under mu once is enough. A plugin an input of doc uses is
-// kept when its entry and the hash of its binary are those it runs with;
-// otherwise it starts, after the running one stopped, and every input using
-// it restarts with it. A running plugin no input of doc uses stops
-// (decision H5).
+// reading them under mu once is enough. A plugin an input, a processor or
+// an output of doc uses is kept when its entry and the hash of its binary
+// are those it runs with; otherwise it starts, after the running one
+// stopped, and every component using it restarts with it, a plugin output
+// keeping its buffer. A running plugin no component of doc uses stops
+// (decisions H5, Q6).
 func (s *Supervisor) diff(doc config.Document, specs []plugin.Spec) plan {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	p := plan{removedOutputs: map[string]bool{}}
 
-	used := map[string]bool{}
-	for _, in := range doc.Inputs {
-		if id, ok := pluginOf(in.Driver); ok {
-			used[id] = true
-		}
-	}
+	used := usedPlugins(doc)
 	restarted := map[string]bool{}
 	for i, entry := range doc.Plugins {
 		if !used[entry.ID] {
@@ -591,11 +679,14 @@ func (s *Supervisor) diff(doc config.Document, specs []plugin.Spec) plan {
 		}
 	}
 
+	s.diffProcessors(doc, &p, restarted)
+
 	outDoc := map[string]bool{}
 	for i, out := range doc.Outputs {
 		outDoc[out.ID] = true
 		running := s.outputs[out.ID]
-		if running != nil && bytes.Equal(running.cfg.Raw, out.Raw) {
+		pluginID, _ := pluginOf(out.Type)
+		if running != nil && bytes.Equal(running.cfg.Raw, out.Raw) && !restarted[pluginID] {
 			p.kept++
 
 			continue
@@ -615,6 +706,7 @@ func (s *Supervisor) diff(doc config.Document, specs []plugin.Spec) plan {
 	slices.Sort(p.stopInputs)
 	slices.Sort(p.stopOutputs)
 	slices.Sort(p.stopPlugins)
+	slices.Sort(p.stopProcessors)
 
 	return p
 }
@@ -716,18 +808,26 @@ func (s *Supervisor) factory(driver string, hosts map[string]*plugin.Host) input
 	}
 }
 
-// execute stops, then starts, what p says: inputs stop before outputs, so
-// nothing is routed to an output being stopped, and before the plugins they
-// use; outputs and plugins start before inputs, so a new input finds its
-// outputs and its plugin. A plugin's host is stopped, and its Stop waited
-// for, before a new host of the same id starts (ruling R12). It stops at the
-// first failure. The inputs it starts are removed from b.
+// execute stops, then starts, what p says: inputs and processors stop
+// before outputs, so nothing is routed to an output being stopped, and
+// before the plugins they use; plugins start first, so a plugin output, a
+// processor and a plugin input find their plugin, then outputs, then
+// processors and inputs, which find their outputs. A plugin's host is
+// stopped, and its Stop waited for, before a new host of the same id starts
+// (ruling R12). It stops at the first failure. The inputs it starts are
+// removed from b.
 func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b pending) (journal, []string) {
 	s.mu.Lock()
-	j := journal{failedIn: maps.Clone(s.failedIn), failedOut: maps.Clone(s.failedOut), failedPlugins: maps.Clone(s.failedPlugins)}
+	j := journal{
+		failedIn: maps.Clone(s.failedIn), failedOut: maps.Clone(s.failedOut),
+		failedPlugins: maps.Clone(s.failedPlugins), failedProc: maps.Clone(s.failedProc),
+	}
 	s.mu.Unlock()
 	for _, id := range p.stopInputs {
 		j.stoppedInputs = append(j.stoppedInputs, s.stopInput(id))
+	}
+	for _, id := range p.stopProcessors {
+		j.stoppedProcessors = append(j.stoppedProcessors, s.stopProcessor(id))
 	}
 	for _, id := range p.stopOutputs {
 		how := stopForRestart
@@ -741,13 +841,6 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 		j.stoppedPlugins = append(j.stoppedPlugins, s.stopPlugin(id))
 	}
 
-	for _, i := range p.startOutputs {
-		cfg := doc.Outputs[i]
-		if err := s.startOutput(cfg); err != nil {
-			return j, []string{fmt.Sprintf("outputs.%d: %v", i, err)}
-		}
-		j.startedOutputs = append(j.startedOutputs, cfg.ID)
-	}
 	for _, i := range p.startPlugins {
 		id := doc.Plugins[i].ID
 		if err := s.startPlugin(ctx, b.plugins[id]); err != nil {
@@ -755,23 +848,43 @@ func (s *Supervisor) execute(ctx context.Context, doc config.Document, p plan, b
 		}
 		j.startedPlugins = append(j.startedPlugins, id)
 	}
+	for _, i := range p.startOutputs {
+		cfg := doc.Outputs[i]
+		if err := s.startOutput(ctx, cfg); err != nil {
+			return j, componentErrors(fmt.Sprintf("outputs.%d", i), err)
+		}
+		j.startedOutputs = append(j.startedOutputs, cfg.ID)
+	}
+	for _, i := range p.startProcessors {
+		cfg := doc.Processors[i]
+		if err := s.startProcessor(ctx, cfg); err != nil {
+			return j, componentErrors(fmt.Sprintf("processors.%d", i), err)
+		}
+		j.startedProcessors = append(j.startedProcessors, cfg.ID)
+	}
 	for _, i := range p.startInputs {
 		cfg := doc.Inputs[i]
 		in := b.inputs[i]
 		delete(b.inputs, i)
 		if err := s.startInput(ctx, cfg, in); err != nil {
-			// A plugin refusing the section names its paths in it (R13).
-			var refused *plugin.ConfigRefusedError
-			if errors.As(err, &refused) {
-				return j, refused.Messages(fmt.Sprintf("inputs.%d", i))
-			}
-
-			return j, []string{fmt.Sprintf("inputs.%d: %v", i, err)}
+			return j, componentErrors(fmt.Sprintf("inputs.%d", i), err)
 		}
 		j.startedInputs = append(j.startedInputs, cfg.ID)
 	}
 
 	return j, nil
+}
+
+// componentErrors are the messages of a component at document path prefix
+// that did not start: a plugin refusing the section names its paths in it
+// (R13, R6).
+func componentErrors(prefix string, err error) []string {
+	var refused *plugin.ConfigRefusedError
+	if errors.As(err, &refused) {
+		return refused.Messages(prefix)
+	}
+
+	return []string{fmt.Sprintf("%s: %v", prefix, err)}
 }
 
 // startPlugin starts the host of rp and records it as running. A host that
@@ -810,7 +923,9 @@ func (s *Supervisor) stopPlugin(id string) plugin.Spec {
 	return rp.spec
 }
 
-// rollback stops what j started and starts again what j stopped. An output
+// rollback stops what j started, in the order execute stops (inputs,
+// processors, outputs, plugins), and starts again what j stopped, in the
+// order execute starts (plugins, outputs, processors, inputs). An output
 // the failed document added is stopped like a removed one: its directory is
 // kept. A previous component that does not start again is reported failed in
 // Status, its error is returned and, for an output, the router keeps holding
@@ -825,10 +940,10 @@ func (s *Supervisor) rollback(j journal, failedInputs map[string]bool) []string 
 			s.restoreFailure(s.failedIn, id, f)
 		}
 	}
-	for _, id := range slices.Backward(j.startedPlugins) {
-		s.stopPlugin(id)
-		if f, ok := j.failedPlugins[id]; ok {
-			s.restoreFailure(s.failedPlugins, id, f)
+	for _, id := range slices.Backward(j.startedProcessors) {
+		s.stopProcessor(id)
+		if f, ok := j.failedProc[id]; ok {
+			s.restoreFailure(s.failedProc, id, f)
 		}
 	}
 	for _, id := range slices.Backward(j.startedOutputs) {
@@ -847,20 +962,32 @@ func (s *Supervisor) rollback(j journal, failedInputs map[string]bool) []string 
 			_, _ = s.stopOutput(id, stopRemoved, config.Route{})
 		}
 	}
+	for _, id := range slices.Backward(j.startedPlugins) {
+		s.stopPlugin(id)
+		if f, ok := j.failedPlugins[id]; ok {
+			s.restoreFailure(s.failedPlugins, id, f)
+		}
+	}
 
 	var errs []string
+	for _, spec := range j.stoppedPlugins {
+		if err := s.startPlugin(s.ctx, s.newPlugin(spec)); err != nil {
+			errs = append(errs, fmt.Sprintf("rollback: plugin %s: %v", spec.ID, err))
+			s.setFailed(s.failedPlugins, spec.ID, "plugin", err)
+		}
+	}
 	for _, cfg := range j.stoppedOutputs {
-		if err := s.startOutput(cfg); err != nil {
+		if err := s.startOutput(s.ctx, cfg); err != nil {
 			errs = append(errs, fmt.Sprintf("rollback: output %s: %v", cfg.ID, err))
 			s.restoreFailure(s.failedOut, cfg.ID, failure{kind: cfg.Type, err: err.Error(), output: cfg})
 			// The router keeps holding its records until a later document
 			// starts or removes it (ruling R48).
 		}
 	}
-	for _, spec := range j.stoppedPlugins {
-		if err := s.startPlugin(s.ctx, s.newPlugin(spec)); err != nil {
-			errs = append(errs, fmt.Sprintf("rollback: plugin %s: %v", spec.ID, err))
-			s.setFailed(s.failedPlugins, spec.ID, "plugin", err)
+	for _, cfg := range j.stoppedProcessors {
+		if err := s.startProcessor(s.ctx, cfg); err != nil {
+			errs = append(errs, fmt.Sprintf("rollback: processor %s: %v", cfg.ID, err))
+			s.setFailed(s.failedProc, cfg.ID, cfg.Plugin, err)
 		}
 	}
 	for _, cfg := range j.stoppedInputs {
@@ -900,10 +1027,26 @@ func (s *Supervisor) restoreFailure(m map[string]failure, id string, f failure) 
 // startOutput opens the output's buffer, builds its batcher, which loads the
 // inflight batch and marks it sealed, and only then hands the buffer to the
 // router: nothing is appended before the sealed records are protected from
-// eviction (Task 5 review).
-func (s *Supervisor) startOutput(cfg config.Output) error {
+// eviction (Task 5 review). A plugin output is first configured in its
+// plugin, which runs already: a refusal fails the start (ruling R6).
+func (s *Supervisor) startOutput(ctx context.Context, cfg config.Output) error {
 	dir := filepath.Join(s.dataDir, "outputs", cfg.ID)
 	log := s.log.With("output", cfg.ID)
+
+	var sender *plugin.OutputSender
+	if pluginID, ok := pluginOf(cfg.Type); ok {
+		var err error
+		if sender, err = s.newOutputSender(ctx, pluginID, cfg, log); err != nil {
+			return err
+		}
+	}
+	fail := func(err error) error {
+		if sender != nil {
+			sender.Close()
+		}
+
+		return err
+	}
 
 	buf, err := buffer.Open(dir, buffer.Options{
 		MaxSize:       cfg.Buffer.MaxSize,
@@ -913,7 +1056,7 @@ func (s *Supervisor) startOutput(cfg config.Output) error {
 		Logger:        log,
 	})
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	s.step("buffer " + cfg.ID)
 
@@ -925,30 +1068,42 @@ func (s *Supervisor) startOutput(cfg config.Output) error {
 	if err != nil {
 		_ = buf.Close()
 
-		return err
+		return fail(err)
 	}
 	s.step("batcher " + cfg.ID)
 
 	id := cfg.ID
-	out, err := output.NewHTTP(output.HTTPConfig{
-		ID:          id,
-		URL:         cfg.URL,
-		Token:       cfg.Token,
-		Resolver:    s.resolver,
-		Batcher:     batcher,
-		Clock:       s.clk,
-		Logger:      s.log,
-		OnReconnect: func() { s.router.BirthTo(id) },
-		Client:      s.client,
-	})
-	if err != nil {
-		_ = buf.Close()
+	var out outputLoop
+	if sender != nil {
+		out = output.NewLoop(output.LoopConfig{
+			ID:          id,
+			Sender:      sender,
+			Batcher:     batcher,
+			Clock:       s.clk,
+			Logger:      s.log,
+			OnReconnect: func() { s.router.BirthTo(id) },
+		})
+	} else {
+		out, err = output.NewHTTP(output.HTTPConfig{
+			ID:          id,
+			URL:         cfg.URL,
+			Token:       cfg.Token,
+			Resolver:    s.resolver,
+			Batcher:     batcher,
+			Clock:       s.clk,
+			Logger:      s.log,
+			OnReconnect: func() { s.router.BirthTo(id) },
+			Client:      s.client,
+		})
+		if err != nil {
+			_ = buf.Close()
 
-		return err
+			return err
+		}
 	}
 
 	runCtx, cancel := context.WithCancel(s.ctx)
-	ro := &runningOutput{cfg: cfg, dir: dir, buf: buf, out: out, cancel: cancel, done: make(chan struct{})}
+	ro := &runningOutput{cfg: cfg, dir: dir, buf: buf, out: out, sender: sender, cancel: cancel, done: make(chan struct{})}
 	s.wg.Go(func() {
 		defer close(ro.done)
 		_ = out.Run(runCtx)
@@ -986,6 +1141,9 @@ func (s *Supervisor) stopOutput(id string, how outputStop, holdRoute config.Rout
 	}
 	ro.cancel()
 	<-ro.done
+	if ro.sender != nil {
+		ro.sender.Close()
+	}
 
 	if how == stopRemoved {
 		if n := ro.buf.Records(); n > 0 {
@@ -1029,7 +1187,7 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 	}
 
 	lifeCtx, cancel := context.WithCancel(s.ctx)
-	inst := &inputInstance{router: s.router, cfg: cfg, live: true}
+	inst := &inputInstance{router: s.router, cfg: cfg, live: true, taps: &s.taps}
 	proc.Start(lifeCtx)
 	emit := proc.Wrap(inst.emit)
 
@@ -1141,8 +1299,9 @@ func closeInputs(built map[int]input.Input) {
 	}
 }
 
-// Close stops every input, then every plugin, all at once so that the stop
-// deadline of spec section 6 bounds them together, then every output,
+// Close stops every input, then every processor, then every plugin, all at
+// once so that the stop deadline of spec section 6 bounds them together,
+// then every output (a plugin output's batches stay in its buffer),
 // syncing and closing the buffers, and waits for every goroutine of the
 // supervisor. The records held for an output left failed by a rollback are
 // discarded at shutdown, once the inputs are stopped, with a warning per
@@ -1158,15 +1317,21 @@ func (s *Supervisor) Close() error {
 
 	s.mu.Lock()
 	inputs := sortedKeys(s.inputs)
+	processors := sortedKeys(s.processors)
 	outputs := sortedKeys(s.outputs)
 	failedOut := sortedKeys(s.failedOut)
 	plugins := sortedKeys(s.plugins)
 	clear(s.failedPlugins)
+	clear(s.failedProc)
 	s.mu.Unlock()
 
 	for _, id := range inputs {
 		s.step("stop input " + id)
 		s.stopInput(id)
+	}
+	for _, id := range processors {
+		s.step("stop processor " + id)
+		s.stopProcessor(id)
 	}
 	var stops sync.WaitGroup
 	for _, id := range plugins {
@@ -1181,6 +1346,7 @@ func (s *Supervisor) Close() error {
 
 	var errs []error
 	for _, id := range outputs {
+		s.step("stop output " + id)
 		if _, err := s.stopOutput(id, stopShutdown, config.Route{}); err != nil {
 			errs = append(errs, fmt.Errorf("supervisor: output %s: %w", id, err))
 		}
@@ -1192,8 +1358,10 @@ func (s *Supervisor) Close() error {
 	return errors.Join(errs...)
 }
 
-// ReloadCredentials makes every running output resolve its token again
-// before its next attempt and ends a suspension at once (SIGHUP).
+// ReloadCredentials makes every running output resolve its token, or the
+// secrets of its plugin config, again before its next attempt and ends a
+// suspension at once (SIGHUP); a plugin output goes through its Loop
+// (ruling R3).
 func (s *Supervisor) ReloadCredentials() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
