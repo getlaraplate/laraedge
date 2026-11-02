@@ -874,8 +874,9 @@ optional key of the bootstrap (see USAGE.md): an absolute directory for the runt
 default does not fit the Unix socket limit, the agent uses `<temp>/laraplate-edge-<hash>` instead,
 private to its user, and logs it; `<temp>` is the system temporary directory, or `/tmp` when the path
 does not fit there either (macOS gives each user a deep temporary directory). When neither fits, the
-plugin does not start and its `last_error` asks for a `run_dir` (see "Known limits of this build"). Under systemd, `run_dir: /run/laraplate-edge` with `RuntimeDirectory=laraplate-edge` keeps
-the sockets out of `data_dir`. On Windows plugins use named pipes and `run_dir` holds nothing.
+plugin does not start and its `last_error` asks for a `run_dir` (see "Known limits of this build").
+Under systemd, `run_dir: /run/laraplate-edge` with `RuntimeDirectory=laraplate-edge` keeps the sockets
+out of `data_dir`. On Windows plugins use named pipes and `run_dir` holds nothing.
 
 ### Starting, restarting and applying
 
