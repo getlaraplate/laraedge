@@ -286,11 +286,12 @@ func (l *Loop) confirm(ctx context.Context, b *Batch, status int) {
 		return
 	}
 
+	attrs := []any{"output", l.id, "seq", b.Seq, "records", b.Len()}
 	if status > 0 {
-		l.log.Debug("output: batch delivered", "output", l.id, "seq", b.Seq, "records", b.Len(), "status", status)
-	} else {
-		l.log.Debug("output: batch delivered", "output", l.id, "seq", b.Seq, "records", b.Len())
+		attrs = append(attrs, "status", status)
 	}
+
+	l.log.Debug("output: batch delivered", attrs...)
 
 	l.backoff.reset()
 	if l.recovering {

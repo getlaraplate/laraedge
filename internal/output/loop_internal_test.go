@@ -3,6 +3,8 @@ package output
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,10 +40,13 @@ func (s *preparingSender) Send(context.Context, *Batch) Outcome {
 
 func (s *preparingSender) ReloadCredentials() {}
 
+// guard bounds every wait of a test, as in the external test package.
+const guard = 10 * time.Second
+
 func waitCond(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(guard)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("waiting for %s", what)
@@ -72,6 +77,8 @@ func TestLoopPreparerNotReady(t *testing.T) {
 	}
 
 	inf := NewInflight(dir)
+	inflightPath := filepath.Join(dir, inflightFileName)
+	before, beforeErr := os.ReadFile(inflightPath)
 	bt, err := NewBatcher(buf, inf, envelope.NewIDGenerator(clk), clk, BatchLimits{MaxSamples: 10, MaxBody: 1 << 20}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
@@ -97,5 +104,10 @@ func TestLoopPreparerNotReady(t *testing.T) {
 	waitCond(t, "the backoff", func() bool { return l.State() == Backoff && clk.PendingTimers() == 1 })
 	if msg, _ := l.LastError(); msg != "not yet" {
 		t.Errorf("LastError() = %q, want %q", msg, "not yet")
+	}
+
+	after, afterErr := os.ReadFile(inflightPath)
+	if string(after) != string(before) || (afterErr == nil) != (beforeErr == nil) {
+		t.Errorf("the inflight file changed (%v -> %v): a batch was sealed", beforeErr, afterErr)
 	}
 }

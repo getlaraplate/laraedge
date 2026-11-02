@@ -103,10 +103,6 @@ func (s *OutputSender) forward(changes <-chan uint64) {
 		case <-s.stop:
 			return
 		case <-changes:
-			if s.closed.Load() {
-				return
-			}
-
 			select {
 			case s.wake <- struct{}{}:
 			default:

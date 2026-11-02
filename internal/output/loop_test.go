@@ -338,6 +338,20 @@ func TestLoopSuspendWaitsFiveMinutesOrReload(t *testing.T) {
 	}
 }
 
+// waitPoll waits for cond by polling with short sleeps, bounded by guard.
+func waitPoll(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(guard)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("waiting for %s", what)
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // wakingSender is a fakeSender that is also a Waker.
 type wakingSender struct {
 	*fakeSender
@@ -355,7 +369,7 @@ func TestLoopWakeEndsABackoff(t *testing.T) {
 	f := startLoopWith(t, 2, snd, snd.fakeSender, bulk(0), bulk(1))
 
 	first := f.snd.next(t)
-	waitFor(t, "the backoff", func() bool { return f.loop.State() == output.Backoff && f.h.clk.PendingTimers() == 1 })
+	waitPoll(t, "the backoff", func() bool { return f.loop.State() == output.Backoff && f.h.clk.PendingTimers() == 1 })
 
 	snd.wake <- struct{}{}
 
@@ -372,7 +386,7 @@ func TestLoopWakeDoesNotEndASuspension(t *testing.T) {
 	f := startLoopWith(t, 2, snd, snd.fakeSender, bulk(0), bulk(1))
 
 	first := f.snd.next(t)
-	waitFor(t, "the suspension", func() bool { return f.loop.State() == output.SuspendedAuth && f.h.clk.PendingTimers() == 1 })
+	waitPoll(t, "the suspension", func() bool { return f.loop.State() == output.SuspendedAuth && f.h.clk.PendingTimers() == 1 })
 
 	snd.wake <- struct{}{}
 

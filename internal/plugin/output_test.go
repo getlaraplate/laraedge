@@ -501,31 +501,37 @@ func TestOutputWakesWhenThePluginIsBack(t *testing.T) {
 	behaviour := outputBehaviour("")
 	h := newOutputHarness(t, behaviour)
 	s := h.sender(t, testOutput(`{}`))
+	// barrier stays subscribed: once it is woken the host has notified every
+	// watcher of the restart.
+	barrier := h.sender(t, testOutput(`{}`))
 
-	setBehaviour(t, h.spec.Path, `{"crash_at_start":true}`)
-	h.kill()
-	h.waitFor("the plugin down", func() bool { return h.host.Status().State != plugin.StateUp })
-	select {
-	case <-s.Wake():
-		t.Fatal("woken while the plugin is down")
-	default:
+	waitWake := func(what string, w <-chan struct{}) {
+		t.Helper()
+
+		select {
+		case <-w:
+		case <-time.After(guard):
+			t.Fatalf("%s not woken when the plugin came back", what)
+		}
+	}
+	crashAndRestart := func() {
+		t.Helper()
+
+		setBehaviour(t, h.spec.Path, `{"crash_at_start":true}`)
+		h.kill()
+		h.waitFor("the plugin down", func() bool { return h.host.Status().State != plugin.StateUp })
+		setBehaviour(t, h.spec.Path, behaviour)
+		h.restartHost()
 	}
 
-	setBehaviour(t, h.spec.Path, behaviour)
-	h.restartHost()
-	select {
-	case <-s.Wake():
-	case <-time.After(guard):
-		t.Fatal("not woken when the plugin came back")
-	}
+	crashAndRestart()
+	waitWake("the sender", s.Wake())
+	waitWake("the barrier", barrier.Wake())
 
 	// A closed sender is not woken again.
 	s.Close()
-	setBehaviour(t, h.spec.Path, `{"crash_at_start":true}`)
-	h.kill()
-	h.waitFor("the plugin down", func() bool { return h.host.Status().State != plugin.StateUp })
-	setBehaviour(t, h.spec.Path, behaviour)
-	h.restartHost()
+	crashAndRestart()
+	waitWake("the barrier", barrier.Wake())
 	select {
 	case <-s.Wake():
 		t.Fatal("woken after Close")
