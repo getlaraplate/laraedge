@@ -113,7 +113,7 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 			w.sample("processor_refused_total", float64(p.Refused), "processor", p.ID)
 		}
 
-		w.family("processor_dropped_total", "counter", "Copies of observed records dropped because the processor's queue was full, a copy or a record of the state was over the message limit, or the stream broke while a copy was being sent; restarts from 0 when the processor instance restarts, which rate() handles as a counter reset.")
+		w.family("processor_dropped_total", "counter", "Copies of observed records dropped because the processor's queue was full, a copy or a record of the state was over the message limit, or the stream broke while a copy or a record of the state was being sent; restarts from 0 when the processor instance restarts, which rate() handles as a counter reset.")
 		for _, p := range st.Processors {
 			w.sample("processor_dropped_total", float64(p.Dropped), "processor", p.ID)
 		}

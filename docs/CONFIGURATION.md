@@ -798,8 +798,11 @@ What the agent does with it:
   devices: for each device, in name order, its last event, then, unless that event is a `death`, the
   last sample of each of its signals, in signal order. The live copies follow. The copies queued during
   an outage are not replayed, since the state supersedes them: a processor that needs every change
-  cannot rely on the copies. A record can arrive twice around the opening, once in the state and once
-  as a live copy. The state keeps at most 10,000 signals per processor; the samples of further signals
+  cannot rely on the copies. Around the opening a record can arrive twice, once in the state and once
+  as a live copy, and that live copy can be older than the state: a record kept in the state just before
+  it was taken can still be queued afterwards and is then sent again after the state, after a newer
+  value of the same signal. A plugin must not take the last record it received as the current value
+  without comparing timestamps. The state keeps at most 10,000 signals per processor; the samples of further signals
   are not kept, and a `WARN` "processor state is full" names the processor and the limit, once. A
   plugin should keep its own state per stream and recompute it from the state it receives, as
   `line-state` does.

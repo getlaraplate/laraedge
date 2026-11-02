@@ -42,9 +42,12 @@ type Router struct {
 	outputs map[string]target
 	order   []string // output ids, sorted
 	inputs  map[string]registeredInput
-	// dead holds the devices whose last event through Emit was a death,
-	// until a birth through Emit or the removal of their input.
-	dead map[string]bool
+	// deadMu guards dead, the devices whose last event through Emit was a
+	// death, until a birth through Emit or the removal of their input. It
+	// has its own lock so that Emit keeps Router.mu shared; it is taken
+	// after Router.mu and never held while delivering.
+	deadMu sync.Mutex
+	dead   map[string]bool
 	// lastToken is the token of the latest input registration.
 	lastToken InputToken
 }
@@ -291,9 +294,11 @@ func (r *Router) RemoveInput(id string, token InputToken) {
 
 	if reg, ok := r.inputs[id]; ok && reg.token == token {
 		delete(r.inputs, id)
+		r.deadMu.Lock()
 		for _, device := range devicesOf(reg.cfg) {
 			delete(r.dead, device)
 		}
+		r.deadMu.Unlock()
 	}
 }
 
@@ -303,11 +308,11 @@ func (r *Router) RemoveInput(id string, token InputToken) {
 // logged at warn with the output and the device and signal, never the
 // value; the other outputs still receive the record.
 func (r *Router) Emit(rec model.Record) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	switch {
 	case rec.Sample != nil:
-		r.mu.RLock()
-		defer r.mu.RUnlock()
-
 		for _, id := range r.order {
 			t := r.outputs[id]
 			if t.route.Match(rec.Sample.Device, rec.Sample.Signal) {
@@ -315,16 +320,15 @@ func (r *Router) Emit(rec model.Record) {
 			}
 		}
 	case rec.Event != nil:
-		r.mu.Lock()
-		defer r.mu.Unlock()
-
 		ev := *rec.Event
+		r.deadMu.Lock()
 		switch ev.Kind {
 		case model.Death:
 			r.dead[ev.Device] = true
 		case model.Birth:
 			delete(r.dead, ev.Device)
 		}
+		r.deadMu.Unlock()
 		if signals, known := r.deviceSignals(ev.Device); known && ev.Kind == model.Birth {
 			ev.Signals = signals
 		}
@@ -366,6 +370,9 @@ func (r *Router) BirthInput(id string) []model.DeviceEvent {
 func (r *Router) Births() []model.DeviceEvent {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
+	r.deadMu.Lock()
+	defer r.deadMu.Unlock()
 
 	var births []model.DeviceEvent
 	seen := map[string]bool{}

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getlaraplate/laraedge-sdk/sdk"
+
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
@@ -89,7 +91,7 @@ type wireRecord struct {
 		Value          struct{ Int int64 }
 	}
 	Event *struct {
-		Kind   int
+		Kind   int // sdk.EventKind, as the test plugin marshals it
 		Device string
 	}
 }
@@ -98,9 +100,9 @@ func (r wireRecord) String() string {
 	switch {
 	case r.Sample != nil:
 		return fmt.Sprintf("%s/%s=%d", r.Sample.Device, r.Sample.Signal, r.Sample.Value.Int)
-	case r.Event != nil && r.Event.Kind == 1:
+	case r.Event != nil && r.Event.Kind == int(sdk.EventBirth):
 		return "birth " + r.Event.Device
-	case r.Event != nil && r.Event.Kind == 2:
+	case r.Event != nil && r.Event.Kind == int(sdk.EventDeath):
 		return "death " + r.Event.Device
 	default:
 		return "?"

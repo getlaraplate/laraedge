@@ -236,9 +236,10 @@ func (p *Processor) Offer(rec model.Record) {
 
 // remember updates the state with rec, a sample or an event of an observed
 // device: an event replaces the device's last event, and a death also
-// forgets the device's samples; a sample replaces its signal's last sample.
-// A new signal past processorStateLimit is not kept, logged once per
-// instance.
+// forgets the device's samples; a sample replaces its signal's last sample,
+// unless the device's last event is a death (a later birth makes its samples
+// kept again). A new signal past processorStateLimit is not kept, logged
+// once per instance.
 func (p *Processor) remember(rec model.Record) {
 	p.stateMu.Lock()
 	if rec.Event != nil {
@@ -254,6 +255,11 @@ func (p *Processor) remember(rec model.Record) {
 	}
 
 	s := *rec.Sample
+	if ev, ok := p.events[s.Device]; ok && ev.Kind == model.Death {
+		p.stateMu.Unlock()
+
+		return
+	}
 	signals := p.samples[s.Device]
 	if _, known := signals[s.Signal]; !known {
 		if p.cached >= processorStateLimit {
@@ -287,10 +293,7 @@ func (p *Processor) state() []model.Record {
 		events = append(events, ev)
 	}
 	samples := make([]model.Sample, 0, p.cached)
-	for device, signals := range p.samples {
-		if ev, ok := p.events[device]; ok && ev.Kind == model.Death {
-			continue
-		}
+	for _, signals := range p.samples {
 		for _, s := range signals {
 			samples = append(samples, s)
 		}
@@ -639,12 +642,16 @@ func (p *Processor) drain() {
 // feed sends state, in order, then the queued copies until ctx ends or the
 // stream fails. A record over the message limit of the protocol is skipped
 // and counted as dropped. A failed Send ends the stream, whose status
-// stream's Recv then reads, and the feed with it; the queued copy it lost
-// is counted as dropped, a record of the state is not (the next opening
-// sends the state again).
+// stream's Recv then reads, and the feed with it; the record it lost, of
+// the state or of the queue, is counted as dropped.
 func (p *Processor) feed(ctx context.Context, stream pb.Processor_ProcessClient, state []model.Record) {
 	for _, rec := range state {
-		if ctx.Err() != nil || !p.send(stream, recordToWire(rec)) {
+		if ctx.Err() != nil {
+			return
+		}
+		if !p.send(stream, recordToWire(rec)) {
+			p.dropped.Add(1)
+
 			return
 		}
 	}
