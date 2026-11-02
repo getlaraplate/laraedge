@@ -210,7 +210,7 @@ func NewClient(c *http.Client) (*http.Client, error) {
 
 // Run sends the batches of the output until ctx is done, then returns nil;
 // call it once.
-// A batch is settled only from the backend's answer: confirmed on 2xx,
+// A batch is settled only from the destination's answer: confirmed on 2xx,
 // split on 413, dropped with a rejected_invalid loss marker on 422 or on a
 // one-record 413; every other answer and every local failure keeps it in
 // flight to be resent identical after a backoff or a suspension.
@@ -324,6 +324,8 @@ func validHeaderValue(s string) bool {
 // 403 Suspend, 413 Split, 422 Invalid, anything else and every local
 // failure Retry, with the Retry-After of the response.
 func (s *httpSender) Send(ctx context.Context, b *Batch) Outcome {
+	// prepare resolves the token before a batch is sealed; this guards a
+	// Send called without it.
 	if out, ok := s.tokenStep(ctx); !ok {
 		return out
 	}
@@ -368,9 +370,9 @@ func (s *httpSender) Send(ctx context.Context, b *Batch) Outcome {
 	case code >= 200 && code < 300:
 		s.confirmed(b, code, body)
 
-		return Outcome{Kind: Confirmed}
+		return Outcome{Kind: Confirmed, Status: code}
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
-		s.log.Warn("output: the backend refused the token; sending suspended", "output", s.id, "status", code, "retry_in", authRetry.String())
+		s.log.Warn("output: the destination refused the token; sending suspended", "output", s.id, "status", code, "retry_in", authRetry.String())
 		s.token = ""
 
 		return Outcome{Kind: Suspend, Reason: fmt.Sprintf("HTTP %d: token refused", code)}
@@ -384,9 +386,9 @@ func (s *httpSender) Send(ctx context.Context, b *Batch) Outcome {
 
 	wait, _ := retryAfter(resp.Header.Get("Retry-After"), recvAt)
 	if code == http.StatusTooManyRequests || code >= 500 {
-		s.log.Warn("output: temporary backend error; backing off", "output", s.id, "seq", b.Seq, "status", code)
+		s.log.Warn("output: temporary destination error; backing off", "output", s.id, "seq", b.Seq, "status", code)
 	} else {
-		s.log.Error("output: unexpected backend response; check the output url and that the backend API is enabled", "output", s.id, "seq", b.Seq, "status", code)
+		s.log.Error("output: unexpected destination response; check the output url and that the backend API is enabled", "output", s.id, "seq", b.Seq, "status", code)
 	}
 
 	return Outcome{Kind: Retry, RetryAfter: wait, Reason: fmt.Sprintf("HTTP %d", code)}
@@ -424,7 +426,7 @@ func (s *httpSender) invalid(b *Batch, body []byte) {
 
 	slices.Sort(fields)
 
-	s.log.Warn("output: the backend refused the batch as invalid; dropping it with a rejected_invalid loss marker", "output", s.id, "seq", b.Seq, "records", b.Len(), "fields", fields)
+	s.log.Warn("output: the destination refused the batch as invalid; dropping it with a rejected_invalid loss marker", "output", s.id, "seq", b.Seq, "records", b.Len(), "fields", fields)
 	s.log.Debug("output: invalid batch response", "output", s.id, "seq", b.Seq, "body", string(body))
 }
 

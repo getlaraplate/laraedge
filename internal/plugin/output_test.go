@@ -496,3 +496,114 @@ func TestOutputConfigureAtApplyPluginProblems(t *testing.T) {
 		}
 	})
 }
+
+func TestOutputWakesWhenThePluginIsBack(t *testing.T) {
+	behaviour := outputBehaviour("")
+	h := newOutputHarness(t, behaviour)
+	s := h.sender(t, testOutput(`{}`))
+
+	setBehaviour(t, h.spec.Path, `{"crash_at_start":true}`)
+	h.kill()
+	h.waitFor("the plugin down", func() bool { return h.host.Status().State != plugin.StateUp })
+	select {
+	case <-s.Wake():
+		t.Fatal("woken while the plugin is down")
+	default:
+	}
+
+	setBehaviour(t, h.spec.Path, behaviour)
+	h.restartHost()
+	select {
+	case <-s.Wake():
+	case <-time.After(guard):
+		t.Fatal("not woken when the plugin came back")
+	}
+
+	// A closed sender is not woken again.
+	s.Close()
+	setBehaviour(t, h.spec.Path, `{"crash_at_start":true}`)
+	h.kill()
+	h.waitFor("the plugin down", func() bool { return h.host.Status().State != plugin.StateUp })
+	setBehaviour(t, h.spec.Path, behaviour)
+	h.restartHost()
+	select {
+	case <-s.Wake():
+		t.Fatal("woken after Close")
+	default:
+	}
+}
+
+// TestOutputConcurrentReloadAndCloseWithASend: a Send blocked in the plugin
+// while the credentials are reloaded and the sender closed ends as a Retry
+// when its context ends, and the next Send is a Retry too.
+func TestOutputConcurrentReloadAndCloseWithASend(t *testing.T) {
+	h := newOutputHarness(t, outputBehaviour(`,"send_block":true`))
+	s := h.sender(t, testOutput(`{}`))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result := make(chan output.Outcome, 1)
+	go func() { result <- s.Send(ctx, testBatch("m-1", 1)) }()
+	h.waitTrace("send o1 m-1")
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		s.ReloadCredentials()
+		s.Close()
+	}()
+	select {
+	case <-closed:
+	case <-time.After(guard):
+		t.Fatal("ReloadCredentials and Close did not return with a Send in flight")
+	}
+
+	cancel()
+	select {
+	case got := <-result:
+		if got.Kind != output.Retry {
+			t.Fatalf("Send() = %+v, want a Retry when its context ends", got)
+		}
+	case <-time.After(guard):
+		t.Fatal("Send did not return")
+	}
+	if got := send(s, testBatch("m-2", 2)); got.Kind != output.Retry || !strings.Contains(got.Reason, "closed") {
+		t.Fatalf("Send() after Close = %+v, want a Retry naming the closed output", got)
+	}
+}
+
+func TestOutputConfiguresOncePerGeneration(t *testing.T) {
+	h := newOutputHarness(t, outputBehaviour(""))
+	s := h.sender(t, testOutput(`{}`))
+
+	if err := s.Configure(context.Background()); err != nil {
+		t.Fatalf("Configure() = %v", err)
+	}
+	for i := range 3 {
+		if got := send(s, testBatch(fmt.Sprintf("m-%d", i), uint64(i))); got.Kind != output.Confirmed {
+			t.Fatalf("Send() %d = %+v", i, got)
+		}
+	}
+	if got := strings.Count(h.read("trace"), "configure o1"); got != 1 {
+		t.Fatalf("trace = %q, want one configure", h.read("trace"))
+	}
+}
+
+func TestOutputLogsCarryTheOutputID(t *testing.T) {
+	h := newOutputHarness(t, outputBehaviour(`,"refuse_config":true`))
+	s := h.sender(t, testOutput(`{}`))
+
+	if got := send(s, testBatch("m-1", 1)); got.Kind != output.Retry {
+		t.Fatalf("Send() = %+v, want a Retry", got)
+	}
+	var line string
+	for _, l := range strings.Split(h.log.String(), "\n") {
+		if strings.Contains(l, "refused the configuration of the output") {
+			line = l
+		}
+	}
+	if line == "" || !strings.Contains(line, "output=o1") {
+		t.Fatalf("the log line of the refusal = %q, want output=o1", line)
+	}
+}

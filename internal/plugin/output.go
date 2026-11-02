@@ -42,8 +42,10 @@ type OutputSender struct {
 	clk      clock.Clock
 	log      *slog.Logger
 
-	changes   <-chan uint64
+	wake      chan struct{}
+	stop      chan struct{}
 	unwatch   func()
+	wg        sync.WaitGroup
 	closeOnce sync.Once
 	closed    atomic.Bool
 	reload    atomic.Bool
@@ -56,7 +58,10 @@ type OutputSender struct {
 	secretValues []string
 }
 
-var _ output.Sender = (*OutputSender)(nil)
+var (
+	_ output.Sender = (*OutputSender)(nil)
+	_ output.Waker  = (*OutputSender)(nil)
+)
 
 // NewOutputSender returns the sender of output cfg through the plugin h
 // runs. It only validates: nothing contacts the plugin before the first
@@ -74,22 +79,56 @@ func NewOutputSender(h *Host, cfg config.Output, resolver SecretResolver, clk cl
 		clk = clock.Real()
 	}
 	if log == nil {
-		log = h.log.With("output", cfg.ID)
+		log = h.log
+	}
+	log = log.With("output", cfg.ID)
+
+	s := &OutputSender{
+		h: h, resolver: resolver, cfg: cfg, clk: clk, log: log,
+		wake: make(chan struct{}, 1), stop: make(chan struct{}),
 	}
 
-	s := &OutputSender{h: h, resolver: resolver, cfg: cfg, clk: clk, log: log}
-	s.changes, s.unwatch = h.Watch()
+	var changes <-chan uint64
+	changes, s.unwatch = h.Watch()
+	s.wg.Go(func() { s.forward(changes) })
 
 	return s, nil
 }
 
-// Close ends the subscription to the restarts of the plugin; a Send after
-// Close is a Retry. It does not release the instance in the plugin
-// (decision Q7). Safe to call more than once.
+// forward turns each start of the plugin into a wake, without blocking: a
+// wake already pending covers the new one.
+func (s *OutputSender) forward(changes <-chan uint64) {
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-changes:
+			if s.closed.Load() {
+				return
+			}
+
+			select {
+			case s.wake <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+// Wake returns the channel that receives a value each time the plugin
+// starts again, so the Loop tries again at once instead of at the end of
+// its backoff; it never ends a suspension.
+func (s *OutputSender) Wake() <-chan struct{} { return s.wake }
+
+// Close ends the subscription to the restarts of the plugin and the wakes;
+// a Send after Close is a Retry. It does not release the instance in the
+// plugin (decision Q7). Safe to call more than once.
 func (s *OutputSender) Close() {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
+		close(s.stop)
 		s.unwatch()
+		s.wg.Wait()
 	})
 }
 
@@ -98,16 +137,12 @@ func (s *OutputSender) Close() {
 func (s *OutputSender) ReloadCredentials() { s.reload.Store(true) }
 
 // Send delivers b once through the plugin, configuring the instance first
-// when the plugin restarted, the credentials were reloaded or the previous
-// Configure failed.
+// when it is not configured for the running generation of the plugin: the
+// plugin restarted, the credentials were reloaded or the previous Configure
+// failed.
 func (s *OutputSender) Send(ctx context.Context, b *output.Batch) output.Outcome {
 	if s.closed.Load() {
 		return retry("the output is closed")
-	}
-	select {
-	case <-s.changes:
-		s.cfgGen = 0
-	default:
 	}
 	if s.reload.Swap(false) {
 		s.cfgGen = 0

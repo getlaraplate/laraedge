@@ -85,6 +85,9 @@ type Outcome struct {
 	// Reason is a short text without secrets, recorded as the last error
 	// unless Kind is Confirmed; the Sender logs the details itself.
 	Reason string
+	// Status is the destination's own status code, such as the HTTP status;
+	// zero when the destination has none. Logged for a delivered batch.
+	Status int
 }
 
 // Sender delivers one batch to a destination and says how it answered. The
@@ -96,6 +99,13 @@ type Sender interface {
 	// ReloadCredentials makes the next Send use credentials resolved again;
 	// safe for concurrent use.
 	ReloadCredentials()
+}
+
+// Waker is implemented by a Sender that knows when trying again at once is
+// worth it, such as a plugin output whose plugin came back. A receive on
+// Wake ends a backoff early; it never ends a suspension.
+type Waker interface {
+	Wake() <-chan struct{}
 }
 
 // preparer is implemented by a Sender with a step to take before the next
@@ -140,6 +150,9 @@ type Loop struct {
 	reload        chan struct{}
 	reloadPending atomic.Bool
 
+	// wake is the Sender's Waker channel, nil when it is not a Waker.
+	wake <-chan struct{}
+
 	// Owned by the Run goroutine.
 	backoff    backoff
 	recovering bool
@@ -170,6 +183,10 @@ func NewLoop(cfg LoopConfig) *Loop {
 		reload:      make(chan struct{}, 1),
 		backoff:     backoff{rand: cfg.Rand},
 		state:       Sending,
+	}
+
+	if w, ok := cfg.Sender.(Waker); ok {
+		l.wake = w.Wake()
 	}
 
 	if l.clk == nil {
@@ -229,6 +246,9 @@ func (l *Loop) Run(ctx context.Context) error {
 
 		out := l.sender.Send(ctx, b)
 		if out.Kind == Retry && ctx.Err() != nil {
+			l.recordReason(out.Reason)
+			l.setState(Backoff)
+
 			break
 		}
 
@@ -242,7 +262,7 @@ func (l *Loop) Run(ctx context.Context) error {
 func (l *Loop) settle(ctx context.Context, b *Batch, out Outcome) {
 	switch out.Kind {
 	case Confirmed:
-		l.confirm(ctx, b)
+		l.confirm(ctx, b, out.Status)
 	case Split:
 		l.split(ctx, b, out.Reason)
 	case Invalid:
@@ -257,7 +277,7 @@ func (l *Loop) settle(ctx context.Context, b *Batch, out Outcome) {
 }
 
 // confirm settles b as delivered.
-func (l *Loop) confirm(ctx context.Context, b *Batch) {
+func (l *Loop) confirm(ctx context.Context, b *Batch, status int) {
 	if err := l.batcher.Confirm(b); err != nil {
 		l.log.Error("output: cannot settle a delivered batch; it will be resent", "output", l.id, "seq", b.Seq, "error", err)
 		l.recordError("confirm: " + err.Error())
@@ -266,7 +286,11 @@ func (l *Loop) confirm(ctx context.Context, b *Batch) {
 		return
 	}
 
-	l.log.Debug("output: batch delivered", "output", l.id, "seq", b.Seq, "records", b.Len())
+	if status > 0 {
+		l.log.Debug("output: batch delivered", "output", l.id, "seq", b.Seq, "records", b.Len(), "status", status)
+	} else {
+		l.log.Debug("output: batch delivered", "output", l.id, "seq", b.Seq, "records", b.Len())
+	}
 
 	l.backoff.reset()
 	if l.recovering {
@@ -340,7 +364,10 @@ func (l *Loop) suspend(ctx context.Context) {
 }
 
 // pause waits d on the clock, until ctx is done or, when wakeOnReload,
-// until ReloadCredentials is called.
+// until ReloadCredentials is called. A backoff (not wakeOnReload) also ends
+// when the Sender wakes; the backoff step is not reset. A wake that arrives
+// outside a backoff stays buffered and shortens the next one: one early
+// retry, accepted.
 func (l *Loop) pause(ctx context.Context, d time.Duration, wakeOnReload bool) {
 	if wakeOnReload && l.reloadPending.Load() {
 		return
@@ -349,9 +376,11 @@ func (l *Loop) pause(ctx context.Context, d time.Duration, wakeOnReload bool) {
 	timer := l.clk.NewTimer(d)
 	defer timer.Stop()
 
-	var reload <-chan struct{}
+	var reload, wake <-chan struct{}
 	if wakeOnReload {
 		reload = l.reload
+	} else {
+		wake = l.wake
 	}
 
 	for {
@@ -359,6 +388,8 @@ func (l *Loop) pause(ctx context.Context, d time.Duration, wakeOnReload bool) {
 		case <-ctx.Done():
 			return
 		case <-timer.C():
+			return
+		case <-wake:
 			return
 		case <-reload:
 			if l.reloadPending.Load() {

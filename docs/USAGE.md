@@ -400,7 +400,9 @@ samples written to a local file, no Laraplate needed.
   restart of the plugin, a plugin deriving from that state sends its derived values again at once.
   Its outputs go to `backoff`:
   their batches stay in the buffer and are delivered in order once the plugin is back, which
-  configures the output's instance again first.
+  configures the output's instance again first. An output in `backoff` tries again as soon as its
+  plugin is up, without waiting for the end of the backoff; one in `suspended_auth` (its secrets could
+  not be resolved, or the plugin refused the credentials) still waits for a `SIGHUP` or its 5 minutes.
 - Restarts back off from 1 second to 1 minute; the backoff starts again from 1 second after the plugin
   has run stable for one minute.
 
