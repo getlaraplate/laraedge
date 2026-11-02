@@ -243,11 +243,11 @@ func orEmpty(v []any) []any {
 }
 
 // newPluginFixture is a fixture whose data directory has a short path.
-func newPluginFixture(t *testing.T) (*fixture, string) {
+func newPluginFixture(t *testing.T, opts ...fixtureOption) (*fixture, string) {
 	t.Helper()
 
 	dataDir := shortTempDir(t)
-	f := newFixture(t, func(c *Config) { c.DataDir = dataDir })
+	f := newFixture(t, append([]fixtureOption{func(c *Config) { c.DataDir = dataDir }}, opts...)...)
 	f.dataDir = dataDir
 
 	return f, dataDir

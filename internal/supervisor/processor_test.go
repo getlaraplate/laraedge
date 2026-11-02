@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,10 +9,13 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/plugin"
@@ -78,6 +82,74 @@ func (p installedPlugin) waitFile(t *testing.T, name, what string, cond func(str
 			t.Fatalf("%s of plugin %s: %s not reached:\n%s", name, p.id, what, p.read(t, name))
 		}
 		runtime.Gosched()
+	}
+}
+
+// waitFor waits until cond holds; guard bounds the wait.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(guard)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s not reached", what)
+		}
+		runtime.Gosched()
+	}
+}
+
+// restartClock is the fake clock as the supervisor sees it, counting the
+// restart waits of plugin hosts once their timer is pending: a test that
+// kills plugins advances the clock exactly when every host waits on it,
+// and only then, so no deadline of a running call expires meanwhile.
+type restartClock struct {
+	*clock.Fake
+
+	restarts atomic.Int64
+}
+
+// withRestartClock makes the supervisor use c over the fixture's fake clock.
+func withRestartClock(c *restartClock) fixtureOption {
+	return func(cfg *Config) {
+		c.Fake = cfg.Clock.(*clock.Fake)
+		cfg.Clock = c
+	}
+}
+
+// Sleep is clock.Fake's Sleep, counting a host restart wait once its timer
+// is pending.
+func (c *restartClock) Sleep(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	timer := c.NewTimer(d)
+	defer timer.Stop()
+	if calledFrom("plugin.(*Host).restart") {
+		c.restarts.Add(1)
+	}
+
+	select {
+	case <-timer.C():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// calledFrom reports whether a function whose name ends with name is on the
+// caller's stack.
+func calledFrom(name string) bool {
+	pcs := make([]uintptr, 32)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		frame, more := frames.Next()
+		if strings.HasSuffix(frame.Function, name) {
+			return true
+		}
+		if !more {
+			return false
+		}
 	}
 }
 
@@ -169,7 +241,8 @@ func TestProcessorAndPluginOutputRunEndToEnd(t *testing.T) {
 
 // TestProcessorOrPluginOutputRefusedRollsBack: a processor or a plugin
 // output whose plugin refuses its section rolls the document back, the
-// problems named at the component's document path (ruling R6).
+// problems named at the component's document path (ruling R6), and the
+// plugins the document started have exited.
 func TestProcessorOrPluginOutputRefusedRollsBack(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -183,8 +256,18 @@ func TestProcessorOrPluginOutputRefusedRollsBack(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f, _ := newPluginFixture(t)
-			proc := installPlugin(t, "proc", strings.TrimSuffix(procBehaviour, "}")+tc.procExtra+"}")
-			sink := installPlugin(t, "sink", strings.TrimSuffix(sinkBehaviour, "}")+tc.sinkExtra+"}")
+			proc := installPlugin(t, "proc", strings.TrimSuffix(procBehaviour, "}")+tc.procExtra+`,"pid_file":"pid"}`)
+			sink := installPlugin(t, "sink", strings.TrimSuffix(sinkBehaviour, "}")+tc.sinkExtra+`,"pid_file":"pid"}`)
+			refusing := proc
+			if tc.sinkExtra != "" {
+				refusing = sink
+			}
+			for _, p := range []installedPlugin{proc, sink} {
+				// installPlugin ran the binary for its manifest.
+				if err := os.Remove(filepath.Join(p.dir, "pid")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
 
 			out := f.apply(f.processorDocument(2, proc, sink, nil, nil))
@@ -196,36 +279,105 @@ func TestProcessorOrPluginOutputRefusedRollsBack(t *testing.T) {
 			if st.Version != 1 || len(st.Processors) != 0 || len(st.Plugins) != 0 || len(st.Outputs) != 1 {
 				t.Fatalf("Status() = %+v, want version 1 with main only", st)
 			}
+			if refusing.read(t, "pid") == "" {
+				t.Fatalf("plugin %s wrote no pid: it was never started", refusing.id)
+			}
+			for _, p := range []installedPlugin{proc, sink} {
+				data := p.read(t, "pid")
+				if data == "" {
+					continue
+				}
+				pid, err := strconv.Atoi(data)
+				if err != nil {
+					t.Fatalf("pid file of %s = %q", p.id, data)
+				}
+				if alive(pid) {
+					t.Errorf("plugin %s (pid %d) still runs after the rollback, want it exited", p.id, pid)
+				}
+			}
 			f.drv.instance(t, "a").send("a1", "state")
 			f.be.waitItem(t, "main", "a1/state")
 		})
 	}
 }
 
+// sentBatch is one batch a plugin output received: its source_seq and its
+// records as batchItems renders them.
+type sentBatch struct {
+	seq   uint64
+	items []string
+}
+
+// sentBatches returns the batches output id of plugin p received, in the
+// order of its sends, each message_id once: the trace names the sends of
+// each output, the batches file holds their content.
+func (p installedPlugin) sentBatches(t *testing.T, id string) []sentBatch {
+	t.Helper()
+
+	byID := map[string]sentBatch{}
+	for line := range strings.SplitSeq(strings.TrimSpace(p.read(t, "batches")), "\n") {
+		var b struct {
+			MessageID string
+			SourceSeq uint64
+		}
+		if json.Unmarshal([]byte(line), &b) != nil {
+			continue
+		}
+		if _, ok := byID[b.MessageID]; !ok {
+			byID[b.MessageID] = sentBatch{seq: b.SourceSeq, items: batchItems(line)}
+		}
+	}
+
+	var out []sentBatch
+	seen := map[string]bool{}
+	for line := range strings.SplitSeq(p.read(t, "trace"), "\n") {
+		messageID, ok := strings.CutPrefix(line, "send "+id+" ")
+		if !ok || seen[messageID] {
+			continue
+		}
+		seen[messageID] = true
+		if b, ok := byID[messageID]; ok {
+			out = append(out, b)
+		}
+	}
+
+	return out
+}
+
 // TestReloadOfOnePluginOutputConfigKeepsThePluginProcess is the review
 // focus: a document changing only one plugin output's config keeps the
 // plugin's pid; only that output is stopped and started, configured again,
-// and its buffer keeps what it holds.
+// and its buffer keeps what it holds: the records o1 held at the reload,
+// never sent (its batch waits for 100 records or an hour of the fake
+// clock), reach the plugin after it, in order, with consecutive source_seq.
 func TestReloadOfOnePluginOutputConfigKeepsThePluginProcess(t *testing.T) {
 	f, _ := newPluginFixture(t)
 	sink := installPlugin(t, "sink", sinkBehaviour)
-	doc := func(version int64, o1 map[string]any) config.Document {
+	doc := func(version int64, o1, o1Batch map[string]any) config.Document {
+		held := pluginOutput("o1", "sink", o1)
+		held["batch"] = o1Batch
+
 		return f.extendedDocument(f.document(version, []inSpec{{id: "a", devices: []string{"a1"}}}, nil), extras{
 			plugins: []any{sink.entry(nil)},
-			outputs: []any{pluginOutput("o1", "sink", o1), pluginOutput("o2", "sink", nil)},
+			outputs: []any{held, pluginOutput("o2", "sink", nil)},
 		})
 	}
 
-	f.mustApply(doc(1, map[string]any{"topic": "x"}))
+	f.mustApply(doc(1, map[string]any{"topic": "x"}, map[string]any{"max_samples": 100, "max_wait": "1h"}))
 	pid := f.runningPluginPid("sink")
 	o1Buf, o2Buf := f.output("o1").buf, f.output("o2").buf
-	f.drv.instance(t, "a").sendValue("a1", "count", model.IntValue(5))
-	sink.waitFile(t, "trace", "both outputs sending", func(s string) bool {
-		return strings.Count(s, "send o1 ") >= 2 && strings.Count(s, "send o2 ") >= 2
-	})
+	a := f.drv.instance(t, "a")
+	for v := int64(5); v <= 7; v++ {
+		a.sendValue("a1", "count", model.IntValue(v))
+	}
+	sink.waitFile(t, "batches", "o2 sending", func(s string) bool { return countItems(batchItems(s), "a1/count=7") == 1 })
+	waitFor(t, "o1 holding the three samples", func() bool { return o1Buf.Records() >= 3 })
+	if strings.Contains(sink.read(t, "trace"), "send o1 ") {
+		t.Fatalf("o1 sent before the reload, want its records held:\n%s", sink.read(t, "trace"))
+	}
 
-	f.mustApply(doc(2, map[string]any{"topic": "y"}))
-	f.drv.instance(t, "a").sendValue("a1", "count", model.IntValue(6))
+	f.mustApply(doc(2, map[string]any{"topic": "y"}, map[string]any{"max_samples": 1, "max_wait": "1s"}))
+	a.sendValue("a1", "count", model.IntValue(8))
 
 	if got := f.runningPluginPid("sink"); got != pid {
 		t.Fatalf("plugin pid = %d after the reload, want %d kept", got, pid)
@@ -242,9 +394,25 @@ func TestReloadOfOnePluginOutputConfigKeepsThePluginProcess(t *testing.T) {
 	if f.output("o1").buf == o1Buf {
 		t.Error("o1 kept its running instance, want it stopped and started")
 	}
-	sink.waitFile(t, "batches", "o1 sending after the reload", func(s string) bool {
-		return countItems(batchItems(s), "a1/count=6") == 2
+	sink.waitFile(t, "batches", "o1 and o2 sending after the reload", func(s string) bool {
+		return countItems(batchItems(s), "a1/count=8") == 2
 	})
+
+	batches := sink.sentBatches(t, "o1")
+	var samples []string
+	for i, b := range batches {
+		if i > 0 && b.seq != batches[i-1].seq+1 {
+			t.Errorf("o1 source_seq %d follows %d, want consecutive", b.seq, batches[i-1].seq)
+		}
+		for _, item := range b.items {
+			if strings.HasPrefix(item, "a1/") {
+				samples = append(samples, item)
+			}
+		}
+	}
+	if want := []string{"a1/count=5", "a1/count=6", "a1/count=7", "a1/count=8"}; !slices.Equal(samples, want) {
+		t.Errorf("o1 received %v in %d batches, want %v (the held records first, in order)", samples, len(batches), want)
+	}
 }
 
 // TestPluginCrashRestartsItsProcessorsAndOutputs: the plugins of a
@@ -253,7 +421,8 @@ func TestReloadOfOnePluginOutputConfigKeepsThePluginProcess(t *testing.T) {
 // the processor streams again and the output, configured again, delivers
 // everything its buffer kept meanwhile.
 func TestPluginCrashRestartsItsProcessorsAndOutputs(t *testing.T) {
-	f, _ := newPluginFixture(t)
+	rc := &restartClock{}
+	f, _ := newPluginFixture(t, withRestartClock(rc))
 	proc := installPlugin(t, "proc", procBehaviour)
 	sink := installPlugin(t, "sink", sinkBehaviour)
 	f.mustApply(f.processorDocument(1, proc, sink, nil, nil))
@@ -281,22 +450,19 @@ func TestPluginCrashRestartsItsProcessorsAndOutputs(t *testing.T) {
 	f.be.waitDetail(t, "main", "a1/count=3 good", 1)
 	f.be.waitDetail(t, "main", "line-1/count=0 bad", 1)
 
-	// Move the clock until the plugins restarted and the output's backoff
-	// ended with everything delivered.
-	deadline := time.Now().Add(guard)
-	delivered := func() bool {
+	// Both hosts wait their first restart, at most 1 s: one step of the
+	// clock starts them again. Then nothing waits on the clock: the
+	// processor streams again and the output, woken by its plugin, delivers
+	// what its buffer kept.
+	waitFor(t, "both plugins waiting to restart", func() bool { return rc.restarts.Load() >= 2 })
+	f.clk.Advance(time.Second)
+	f.waitStatus("both plugins back", func(st Status) bool {
+		return len(st.Plugins) == 2 && st.Plugins[0].State == string(plugin.StateUp) && st.Plugins[1].State == string(plugin.StateUp)
+	})
+	waitFor(t, "the processor streaming again and the output delivering what it kept", func() bool {
 		s := sink.read(t, "batches")
-		return batchHolds("a1", 2)(s) && batchHolds("a1", 3)(s)
-	}
-	for !delivered() || proc.traceCount(t, "process line") < 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("not delivered after the restart:\nsink trace:\n%s\nproc trace:\n%s", sink.read(t, "trace"), proc.read(t, "trace"))
-		}
-		f.clk.Advance(time.Second)
-		for range 1000 {
-			runtime.Gosched()
-		}
-	}
+		return batchHolds("a1", 2)(s) && batchHolds("a1", 3)(s) && proc.traceCount(t, "process line") >= 2
+	})
 
 	if got := sink.traceCount(t, "configure out"); got != 2 {
 		t.Errorf("out configured %d times, want 2 (start, plugin restart)", got)
