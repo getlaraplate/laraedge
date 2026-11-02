@@ -296,7 +296,7 @@ func (s *OutputSender) configure(ctx context.Context, conn *grpc.ClientConn, gen
 }
 
 func (s *OutputSender) refusal(problems []ConfigProblem) *ConfigRefusedError {
-	return &ConfigRefusedError{Input: s.cfg.ID, Section: "outputs", Problems: problems}
+	return &ConfigRefusedError{ID: s.cfg.ID, Section: "outputs", Problems: problems}
 }
 
 // prefix is the document path of the output in messages.

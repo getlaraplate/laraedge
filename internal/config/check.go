@@ -17,11 +17,12 @@ const pluginPrefix = "plugin:"
 // CheckBuild is the second validation layer: it refuses, with "<path>: not
 // available in this build", the parts of a valid document this build does
 // not provide: drivers other than simulated, modbus, opcua and plugin:<id>,
-// output types other than laraplate-http and plugin:<id>, secret://keystore/ references, and derived signals
-// with their transforms. Plugins, their drivers, processors and outputs are provided. Point
-// transforms are provided; their chains are type-checked by
-// transform.CheckDocument, which config cannot call (import cycle). It
-// returns nil when the build can apply doc.
+// output types other than laraplate-http and plugin:<id>, secret://keystore/
+// references, and derived signals with their transforms. Plugins, their
+// drivers, processors and outputs are provided. Point transforms are
+// provided; their chains are type-checked by transform.CheckDocument, which
+// config cannot call (import cycle). It returns nil when the build can apply
+// doc.
 func CheckBuild(doc Document) []string {
 	var msgs []string
 	add := func(p path) { msgs = append(msgs, p.msg(notInBuild)) }

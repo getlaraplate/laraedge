@@ -73,12 +73,12 @@ type ConfigProblem struct {
 	Message string
 }
 
-// ConfigRefusedError is the error of an input or a processor the plugin
-// refused to configure, or whose secrets cannot be resolved. It names
+// ConfigRefusedError is the error of an input, a processor or an output the
+// plugin refused to configure, or whose secrets cannot be resolved. It names
 // paths, never values.
 type ConfigRefusedError struct {
-	// Input is the id of the input, or of the component of Section.
-	Input string
+	// ID is the id of the input, processor or output.
+	ID string
 	// Section is the document section of the component, inputs when empty.
 	Section string
 	// Problems are the problems found, never empty.
@@ -110,7 +110,7 @@ func (e *ConfigRefusedError) Error() string {
 		section = "inputs"
 	}
 
-	return strings.Join(e.Messages(section+"."+e.Input), "; ")
+	return strings.Join(e.Messages(section+"."+e.ID), "; ")
 }
 
 // InputFactory returns the factory of the inputs of the plugin h runs. It
@@ -393,7 +393,7 @@ func (in *pluginInput) configure(ctx context.Context, conn *grpc.ClientConn) err
 		return nil
 	}
 
-	refused := &ConfigRefusedError{Input: in.cfg.ID}
+	refused := &ConfigRefusedError{ID: in.cfg.ID}
 	for _, e := range resp.GetErrors() {
 		refused.Problems = append(refused.Problems, ConfigProblem{
 			Path:    redact(e.GetPath(), resolved),
@@ -411,7 +411,7 @@ func (in *pluginInput) payload(ctx context.Context) ([]byte, []string, error) {
 	dec := json.NewDecoder(bytes.NewReader(in.cfg.Raw))
 	dec.UseNumber()
 	if err := dec.Decode(&section); err != nil {
-		return nil, nil, &ConfigRefusedError{Input: in.cfg.ID, Problems: []ConfigProblem{{Message: "the input section is not a JSON object"}}}
+		return nil, nil, &ConfigRefusedError{ID: in.cfg.ID, Problems: []ConfigProblem{{Message: "the input section is not a JSON object"}}}
 	}
 
 	var (
@@ -422,12 +422,12 @@ func (in *pluginInput) payload(ctx context.Context) ([]byte, []string, error) {
 		section["connection"] = resolveSecrets(ctx, in.resolver, connection, "connection", &values, &problems)
 	}
 	if len(problems) > 0 {
-		return nil, nil, &ConfigRefusedError{Input: in.cfg.ID, Problems: problems}
+		return nil, nil, &ConfigRefusedError{ID: in.cfg.ID, Problems: problems}
 	}
 
 	out, err := json.Marshal(section)
 	if err != nil {
-		return nil, nil, &ConfigRefusedError{Input: in.cfg.ID, Problems: []ConfigProblem{{Message: "the input section cannot be encoded"}}}
+		return nil, nil, &ConfigRefusedError{ID: in.cfg.ID, Problems: []ConfigProblem{{Message: "the input section cannot be encoded"}}}
 	}
 
 	return out, values, nil

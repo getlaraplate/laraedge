@@ -763,8 +763,8 @@ func (b *builder) checkConfigSecrets(p path, config any) {
 	})
 }
 
-// processorRules refuses observed devices no input has, and derived devices
-// or signals that clash.
+// processorRules refuses observed devices no input has or a processor lists
+// twice, and derived devices or signals that clash.
 func (b *builder) processorRules(doc Document) {
 	real := map[string]bool{}
 	for _, in := range doc.Inputs {
@@ -775,9 +775,17 @@ func (b *builder) processorRules(doc Document) {
 	derived := map[string]path{}
 	for i, pr := range doc.Processors {
 		pp := path{"processors"}.index(i)
+		observed := map[string]int{}
 		for k, name := range pr.Observe {
-			if name != "" && !real[name] {
+			switch j, dup := observed[name]; {
+			case name == "":
+			case dup:
+				b.add(pp.key("observe").index(k), "duplicate of "+pp.key("observe").index(j).String())
+			case !real[name]:
 				b.add(pp.key("observe").index(k), "is not a device of any input")
+				observed[name] = k
+			default:
+				observed[name] = k
 			}
 		}
 		for d, dev := range pr.Devices {

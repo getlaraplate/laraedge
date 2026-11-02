@@ -169,13 +169,14 @@ func resolveOne(p config.Plugin, prefix string, paths Paths) (Spec, []string) {
 	}, nil
 }
 
-// Validate checks the plugin inputs of doc: the plugin:<id> driver must name
-// an entry of the document whose manifest offers the input kind, and the
-// input section must satisfy the manifest. Plugins missing from specs (their
-// files failed Resolve) are not checked against a manifest. Problems whose
-// value is a secret reference or whose path ends in a secret key are dropped
-// (decision H3): Configure validates the resolved values at start. Messages
-// are prefixed "inputs.<i>".
+// Validate checks the plugin inputs, processors and plugin outputs of doc:
+// the plugin:<id> driver, the processor's plugin or the output's plugin:<id>
+// type must name an entry of the document whose manifest offers the kind,
+// and the section must satisfy the manifest. Plugins missing from specs
+// (their files failed Resolve) are not checked against a manifest. Problems
+// whose value is a secret reference or whose path ends in a secret key are
+// dropped (decision H3): Configure validates the resolved values at start.
+// Messages are prefixed "inputs.<i>", "processors.<i>" or "outputs.<i>".
 func Validate(doc config.Document, specs []Spec) []string {
 	byID := map[string]Spec{}
 	for _, s := range specs {
@@ -207,18 +208,7 @@ func Validate(doc config.Document, specs []Spec) []string {
 			continue
 		}
 
-		var section any
-		_ = json.Unmarshal(in.Raw, &section)
-		for _, problem := range spec.Manifest.ValidateInput(in.Raw) {
-			if dropped(section, problem.Path) {
-				continue
-			}
-			if problem.Path == "" {
-				msgs = append(msgs, prefix+": "+problem.Message)
-			} else {
-				msgs = append(msgs, prefix+"."+dotted(problem.Path)+": "+problem.Message)
-			}
-		}
+		msgs = append(msgs, configProblems(prefix, in.Raw, spec.Manifest.ValidateInput(in.Raw))...)
 	}
 
 	for i, pr := range doc.Processors {

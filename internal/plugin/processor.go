@@ -457,7 +457,7 @@ func (p *Processor) ensureConfigured(ctx context.Context, conn *grpc.ClientConn,
 }
 
 func (p *Processor) refusal(problems []ConfigProblem) *ConfigRefusedError {
-	return &ConfigRefusedError{Input: p.cfg.ID, Section: "processors", Problems: problems}
+	return &ConfigRefusedError{ID: p.cfg.ID, Section: "processors", Problems: problems}
 }
 
 // payload returns the processor section with every secret reference of
