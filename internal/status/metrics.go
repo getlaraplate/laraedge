@@ -163,7 +163,7 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		}
 	}
 
-	w.family("clock_offset_seconds", "gauge", "Backend clock minus agent clock, estimated from the last response; not for plugin outputs.")
+	w.family("clock_offset_seconds", "gauge", "Backend clock minus agent clock, estimated from the last response; not for plugin:<id> or failed outputs.")
 	for _, out := range st.Outputs {
 		if !out.HasClockOffset {
 			continue
