@@ -62,14 +62,6 @@ func TestLoadValid(t *testing.T) {
 			},
 		},
 		{
-			name: "run_dir",
-			yaml: "agent_id: a\nrun_dir: /run/laraplate-edge\nconfig:\n  provider: file\n  file: /c.yaml\n",
-			want: File{
-				AgentID: "a", DataDir: hostDataDir(), StatusListen: "127.0.0.1:9180", RunDir: "/run/laraplate-edge",
-				Config: Config{Provider: "file", File: "/c.yaml", Laraplate: Laraplate{PollSeconds: 60}},
-			},
-		},
-		{
 			name: "http allowed on loopback",
 			yaml: "agent_id: a\nconfig:\n  provider: laraplate\n  laraplate:\n    url: http://127.0.0.1:8000\n    token: secret://env/T\n",
 			want: File{
@@ -99,6 +91,19 @@ func TestLoadAcceptsAbsolutePluginsDir(t *testing.T) {
 	}
 	if got.PluginsDir != dir {
 		t.Errorf("PluginsDir = %q, want %q", got.PluginsDir, dir)
+	}
+}
+
+// TestLoadAcceptsAbsoluteRunDir uses a temporary directory: an absolute
+// path on every host, unlike a Unix path on Windows.
+func TestLoadAcceptsAbsoluteRunDir(t *testing.T) {
+	dir := t.TempDir()
+	got, err := Load(write(t, "agent_id: a\nrun_dir: '"+dir+"'\nconfig:\n  provider: file\n  file: /c.yaml\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.RunDir != dir {
+		t.Errorf("RunDir = %q, want %q", got.RunDir, dir)
 	}
 }
 

@@ -353,7 +353,12 @@ func TestProcessorCrashGoesBadThenDeathThenBirthAfterRestart(t *testing.T) {
 		t.Fatalf("%d deaths before the tolerance", n)
 	}
 	h.procClk.Advance(time.Millisecond)
-	h.waitFor("death of both derived devices", func() bool { return len(h.out.events(model.Death)) == 2 })
+	// The lifecycle may check before that Advance and re-arm after it, with
+	// a timer due now: Advance(0) fires it.
+	h.waitFor("death of both derived devices", func() bool {
+		h.procClk.Advance(0)
+		return len(h.out.events(model.Death)) == 2
+	})
 
 	h.helper().setBehaviour(processorBehaviour(""))
 	h.helper().restartHost()
