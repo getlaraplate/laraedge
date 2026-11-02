@@ -108,7 +108,7 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 			w.sample("processor_up", boolValue(p.State == supervisor.ProcessorUp), "processor", p.ID)
 		}
 
-		w.family("processor_refused_total", "counter", "What the processor's plugin sent outside its declared derived devices and signals, or with another value kind, refused; restarts from 0 when the processor instance restarts, which rate() handles as a counter reset.")
+		w.family("processor_refused_total", "counter", "What the processor's plugin sent outside its declared derived devices and signals, or with another value kind, refused; restarts from 0 when the processor instance restarts, which rate() handles as a counter reset. Copies offered while the stream is down are superseded by the state at the next opening, so a large increase after an outage means superseded copies, not lost machine data (machine data is never touched).")
 		for _, p := range st.Processors {
 			w.sample("processor_refused_total", float64(p.Refused), "processor", p.ID)
 		}
