@@ -28,7 +28,7 @@ func TestFeedCountsTheCopyItCouldNotSend(t *testing.T) {
 	p.queue <- &pb.Record{Item: &pb.Record_Sample{Sample: &pb.Sample{Device: "a1", Signal: "count"}}}
 	stream := &failingProcessStream{}
 
-	p.feed(context.Background(), stream)
+	p.feed(context.Background(), stream, nil)
 
 	if stream.sends != 1 {
 		t.Fatalf("Send called %d times, want 1", stream.sends)

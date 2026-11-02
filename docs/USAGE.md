@@ -394,10 +394,11 @@ samples written to a local file, no Laraplate needed.
   input's `death_tolerance` unless the plugin is back before, and are born again at the first good
   read. Its processors go `down`: the machine data they observe flows to the outputs untouched, each
   derived signal is sent `bad` once and the derived devices die after the processor's
-  `death_tolerance`, to be born again once the processor's stream is back. After a shorter outage
-  the derived devices stay alive, are not born again, and their signals stay `bad` until the plugin
-  sends a new sample for them (see "Known limits of this build" in
-  [CONFIGURATION.md](CONFIGURATION.md#known-limits-of-this-build)). Its outputs go to `backoff`:
+  `death_tolerance`, to be born again once the processor's stream is back. When the stream opens
+  again the plugin first receives the current state of the observed devices (see "State at every
+  opening" in [CONFIGURATION.md](CONFIGURATION.md#processors)), so after a shorter outage, or a
+  restart of the plugin, a plugin deriving from that state sends its derived values again at once.
+  Its outputs go to `backoff`:
   their batches stay in the buffer and are delivered in order once the plugin is back, which
   configures the output's instance again first.
 - Restarts back off from 1 second to 1 minute; the backoff starts again from 1 second after the plugin
@@ -410,8 +411,9 @@ samples written to a local file, no Laraplate needed.
 `memory`, `hash`). The restart counters, and `restarts` in `/status`, start from 0 again when a new
 document restarts the plugin (not when only the section of one of its components changes).
 
-`/status` also has a `processors` list: `id`, `plugin`, `state` (`up` while its stream to the plugin is
-open, `down` while it is not, `failed` for a processor a rollback could not start again), `refused`,
+`/status` also has a `processors` list: `id`, `plugin`, `state` (`up` once the plugin processes on its
+open stream, from the first liveness tick or derived sample, `down` otherwise, a stream the plugin
+refuses included, `failed` for a processor a rollback could not start again), `refused`,
 `dropped` and `last_error`. The metrics are `laraplate_edge_processor_up{processor}`,
 `laraplate_edge_processor_refused_total{processor}` and `laraplate_edge_processor_dropped_total{processor}`.
 A plugin output appears among the `outputs` like any other, with its buffer, state and errors, but
@@ -464,9 +466,9 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
 | `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |
-| `laraplate_edge_processor_up` | gauge | `processor` | 1 when the processor's stream to its plugin is open, 0 otherwise; machine data flows either way |
-| `laraplate_edge_processor_refused_total` | counter | `processor` | what the processor's plugin sent outside its declared derived devices and signals, or with a value of another kind, refused and never routed; restarts from 0 when the processor restarts |
-| `laraplate_edge_processor_dropped_total` | counter | `processor` | copies of observed records dropped because the processor's queue of 1,000 records was full, a copy was over the message limit, or the stream broke while it was being sent; restarts from 0 when the processor restarts |
+| `laraplate_edge_processor_up` | gauge | `processor` | 1 once the processor's plugin processes on its open stream (from the first liveness tick or derived sample), 0 otherwise, a stream the plugin refuses included; machine data flows either way |
+| `laraplate_edge_processor_refused_total` | counter | `processor` | what the processor's plugin sent outside its declared derived devices and signals, or with a value of another kind, refused and never routed; restarts from 0 when the processor instance restarts, which `rate()` handles as a counter reset |
+| `laraplate_edge_processor_dropped_total` | counter | `processor` | copies of observed records dropped because the processor's queue of 1,000 records was full, a copy or a record of the state was over the message limit, or the stream broke while a copy was being sent; restarts from 0 when the processor instance restarts, which `rate()` handles as a counter reset |
 | `laraplate_edge_buffer_records` | gauge | `output`, `priority` | records not yet confirmed |
 | `laraplate_edge_buffer_bytes` | gauge | `output`, `priority` | bytes of the queue on disk |
 | `laraplate_edge_buffer_oldest_unconfirmed_seconds` | gauge | `output`, `priority` | age of the oldest unconfirmed record: agent clock minus the record's device `ts`, 0 when none |
@@ -586,7 +588,7 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | a plugin output `suspended_auth`, `last_error` `outputs.<id>.config.<key>: the secret cannot be resolved`, `WARN` "plugin output secrets cannot be resolved, the output is suspended" | a `secret://` reference in the output's `config` does not resolve when the agent configures the plugin again (after a plugin restart or a `SIGHUP`); the plugin was not contacted | fix the file or the environment as for an output token, then `SIGHUP` (a `secret://env/` value needs a restart). At apply the same problem rolls the document back instead. |
 | a plugin output `backoff`, `WARN` "plugin refused the configuration of the output, retrying" with the paths | the plugin refused the output's section when the agent configured it again after a plugin restart or a `SIGHUP` | fix the value and apply a document. The output keeps buffering and retries with backoff; nothing is dropped. |
 | `WARN` "plugin output rejected a batch as invalid" | the plugin answered `REJECT_INVALID`: the batch is dropped with a `rejected_invalid` loss marker; the `reason` is the plugin's, secrets removed | a defect of the plugin or of the data to report with the log line; the drop is counted in `laraplate_edge_dropped_samples_total{reason="rejected_invalid"}`. |
-| a processor `down`, `WARN` "plugin processor stream ended", derived signals `bad` and then the derived devices dead | the processor's plugin died, restarts or closed the stream; the machine data is not affected | look at the plugin's `state`, `restarts` and stderr lines. The agent opens the stream again once the plugin is back; derived devices that died are born again, and after a shorter outage the derived signals stay `bad` until the plugin sends a new sample for them. |
+| a processor `down`, `WARN` "plugin processor stream ended", derived signals `bad` and then the derived devices dead | the processor's plugin died, restarts or closed the stream; the machine data is not affected | look at the plugin's `state`, `restarts` and stderr lines. The agent opens the stream again once the plugin is back and sends it the current state of the observed devices first; derived devices that died are born again, and a plugin deriving from that state sends its derived values again at once. |
 | a processor `down` after a plugin restart, `WARN` "plugin refused the configuration after a restart, the processor stays down" | the plugin refused the processor's section when the agent configured it again (a `secret://` value it rejects, for instance) | fix the value and apply a document; a plugin restart does not roll back the document |
 | a processor's `refused` grows, `WARN` "plugin processor sample refused: ..." with `device` and `signal` | the plugin sends a device it did not declare, an undeclared signal, or a value of another kind than the signal's `type`; logged once per reason, device and signal | declare the device and signal in `processors[].devices` with the `type` the plugin sends, or fix the plugin. Refused samples never reach an output. |
 | a processor's `dropped` grows | the plugin reads the copies more slowly than the observed devices produce them (or not at all, when it hangs), and the queue of 1,000 records was full | the machine data is not affected; observe fewer devices, or fix the plugin's speed. |

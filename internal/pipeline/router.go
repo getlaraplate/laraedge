@@ -42,6 +42,9 @@ type Router struct {
 	outputs map[string]target
 	order   []string // output ids, sorted
 	inputs  map[string]registeredInput
+	// dead holds the devices whose last event through Emit was a death,
+	// until a birth through Emit or the removal of their input.
+	dead map[string]bool
 	// lastToken is the token of the latest input registration.
 	lastToken InputToken
 }
@@ -127,7 +130,7 @@ func NewRouter(clk clock.Clock, log *slog.Logger) *Router {
 		log = slog.Default()
 	}
 
-	return &Router{clk: clk, log: log, outputs: map[string]target{}, inputs: map[string]registeredInput{}}
+	return &Router{clk: clk, log: log, outputs: map[string]target{}, inputs: map[string]registeredInput{}, dead: map[string]bool{}}
 }
 
 // SetOutput routes to buf the records matching route, from now on, after
@@ -288,19 +291,23 @@ func (r *Router) RemoveInput(id string, token InputToken) {
 
 	if reg, ok := r.inputs[id]; ok && reg.token == token {
 		delete(r.inputs, id)
+		for _, device := range devicesOf(reg.cfg) {
+			delete(r.dead, device)
+		}
 	}
 }
 
 // Emit routes one record. A birth of a registered device lists the device's
-// configured signals across the running inputs. Append errors, drops
-// included, are logged at warn with the output and the device and signal,
-// never the value; the other outputs still receive the record.
+// configured signals across the running inputs. A death marks the device
+// dead for Births until its next birth. Append errors, drops included, are
+// logged at warn with the output and the device and signal, never the
+// value; the other outputs still receive the record.
 func (r *Router) Emit(rec model.Record) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	switch {
 	case rec.Sample != nil:
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+
 		for _, id := range r.order {
 			t := r.outputs[id]
 			if t.route.Match(rec.Sample.Device, rec.Sample.Signal) {
@@ -308,7 +315,16 @@ func (r *Router) Emit(rec model.Record) {
 			}
 		}
 	case rec.Event != nil:
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
 		ev := *rec.Event
+		switch ev.Kind {
+		case model.Death:
+			r.dead[ev.Device] = true
+		case model.Birth:
+			delete(r.dead, ev.Device)
+		}
 		if signals, known := r.deviceSignals(ev.Device); known && ev.Kind == model.Birth {
 			ev.Signals = signals
 		}
@@ -344,7 +360,8 @@ func (r *Router) BirthInput(id string) []model.DeviceEvent {
 }
 
 // Births returns the birth of every device of the running inputs, once
-// each, in input id order, at the clock time; it sends nothing. A processor
+// each, in input id order, at the clock time; it sends nothing. A device
+// whose last event through Emit was a death is left out. A processor
 // starting after the inputs is offered them.
 func (r *Router) Births() []model.DeviceEvent {
 	r.mu.RLock()
@@ -354,7 +371,7 @@ func (r *Router) Births() []model.DeviceEvent {
 	seen := map[string]bool{}
 	for _, inID := range r.inputIDs() {
 		for _, device := range devicesOf(r.inputs[inID].cfg) {
-			if seen[device] {
+			if seen[device] || r.dead[device] {
 				continue
 			}
 			seen[device] = true

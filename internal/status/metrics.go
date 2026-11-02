@@ -103,17 +103,17 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 	}
 
 	if len(st.Processors) > 0 {
-		w.family("processor_up", "gauge", "1 when the processor's stream to its plugin is open, 0 otherwise; machine data flows either way.")
+		w.family("processor_up", "gauge", "1 once the processor's plugin processes on its open stream (from the first liveness tick or derived sample), 0 otherwise, a stream the plugin refuses included; machine data flows either way.")
 		for _, p := range st.Processors {
 			w.sample("processor_up", boolValue(p.State == supervisor.ProcessorUp), "processor", p.ID)
 		}
 
-		w.family("processor_refused_total", "counter", "What the processor's plugin sent outside its declared derived devices and signals, or with another value kind, refused; reset to 0 when the processor restarts.")
+		w.family("processor_refused_total", "counter", "What the processor's plugin sent outside its declared derived devices and signals, or with another value kind, refused; restarts from 0 when the processor instance restarts, which rate() handles as a counter reset.")
 		for _, p := range st.Processors {
 			w.sample("processor_refused_total", float64(p.Refused), "processor", p.ID)
 		}
 
-		w.family("processor_dropped_total", "counter", "Copies of observed records dropped because the processor's queue was full; reset to 0 when the processor restarts.")
+		w.family("processor_dropped_total", "counter", "Copies of observed records dropped because the processor's queue was full, a copy or a record of the state was over the message limit, or the stream broke while a copy was being sent; restarts from 0 when the processor instance restarts, which rate() handles as a counter reset.")
 		for _, p := range st.Processors {
 			w.sample("processor_dropped_total", float64(p.Dropped), "processor", p.ID)
 		}

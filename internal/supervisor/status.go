@@ -28,7 +28,8 @@ type Status struct {
 
 // States of a processor besides StateFailed.
 const (
-	// ProcessorUp is a processor whose Process stream is open.
+	// ProcessorUp is a processor whose plugin processes on its open
+	// Process stream (plugin.ProcessorStats.Up).
 	ProcessorUp = "up"
 	// ProcessorDown is a running processor whose stream is not open: its
 	// plugin is down or restarting; its derived signals are bad.

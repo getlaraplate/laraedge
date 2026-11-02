@@ -610,33 +610,56 @@ func (in *pluginInput) goDown(down *bool, emit func(model.Record)) {
 	*down = true
 	in.health.SetConnected(false)
 
-	now := in.clk.Now().UTC()
+	var points []badPoint
 	for _, d := range in.cfg.Devices {
 		for _, p := range d.Points {
 			priority := p.Priority
 			if !priority.Valid() {
 				priority = model.Critical
 			}
-			emit(model.SampleRecord(model.Sample{
-				Device: d.Device, Signal: p.Signal, TS: now,
-				Value: zeroValue(p.Type), Quality: model.Bad, Priority: priority,
-			}))
+			points = append(points, badPoint{device: d.Device, signal: p.Signal, kind: pointKind(p.Type), priority: priority})
 		}
+	}
+	for _, rec := range badSamples(in.clk.Now(), points) {
+		emit(rec)
 	}
 }
 
-// zeroValue is the zero of the kind of a point type, the value of a bad
-// sample; a point without a type is a float.
-func zeroValue(pointType string) model.Value {
+// badPoint is a signal reported bad when its source goes down.
+type badPoint struct {
+	device, signal string
+	kind           model.ValueKind
+	priority       model.Priority
+}
+
+// badSamples returns one bad sample per point, at now in UTC, with the zero
+// value of the point's kind: what an input or a processor emits once per
+// outage.
+func badSamples(now time.Time, points []badPoint) []model.Record {
+	now = now.UTC()
+	recs := make([]model.Record, 0, len(points))
+	for _, p := range points {
+		recs = append(recs, model.SampleRecord(model.Sample{
+			Device: p.device, Signal: p.signal, TS: now,
+			Value: model.Value{Kind: p.kind}, Quality: model.Bad, Priority: p.priority,
+		}))
+	}
+
+	return recs
+}
+
+// pointKind is the value kind of a point type; a point without a type is a
+// float.
+func pointKind(pointType string) model.ValueKind {
 	switch pointType {
 	case "bool":
-		return model.BoolValue(false)
+		return model.KindBool
 	case "int16", "uint16", "int32", "uint32", "int64", "uint64":
-		return model.IntValue(0)
+		return model.KindInt
 	case "string":
-		return model.StringValue("")
+		return model.KindString
 	default:
-		return model.Value{Kind: model.KindFloat}
+		return model.KindFloat
 	}
 }
 
