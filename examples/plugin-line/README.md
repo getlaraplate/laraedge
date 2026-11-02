@@ -40,5 +40,6 @@ Two things to try while it runs:
   then born again.
 
 The plugins listen on a Unix socket under `data_dir/run/plugins/<id>/`. When the repository lives in a
-directory too deep for the Unix socket limit, the agent moves the sockets to a private directory under
-`/tmp` on its own and logs it, so the example runs from any checkout.
+directory too deep for the Unix socket limit, the agent moves the sockets on its own to a private
+directory under the system temporary directory, or under `/tmp` when that one is too deep as well, and
+logs it, so the example runs from any checkout.

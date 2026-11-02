@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -26,8 +27,16 @@ func shortTMPDIR(t *testing.T) string {
 	return dir
 }
 
-// fallbackRoot is the fallback root the Global Constraints name for dataDir.
+// fallbackRoot is the fallback root the Global Constraints name for dataDir
+// under os.TempDir().
 func fallbackRoot(t *testing.T, dataDir string) string {
+	t.Helper()
+
+	return fallbackRootIn(t, os.TempDir(), dataDir)
+}
+
+// fallbackRootIn is the fallback root of dataDir under temp.
+func fallbackRootIn(t *testing.T, temp, dataDir string) string {
 	t.Helper()
 
 	abs, err := filepath.Abs(dataDir)
@@ -36,7 +45,20 @@ func fallbackRoot(t *testing.T, dataDir string) string {
 	}
 	sum := sha256.Sum256([]byte(abs))
 
-	return filepath.Join(os.TempDir(), "laraplate-edge-"+hex.EncodeToString(sum[:])[:12])
+	return filepath.Join(temp, "laraplate-edge-"+hex.EncodeToString(sum[:])[:12])
+}
+
+// assertPrivateDir fails unless dir is a directory with mode 0700.
+func assertPrivateDir(t *testing.T, dir string) {
+	t.Helper()
+
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("%s mode = %v, want a 0700 directory", dir, info.Mode())
+	}
 }
 
 // deepDataDir returns an absolute data directory of exactly 120 bytes.
@@ -82,19 +104,65 @@ func TestSocketDirFallsBackWhenTooLong(t *testing.T) {
 		if want := filepath.Join(root, "plugins", "demo"); dir != want || !fallback {
 			t.Fatalf("socketDir() = %q, %v; want %q, true", dir, fallback, want)
 		}
-		info, err := os.Lstat(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.IsDir() || info.Mode().Perm() != 0o700 {
-			t.Fatalf("root %s mode = %v, want a 0700 directory", root, info.Mode())
-		}
+		assertPrivateDir(t, root)
+	}
+}
+
+// TestSocketDirFallbackIgnoresTheUmask: a new root gets mode 0700 whatever
+// the umask, which would otherwise make it 0500 and refused.
+func TestSocketDirFallbackIgnoresTheUmask(t *testing.T) {
+	shortTMPDIR(t)
+	old := syscall.Umask(0o277)
+	t.Cleanup(func() { syscall.Umask(old) })
+
+	if _, _, err := socketDir(deepDataDir(), "", "demo"); err != nil {
+		t.Fatalf("socketDir() error = %v", err)
+	}
+	assertPrivateDir(t, fallbackRoot(t, deepDataDir()))
+}
+
+// TestSocketDirFallsBackToTmpWhenTempIsDeep: a temporary directory too deep
+// for the socket (the per-user TMPDIR of macOS) moves the root to /tmp.
+func TestSocketDirFallsBackToTmpWhenTempIsDeep(t *testing.T) {
+	short := shortTMPDIR(t)
+	deepTemp := filepath.Join(short, strings.Repeat("t", 80))
+	if err := os.Mkdir(deepTemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", deepTemp)
+	// A data directory unique to this run, so its root under /tmp is too.
+	base := filepath.Base(short)
+	dataDir := "/" + base + strings.Repeat("d", 119-len(base))
+	root := fallbackRootIn(t, "/tmp", dataDir)
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	dir, fallback, err := socketDir(dataDir, "", "demo")
+	if err != nil {
+		t.Fatalf("socketDir() error = %v", err)
+	}
+	if want := filepath.Join(root, "plugins", "demo"); dir != want || !fallback {
+		t.Fatalf("socketDir() = %q, %v; want %q, true", dir, fallback, want)
+	}
+	assertPrivateDir(t, root)
+	if _, err := os.Lstat(fallbackRootIn(t, deepTemp, dataDir)); err == nil {
+		t.Fatal("a root was created under the deep temporary directory")
+	}
+}
+
+func TestSocketDirRefusesWhenNoFallbackFits(t *testing.T) {
+	deep := "/" + strings.Repeat("t", 100)
+
+	_, _, err := socketDirIn(deepDataDir(), "", "demo", []string{deep, deep})
+	if err == nil || !strings.Contains(err.Error(), fallbackRootIn(t, deep, deepDataDir())) || !strings.Contains(err.Error(), "run_dir") {
+		t.Fatalf("socketDirIn() error = %v, want one naming the path tried and run_dir", err)
 	}
 }
 
 func TestSocketDirRefusesAnUnsafeFallback(t *testing.T) {
 	tests := []struct {
-		name    string
+		name string
+		// prepare makes root unsafe and returns a directory that must stay
+		// empty, or "" when there is none.
 		prepare func(t *testing.T, root string) (target string)
 	}{
 		{
@@ -124,6 +192,16 @@ func TestSocketDirRefusesAnUnsafeFallback(t *testing.T) {
 				return root
 			},
 		},
+		{
+			name: "regular file",
+			prepare: func(t *testing.T, root string) string {
+				if err := os.WriteFile(root, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+
+				return ""
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,6 +213,9 @@ func TestSocketDirRefusesAnUnsafeFallback(t *testing.T) {
 			_, _, err := socketDir(dataDir, "", "demo")
 			if err == nil || !strings.Contains(err.Error(), root) {
 				t.Fatalf("socketDir() error = %v, want an error naming %s", err, root)
+			}
+			if target == "" {
+				return
 			}
 			entries, err := os.ReadDir(target)
 			if err != nil {

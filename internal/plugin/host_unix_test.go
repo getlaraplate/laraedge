@@ -4,6 +4,10 @@ package plugin_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -234,5 +238,15 @@ func TestHostStartsWithADeepDataDir(t *testing.T) {
 	}
 	if !strings.Contains(h.log.String(), "plugin socket directory too deep, using a private fallback") {
 		t.Fatalf("the fallback was not logged; log:\n%s", h.log.String())
+	}
+
+	h.stop()
+	sum := sha256.Sum256([]byte(dataDir))
+	root := filepath.Join(tmp, "laraplate-edge-"+hex.EncodeToString(sum[:])[:12])
+	if _, err := os.Lstat(filepath.Join(root, "plugins", "demo")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the plugin socket directory after Stop: %v, want it removed", err)
+	}
+	if info, err := os.Lstat(root); err != nil || !info.IsDir() {
+		t.Fatalf("the fallback root after Stop: %v, want it kept", err)
 	}
 }

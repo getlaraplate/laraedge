@@ -23,13 +23,21 @@ const socketFileName = "/p00000000.sock"
 
 // socketDir returns the socket directory of plugin id: runDir/plugins/<id>
 // when runDir is set, else <absolute dataDir>/run/plugins/<id>. When that
-// default does not fit the Unix socket limit it returns
-// <os.TempDir()>/laraplate-edge-<12 hex of sha256(absolute dataDir)>/plugins/<id>
-// with fallback true, the root created with mode 0700; an existing root must
-// be a directory, not a symbolic link, with mode 0700 and owned by the
-// effective user, else the error names it. An explicit runDir is never
-// replaced: a path too long is left to the SDK to report.
+// default does not fit the Unix socket limit it returns, with fallback true,
+// <temp>/laraplate-edge-<12 hex of sha256(absolute dataDir)>/plugins/<id>,
+// <temp> being os.TempDir(), or /tmp when the path does not fit there
+// (os.TempDir() is a deep per-user directory on macOS). The root is created
+// with mode 0700; an existing root must be a directory, not a symbolic link,
+// with mode 0700 and owned by the effective user, else the error names it.
+// When no candidate fits, the error names the last path tried. An explicit
+// runDir is never replaced: a path too long is left to the SDK to report.
 func socketDir(dataDir, runDir, id string) (dir string, fallback bool, err error) {
+	return socketDirIn(dataDir, runDir, id, []string{os.TempDir(), "/tmp"})
+}
+
+// socketDirIn is socketDir with the candidate parents of the fallback root,
+// tried in order.
+func socketDirIn(dataDir, runDir, id string, temps []string) (dir string, fallback bool, err error) {
 	if runDir != "" {
 		return filepath.Join(runDir, "plugins", id), false, nil
 	}
@@ -38,24 +46,45 @@ func socketDir(dataDir, runDir, id string) (dir string, fallback bool, err error
 		return "", false, fmt.Errorf("data_dir: %w", err)
 	}
 	dir = filepath.Join(abs, "run", "plugins", id)
-	if len(dir)+len(socketFileName) <= maxSocketPath {
+	if fits(dir) {
 		return dir, false, nil
 	}
 
 	sum := sha256.Sum256([]byte(abs))
-	root := filepath.Join(os.TempDir(), "laraplate-edge-"+hex.EncodeToString(sum[:])[:12])
-	if err := prepareFallbackRoot(root); err != nil {
-		return "", false, err
+	name := "laraplate-edge-" + hex.EncodeToString(sum[:])[:12]
+	for _, temp := range temps {
+		root := filepath.Join(temp, name)
+		dir = filepath.Join(root, "plugins", id)
+		if !fits(dir) {
+			continue
+		}
+		if err := prepareFallbackRoot(root); err != nil {
+			return "", false, err
+		}
+
+		return dir, true, nil
 	}
 
-	return filepath.Join(root, "plugins", id), true, nil
+	return "", false, fmt.Errorf("plugin socket directory %s is too long for a Unix socket (at most %d bytes with the socket file): set a short absolute run_dir in the bootstrap", dir, maxSocketPath)
+}
+
+// fits reports whether a socket file of the SDK in dir fits the Unix limit.
+func fits(dir string) bool {
+	return len(dir)+len(socketFileName) <= maxSocketPath
 }
 
 // prepareFallbackRoot creates root with mode 0700, or checks an existing
 // one without changing it: a directory, not a symbolic link, mode 0700,
 // owned by the effective user.
 func prepareFallbackRoot(root string) error {
-	if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+	err := os.Mkdir(root, 0o700)
+	switch {
+	case err == nil:
+		// The umask may have narrowed the mode of the new directory.
+		if err := os.Chmod(root, 0o700); err != nil {
+			return fmt.Errorf("plugin socket directory %s: %w", root, err)
+		}
+	case !errors.Is(err, fs.ErrExist):
 		return fmt.Errorf("plugin socket directory %s: %w", root, err)
 	}
 
