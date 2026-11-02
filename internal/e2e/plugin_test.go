@@ -420,10 +420,11 @@ func readSink(t *testing.T, path string) (batches []sinkLine, records []sinkReco
 }
 
 // countRecords counts the records of device with the given kind (a sample
-// quality or an event kind), from index from on.
+// quality or an event kind), from index from on; a negative from counts
+// from the start.
 func countRecords(records []sinkRecord, from int, device, kind string) int {
 	n := 0
-	for _, r := range records[min(from, len(records)):] {
+	for _, r := range records[min(max(from, 0), len(records)):] {
 		if r.device == device && r.kind == kind {
 			n++
 		}
@@ -588,8 +589,10 @@ status_listen: 127.0.0.1:0
 		return state == "up" && pid != sinkPid && pid > 0 && restarts >= 1
 	})
 	before := countRecords(sink(), 0, machineDevice, "good")
-	b.waitFor(t, a, "machine samples after the jsonl restart", func() bool {
-		return countRecords(sink(), 0, machineDevice, "good") >= before+10
+	b.waitFor(t, a, "the output sending machine samples after the jsonl restart", func() bool {
+		state, _ := sinkState(t, addr)
+
+		return state == "sending" && countRecords(sink(), 0, machineDevice, "good") >= before+10
 	})
 
 	// The .suspend file: SUSPEND_AUTH, the records keep buffering.
@@ -648,8 +651,12 @@ status_listen: 127.0.0.1:0
 	}
 	b.waitFor(t, a, "machine samples after the derived device died", func() bool {
 		r := sink()
+		death := lastIndex(r, lineDevice, "death")
+		if death < 0 {
+			t.Fatalf("the death of %s is no longer in the jsonl file", lineDevice)
+		}
 
-		return countRecords(r, lastIndex(r, lineDevice, "death"), machineDevice, "good") >= 10
+		return countRecords(r, death, machineDevice, "good") >= 10
 	})
 
 	if err := os.Rename(stateBinary+".away", stateBinary); err != nil {

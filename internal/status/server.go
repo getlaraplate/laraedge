@@ -19,7 +19,6 @@ import (
 
 	"github.com/getlaraplate/laraedge/internal/buffer"
 	"github.com/getlaraplate/laraedge/internal/clock"
-	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/supervisor"
 )
 
@@ -390,7 +389,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 			dropped[reason] = n
 		}
 		var offset *float64
-		if hasClockOffset(out) {
+		if out.HasClockOffset {
 			seconds := out.ClockOffset.Seconds()
 			offset = &seconds
 		}
@@ -421,12 +420,6 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, doc)
-}
-
-// hasClockOffset reports whether out estimates the backend clock: every
-// output but those of type plugin:<id>.
-func hasClockOffset(out supervisor.OutputStatus) bool {
-	return !strings.HasPrefix(out.Type, plugin.DriverPrefix)
 }
 
 func queueOf(q buffer.QueueStats, now time.Time) queueDoc {

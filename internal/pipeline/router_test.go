@@ -460,3 +460,40 @@ func TestRouterHoldTakesTheGivenRoute(t *testing.T) {
 		t.Fatalf("reopened output got %q, want %q", got, want)
 	}
 }
+
+// TestBirthsSkipsDeadDevices: a device whose last event through Emit was a
+// death is not offered to a starting processor until it is born again
+// (M29).
+func TestBirthsSkipsDeadDevices(t *testing.T) {
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.DiscardHandler))
+	in := config.Input{ID: "in", Devices: []config.Device{
+		{Device: "d1", Points: []config.Point{{Signal: "s1"}}},
+		{Device: "d2", Points: []config.Point{{Signal: "s1"}}},
+	}}
+	token := r.SetInput(in)
+	devices := func() []string {
+		var out []string
+		for _, ev := range r.Births() {
+			out = append(out, ev.Device)
+		}
+
+		return out
+	}
+
+	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: "d2", TS: start}))
+	if got := devices(); !reflect.DeepEqual(got, []string{"d1"}) {
+		t.Fatalf("Births() after the death of d2 = %v, want [d1]", got)
+	}
+
+	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Birth, Device: "d2", TS: start}))
+	if got := devices(); !reflect.DeepEqual(got, []string{"d1", "d2"}) {
+		t.Fatalf("Births() after the birth of d2 = %v, want [d1 d2]", got)
+	}
+
+	r.Emit(model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: "d2", TS: start}))
+	r.RemoveInput("in", token)
+	r.SetInput(in)
+	if got := devices(); !reflect.DeepEqual(got, []string{"d1", "d2"}) {
+		t.Fatalf("Births() after the input of d2 was removed and registered again = %v, want [d1 d2]", got)
+	}
+}

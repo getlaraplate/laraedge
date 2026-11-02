@@ -108,6 +108,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 		ConfigDir:  configBaseDir(boot),
 		Provider:   boot.Config.Provider,
 		PluginsDir: boot.PluginsDir,
+		RunDir:     boot.RunDir,
 		Clock:      deps.clock,
 		Logger:     log,
 	})
@@ -315,6 +316,7 @@ func changedSettings(a, b bootstrap.File) []string {
 	check("status_listen", a.StatusListen != b.StatusListen)
 	check("status_token", a.StatusToken != b.StatusToken)
 	check("plugins_dir", a.PluginsDir != b.PluginsDir)
+	check("run_dir", a.RunDir != b.RunDir)
 	check("config.provider", a.Config.Provider != b.Config.Provider)
 	check("config.file", a.Config.File != b.Config.File)
 	check("config.laraplate.url", a.Config.Laraplate.URL != b.Config.Laraplate.URL)

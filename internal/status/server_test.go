@@ -86,6 +86,7 @@ func sampleStatus() supervisor.Status {
 					CorruptRecords: 2,
 				},
 				ClockOffset:      1500 * time.Millisecond,
+				HasClockOffset:   true,
 				LastConfirmation: epoch.Add(-time.Minute),
 				LastError:        "HTTP 503",
 				LastErrorAt:      epoch.Add(-10 * time.Second),
@@ -443,10 +444,9 @@ func TestStatusJSON(t *testing.T) {
 				"last_error_at":     "2026-10-19T07:59:50Z",
 			},
 			map[string]any{
-				"id":                   "spare",
-				"type":                 "laraplate-http",
-				"state":                "failed",
-				"clock_offset_seconds": 0.0,
+				"id":    "spare",
+				"type":  "laraplate-http",
+				"state": "failed",
 				"buffer": map[string]any{
 					"critical": map[string]any{"records": 0.0, "bytes": 0.0, "oldest_unconfirmed_age_seconds": 0.0},
 					"bulk":     map[string]any{"records": 0.0, "bytes": 0.0, "oldest_unconfirmed_age_seconds": 0.0},
@@ -632,5 +632,34 @@ func TestStatusJSONReportsProcessorsAndPluginOutputs(t *testing.T) {
 	}
 	if _, ok := got.Outputs[0]["clock_offset_seconds"]; ok {
 		t.Fatalf("output %v has a clock offset, want none for a plugin output", got.Outputs[0])
+	}
+}
+
+// TestClockOffsetFollowsWhatTheOutputReports: the field shows for an output
+// that reports HasClockOffset whatever its type, and is hidden for one that
+// does not, even for the laraplate-http type.
+func TestClockOffsetFollowsWhatTheOutputReports(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(supervisor.Status{Outputs: []supervisor.OutputStatus{
+		{ID: "estimating", Type: "plugin:demo", State: "sending", ClockOffset: 2 * time.Second, HasClockOffset: true},
+		{ID: "silent", Type: "laraplate-http", State: "sending"},
+	}})
+
+	_, _, body := h.get(t, http.MethodGet, "/status", "")
+
+	var got struct {
+		Outputs []map[string]any `json:"outputs"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("body is not JSON: %v\n%s", err, body)
+	}
+	if len(got.Outputs) != 2 {
+		t.Fatalf("outputs = %v", got.Outputs)
+	}
+	if v, ok := got.Outputs[0]["clock_offset_seconds"]; !ok || v != 2.0 {
+		t.Errorf("estimating output: clock_offset_seconds = %v (present %v), want 2", v, ok)
+	}
+	if _, ok := got.Outputs[1]["clock_offset_seconds"]; ok {
+		t.Errorf("silent output has a clock offset: %v", got.Outputs[1])
 	}
 }

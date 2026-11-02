@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +34,9 @@ const (
 	// processorQueueSize bounds the copies waiting for the stream of one
 	// processor instance (decision Q4).
 	processorQueueSize = 1000
+	// processorStateLimit bounds the signals whose last sample one
+	// processor instance keeps to send when its stream opens.
+	processorStateLimit = 10000
 	// livenessTick is how often the derived devices are marked read while
 	// the stream is up (decision Q5).
 	livenessTick = time.Second
@@ -42,7 +47,9 @@ const (
 
 // ProcessorStats is the state of a processor instance.
 type ProcessorStats struct {
-	// Up is true while the Process stream is open.
+	// Up is true while the plugin processes: from the first liveness tick
+	// or the first emitted sample of the open Process stream until the
+	// stream ends. A stream the plugin refuses at once is never up.
 	Up bool
 	// Refused counts what the plugin sent outside its declared derived
 	// devices and signals, or with a value kind other than the declared
@@ -63,9 +70,13 @@ type derivedSignal struct {
 // it receives copies of the records of the observed devices through Offer
 // and emits the samples the plugin derives for its declared derived devices.
 // It never touches machine data: Offer never blocks, and a full queue drops
-// the copy. Its run goroutine owns the connection to the plugin: it
-// configures the instance, opens the one Process stream, and after a plugin
-// restart does both again.
+// the copy. Offer also keeps the current state of the observed devices (the
+// last event of each device, the last sample of each signal, at most
+// processorStateLimit signals), which every opening of the stream sends
+// first: at the first start, after an outage and after a plugin restart.
+// Its run goroutine owns the connection to the plugin: it configures the
+// instance, opens the one Process stream, and after a plugin restart does
+// both again.
 type Processor struct {
 	h        *Host
 	resolver SecretResolver
@@ -100,6 +111,16 @@ type Processor struct {
 	// warned holds the refusals already logged; only the run goroutine
 	// touches it.
 	warned map[string]bool
+
+	// stateMu guards the state of the observed devices, held only for a
+	// map update or a copy: events is the last event per device, samples
+	// the last sample per device and signal, cached the number of samples
+	// and stateFull whether the limit was logged.
+	stateMu   sync.Mutex
+	events    map[string]model.DeviceEvent
+	samples   map[string]map[string]model.Sample
+	cached    int
+	stateFull bool
 }
 
 // NewProcessor returns processor cfg served by the plugin h runs. It only
@@ -122,6 +143,8 @@ func NewProcessor(h *Host, cfg config.Processor, resolver SecretResolver, clk cl
 		declared: make(map[string]map[string]derivedSignal, len(cfg.Devices)),
 		queue:    make(chan *pb.Record, processorQueueSize),
 		warned:   map[string]bool{},
+		events:   map[string]model.DeviceEvent{},
+		samples:  map[string]map[string]model.Sample{},
 	}
 	for _, device := range cfg.Observe {
 		p.observed[device] = true
@@ -181,9 +204,10 @@ func (p *Processor) Stats() ProcessorStats {
 }
 
 // Offer queues a copy of rec for the plugin when rec is a sample or a device
-// event of an observed device; other records are ignored. It never blocks:
-// when the queue is full the copy is dropped and counted (decision Q4).
-// Safe for concurrent use; a no-op after Close.
+// event of an observed device; other records are ignored. It first updates
+// the state the next opening of the stream sends, the queue being full or
+// not. It never blocks: when the queue is full the copy is dropped and
+// counted (decision Q4). Safe for concurrent use; a no-op after Close.
 func (p *Processor) Offer(rec model.Record) {
 	if p.closed.Load() {
 		return
@@ -201,12 +225,100 @@ func (p *Processor) Offer(rec model.Record) {
 	if !p.observed[device] {
 		return
 	}
+	p.remember(rec)
 
 	select {
 	case p.queue <- recordToWire(rec):
 	default:
 		p.dropped.Add(1)
 	}
+}
+
+// remember updates the state with rec, a sample or an event of an observed
+// device: an event replaces the device's last event, and a death also
+// forgets the device's samples; a sample replaces its signal's last sample,
+// unless the device's last event is a death (a later birth makes its samples
+// kept again). A new signal past processorStateLimit is not kept, logged
+// once per instance.
+func (p *Processor) remember(rec model.Record) {
+	p.stateMu.Lock()
+	if rec.Event != nil {
+		ev := *rec.Event
+		p.events[ev.Device] = ev
+		if ev.Kind == model.Death {
+			p.cached -= len(p.samples[ev.Device])
+			delete(p.samples, ev.Device)
+		}
+		p.stateMu.Unlock()
+
+		return
+	}
+
+	s := *rec.Sample
+	if ev, ok := p.events[s.Device]; ok && ev.Kind == model.Death {
+		p.stateMu.Unlock()
+
+		return
+	}
+	signals := p.samples[s.Device]
+	if _, known := signals[s.Signal]; !known {
+		if p.cached >= processorStateLimit {
+			warn := !p.stateFull
+			p.stateFull = true
+			p.stateMu.Unlock()
+			if warn {
+				p.log.Warn("processor state is full: the last sample of a new signal is not kept for the next opening of the stream",
+					"limit", processorStateLimit)
+			}
+
+			return
+		}
+		if signals == nil {
+			signals = map[string]model.Sample{}
+			p.samples[s.Device] = signals
+		}
+		p.cached++
+	}
+	signals[s.Signal] = s
+	p.stateMu.Unlock()
+}
+
+// state returns a copy of the state as records: devices in name order, for
+// each its last event, then, when that event is not a death or there is
+// none, its samples in signal order.
+func (p *Processor) state() []model.Record {
+	p.stateMu.Lock()
+	events := make([]model.DeviceEvent, 0, len(p.events))
+	for _, ev := range p.events {
+		events = append(events, ev)
+	}
+	samples := make([]model.Sample, 0, p.cached)
+	for _, signals := range p.samples {
+		for _, s := range signals {
+			samples = append(samples, s)
+		}
+	}
+	p.stateMu.Unlock()
+
+	slices.SortFunc(events, func(a, b model.DeviceEvent) int { return cmp.Compare(a.Device, b.Device) })
+	slices.SortFunc(samples, func(a, b model.Sample) int {
+		return cmp.Or(cmp.Compare(a.Device, b.Device), cmp.Compare(a.Signal, b.Signal))
+	})
+
+	recs := make([]model.Record, 0, len(events)+len(samples))
+	for len(events) > 0 || len(samples) > 0 {
+		// The event of a device precedes its samples.
+		if len(events) > 0 && (len(samples) == 0 || events[0].Device <= samples[0].Device) {
+			recs = append(recs, model.EventRecord(events[0]))
+			events = events[1:]
+
+			continue
+		}
+		recs = append(recs, model.SampleRecord(samples[0]))
+		samples = samples[1:]
+	}
+
+	return recs
 }
 
 // Start configures the instance when the plugin is up, opens the stream and
@@ -345,7 +457,7 @@ func (p *Processor) ensureConfigured(ctx context.Context, conn *grpc.ClientConn,
 }
 
 func (p *Processor) refusal(problems []ConfigProblem) *ConfigRefusedError {
-	return &ConfigRefusedError{Input: p.cfg.ID, Section: "processors", Problems: problems}
+	return &ConfigRefusedError{ID: p.cfg.ID, Section: "processors", Problems: problems}
 }
 
 // payload returns the processor section with every secret reference of
@@ -460,10 +572,16 @@ func (p *Processor) run(ctx context.Context, emit func(model.Record), life *inpu
 }
 
 // stream opens the one Process stream of the instance and runs it until it
-// ends: a feeder goroutine sends the queued copies, a ticker goroutine marks
-// the derived devices read every livenessTick, and this goroutine receives
-// the derived samples. Both goroutines have ended when stream returns.
-// lived tells whether the stream ticked or delivered a sample.
+// ends. After the start message it drops the queued copies uncounted and
+// takes the state of the observed devices, which supersedes them; then a
+// feeder goroutine sends the state and, after it, the copies queued from
+// then on, a ticker goroutine marks the derived devices read every
+// livenessTick, and this goroutine receives the derived samples, while the
+// state is still being sent: a plugin emitting as it reads is never held
+// by an agent not reading. A record offered while the state is taken can
+// be sent twice, never lost. Both goroutines have ended when stream
+// returns. lived tells whether the stream ticked or delivered a sample;
+// the processor is up from then on.
 func (p *Processor) stream(ctx context.Context, conn *grpc.ClientConn, emit func(model.Record), life *input.Lifecycle) (bool, error) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -481,15 +599,18 @@ func (p *Processor) stream(ctx context.Context, conn *grpc.ClientConn, emit func
 
 		return false, err
 	}
-
-	p.up.Store(true)
 	defer p.up.Store(false)
+
+	// The queue is drained before the state is taken: a record offered in
+	// between is in the state, one offered afterwards in the queue.
+	p.drain()
+	state := p.state()
 
 	var (
 		lived atomic.Bool
 		wg    sync.WaitGroup
 	)
-	wg.Go(func() { p.feed(streamCtx, stream) })
+	wg.Go(func() { p.feed(streamCtx, stream, state) })
 	wg.Go(func() { p.tick(streamCtx, life, &lived) })
 	for {
 		out, err := stream.Recv()
@@ -505,28 +626,60 @@ func (p *Processor) stream(ctx context.Context, conn *grpc.ClientConn, emit func
 	}
 }
 
-// feed sends the queued copies until ctx ends or the stream fails. A copy
-// over the message limit of the protocol, or the one a failed Send lost, is
-// dropped and counted.
-func (p *Processor) feed(ctx context.Context, stream pb.Processor_ProcessClient) {
+// drain empties the queue without counting: the state sent at the opening
+// of the stream supersedes the copies queued before it. It takes at most
+// the capacity of the queue, so concurrent offers cannot hold it.
+func (p *Processor) drain() {
+	for range cap(p.queue) {
+		select {
+		case <-p.queue:
+		default:
+			return
+		}
+	}
+}
+
+// feed sends state, in order, then the queued copies until ctx ends or the
+// stream fails. A record over the message limit of the protocol is skipped
+// and counted as dropped. A failed Send ends the stream, whose status
+// stream's Recv then reads, and the feed with it; the record it lost, of
+// the state or of the queue, is counted as dropped.
+func (p *Processor) feed(ctx context.Context, stream pb.Processor_ProcessClient, state []model.Record) {
+	for _, rec := range state {
+		if ctx.Err() != nil {
+			return
+		}
+		if !p.send(stream, recordToWire(rec)) {
+			p.dropped.Add(1)
+
+			return
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case rec := <-p.queue:
-			msg := &pb.ProcessorIn{Msg: &pb.ProcessorIn_Record{Record: rec}}
-			if proto.Size(msg) > handshake.MaxMessageSize {
-				p.dropped.Add(1)
-
-				continue
-			}
-			if stream.Send(msg) != nil {
+			if !p.send(stream, rec) {
 				p.dropped.Add(1)
 
 				return
 			}
 		}
 	}
+}
+
+// send sends rec on stream and reports whether the stream is still usable:
+// a record over the message limit is skipped and counted as dropped.
+func (p *Processor) send(stream pb.Processor_ProcessClient, rec *pb.Record) bool {
+	msg := &pb.ProcessorIn{Msg: &pb.ProcessorIn_Record{Record: rec}}
+	if proto.Size(msg) > handshake.MaxMessageSize {
+		p.dropped.Add(1)
+
+		return true
+	}
+
+	return stream.Send(msg) == nil
 }
 
 // tick marks every derived device read every livenessTick until ctx ends:
@@ -541,6 +694,7 @@ func (p *Processor) tick(ctx context.Context, life *input.Lifecycle, lived *atom
 			return
 		case <-timer.C():
 			lived.Store(true)
+			p.up.Store(true)
 			p.down.Store(false)
 			for _, device := range p.devices {
 				life.Read(device)
@@ -583,6 +737,7 @@ func (p *Processor) handle(out *pb.ProcessorOut, emit func(model.Record), life *
 	}
 	s.Priority = declared.priority
 
+	p.up.Store(true)
 	p.down.Store(false)
 	life.Read(s.Device)
 	emit(model.SampleRecord(s))
@@ -613,13 +768,13 @@ func (p *Processor) goDown(emit func(model.Record)) {
 		return
 	}
 
-	now := p.clk.Now().UTC()
+	var points []badPoint
 	for _, d := range p.cfg.Devices {
 		for _, s := range d.Signals {
-			emit(model.SampleRecord(model.Sample{
-				Device: d.Device, Signal: s.Signal, TS: now,
-				Value: model.Value{Kind: derivedKind(s.Type)}, Quality: model.Bad, Priority: derivedPriority(s.Priority),
-			}))
+			points = append(points, badPoint{device: d.Device, signal: s.Signal, kind: derivedKind(s.Type), priority: derivedPriority(s.Priority)})
 		}
+	}
+	for _, rec := range badSamples(p.clk.Now(), points) {
+		emit(rec)
 	}
 }

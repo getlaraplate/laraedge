@@ -89,6 +89,9 @@ type Config struct {
 	// PluginsDir is the bootstrap's plugins_dir, "" when unset: the local
 	// trust anchor every plugin binary must lie inside.
 	PluginsDir string
+	// RunDir is the bootstrap's run_dir, the directory of the plugin
+	// sockets; "" means DataDir/run.
+	RunDir string
 	// Clock drives every timer; nil means clock.Real().
 	Clock clock.Clock
 	// Logger receives the logs; nil means slog.Default().
@@ -112,6 +115,7 @@ type Supervisor struct {
 	configDir  string
 	provider   string
 	pluginsDir string
+	runDir     string
 	clk        clock.Clock
 	log        *slog.Logger
 	timeout    time.Duration
@@ -351,6 +355,7 @@ func New(cfg Config) (*Supervisor, error) {
 		configDir:  cfg.ConfigDir,
 		provider:   cfg.Provider,
 		pluginsDir: cfg.PluginsDir,
+		runDir:     cfg.RunDir,
 		clk:        cfg.Clock,
 		log:        cfg.Logger,
 		timeout:    cfg.StartTimeout,
@@ -767,6 +772,7 @@ func (s *Supervisor) build(doc config.Document, p plan, specs []plugin.Spec) (pe
 func (s *Supervisor) newPlugin(spec plugin.Spec) *runningPlugin {
 	return &runningPlugin{spec: spec, host: plugin.NewHost(spec, plugin.HostOptions{
 		DataDir: s.dataDir,
+		RunDir:  s.runDir,
 		Clock:   s.clk,
 		Log:     s.log,
 	})}

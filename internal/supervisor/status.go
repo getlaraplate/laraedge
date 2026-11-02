@@ -28,7 +28,8 @@ type Status struct {
 
 // States of a processor besides StateFailed.
 const (
-	// ProcessorUp is a processor whose Process stream is open.
+	// ProcessorUp is a processor whose plugin processes on its open
+	// Process stream (plugin.ProcessorStats.Up).
 	ProcessorUp = "up"
 	// ProcessorDown is a running processor whose stream is not open: its
 	// plugin is down or restarting; its derived signals are bad.
@@ -105,9 +106,12 @@ type OutputStatus struct {
 	State string
 	// Buffer holds the figures of the output's buffer, zero when failed.
 	Buffer buffer.Stats
-	// ClockOffset is the backend clock minus the agent clock; always zero
-	// for an output of type plugin:<id>, which has no clock offset.
+	// ClockOffset is the backend clock minus the agent clock; meaningful
+	// only when HasClockOffset is set.
 	ClockOffset time.Duration
+	// HasClockOffset is whether the output estimates the backend clock
+	// (the HTTP output does; a plugin output or a failed one does not).
+	HasClockOffset bool
 	// LastConfirmation is when a batch was last confirmed, zero before any.
 	LastConfirmation time.Time
 	// LastError is the last error, without secrets, and LastErrorAt when it
@@ -159,6 +163,7 @@ func (s *Supervisor) Status() Status {
 		}
 		if co, ok := ro.out.(clockOffsetter); ok {
 			out.ClockOffset = co.ClockOffset()
+			out.HasClockOffset = true
 		}
 		st.Outputs = append(st.Outputs, out)
 	}

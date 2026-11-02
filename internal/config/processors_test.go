@@ -121,3 +121,33 @@ func TestCheckBuildProcessorsAndPluginOutputs(t *testing.T) {
 		})
 	}
 }
+
+// TestProcessorObserveListedTwiceIsRefused: a device observed twice by one
+// processor is refused at the second entry, once, in the wording of the other
+// duplicate refusals.
+func TestProcessorObserveListedTwiceIsRefused(t *testing.T) {
+	doc := edit(t, procBase, "observe: [press-07]", "observe: [press-07, press-07]")
+	_, msgs, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "processors.0.observe.1: duplicate of processors.0.observe.0"
+	if !slices.Equal(msgs, []string{want}) {
+		t.Errorf("messages = %q, want exactly %q", msgs, want)
+	}
+}
+
+// TestProcessorCannotObserveADerivedDevice: the device a processor derives is
+// not a device of any input, so another processor cannot observe it. This held
+// by construction before the duplicate rule; it stays as the regression test.
+func TestProcessorCannotObserveADerivedDevice(t *testing.T) {
+	doc := edit(t, procBase, "plugins:", "  - {id: p2, plugin: oee, observe: [line-1], devices: [{device: line-2, signals: [{signal: x, type: bool}]}]}\nplugins:")
+	_, msgs, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "processors.1.observe.0: is not a device of any input"
+	if !slices.Equal(msgs, []string{want}) {
+		t.Errorf("messages = %q, want exactly %q", msgs, want)
+	}
+}

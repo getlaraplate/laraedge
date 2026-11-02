@@ -39,6 +39,7 @@ Two things to try while it runs:
   `death_tolerance` (rename its binary away, kill it, wait, put it back) and `line-1` is reported dead,
   then born again.
 
-The plugins listen on a Unix socket under `data_dir/run/plugins/<id>/`, whose path must fit 107 bytes
-on Linux. If the repository lives in a deep directory and the plugins fail with `socket path too long`,
-set `data_dir` in `bootstrap.yaml` to a short absolute path.
+The plugins listen on a Unix socket under `data_dir/run/plugins/<id>/`. When the repository lives in a
+directory too deep for the Unix socket limit, the agent moves the sockets on its own to a private
+directory under the system temporary directory, or under `/tmp` when that one is too deep as well, and
+logs it, so the example runs from any checkout.

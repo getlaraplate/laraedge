@@ -73,12 +73,12 @@ type ConfigProblem struct {
 	Message string
 }
 
-// ConfigRefusedError is the error of an input or a processor the plugin
-// refused to configure, or whose secrets cannot be resolved. It names
+// ConfigRefusedError is the error of an input, a processor or an output the
+// plugin refused to configure, or whose secrets cannot be resolved. It names
 // paths, never values.
 type ConfigRefusedError struct {
-	// Input is the id of the input, or of the component of Section.
-	Input string
+	// ID is the id of the input, processor or output.
+	ID string
 	// Section is the document section of the component, inputs when empty.
 	Section string
 	// Problems are the problems found, never empty.
@@ -110,7 +110,7 @@ func (e *ConfigRefusedError) Error() string {
 		section = "inputs"
 	}
 
-	return strings.Join(e.Messages(section+"."+e.Input), "; ")
+	return strings.Join(e.Messages(section+"."+e.ID), "; ")
 }
 
 // InputFactory returns the factory of the inputs of the plugin h runs. It
@@ -393,7 +393,7 @@ func (in *pluginInput) configure(ctx context.Context, conn *grpc.ClientConn) err
 		return nil
 	}
 
-	refused := &ConfigRefusedError{Input: in.cfg.ID}
+	refused := &ConfigRefusedError{ID: in.cfg.ID}
 	for _, e := range resp.GetErrors() {
 		refused.Problems = append(refused.Problems, ConfigProblem{
 			Path:    redact(e.GetPath(), resolved),
@@ -411,7 +411,7 @@ func (in *pluginInput) payload(ctx context.Context) ([]byte, []string, error) {
 	dec := json.NewDecoder(bytes.NewReader(in.cfg.Raw))
 	dec.UseNumber()
 	if err := dec.Decode(&section); err != nil {
-		return nil, nil, &ConfigRefusedError{Input: in.cfg.ID, Problems: []ConfigProblem{{Message: "the input section is not a JSON object"}}}
+		return nil, nil, &ConfigRefusedError{ID: in.cfg.ID, Problems: []ConfigProblem{{Message: "the input section is not a JSON object"}}}
 	}
 
 	var (
@@ -422,12 +422,12 @@ func (in *pluginInput) payload(ctx context.Context) ([]byte, []string, error) {
 		section["connection"] = resolveSecrets(ctx, in.resolver, connection, "connection", &values, &problems)
 	}
 	if len(problems) > 0 {
-		return nil, nil, &ConfigRefusedError{Input: in.cfg.ID, Problems: problems}
+		return nil, nil, &ConfigRefusedError{ID: in.cfg.ID, Problems: problems}
 	}
 
 	out, err := json.Marshal(section)
 	if err != nil {
-		return nil, nil, &ConfigRefusedError{Input: in.cfg.ID, Problems: []ConfigProblem{{Message: "the input section cannot be encoded"}}}
+		return nil, nil, &ConfigRefusedError{ID: in.cfg.ID, Problems: []ConfigProblem{{Message: "the input section cannot be encoded"}}}
 	}
 
 	return out, values, nil
@@ -610,33 +610,56 @@ func (in *pluginInput) goDown(down *bool, emit func(model.Record)) {
 	*down = true
 	in.health.SetConnected(false)
 
-	now := in.clk.Now().UTC()
+	var points []badPoint
 	for _, d := range in.cfg.Devices {
 		for _, p := range d.Points {
 			priority := p.Priority
 			if !priority.Valid() {
 				priority = model.Critical
 			}
-			emit(model.SampleRecord(model.Sample{
-				Device: d.Device, Signal: p.Signal, TS: now,
-				Value: zeroValue(p.Type), Quality: model.Bad, Priority: priority,
-			}))
+			points = append(points, badPoint{device: d.Device, signal: p.Signal, kind: pointKind(p.Type), priority: priority})
 		}
+	}
+	for _, rec := range badSamples(in.clk.Now(), points) {
+		emit(rec)
 	}
 }
 
-// zeroValue is the zero of the kind of a point type, the value of a bad
-// sample; a point without a type is a float.
-func zeroValue(pointType string) model.Value {
+// badPoint is a signal reported bad when its source goes down.
+type badPoint struct {
+	device, signal string
+	kind           model.ValueKind
+	priority       model.Priority
+}
+
+// badSamples returns one bad sample per point, at now in UTC, with the zero
+// value of the point's kind: what an input or a processor emits once per
+// outage.
+func badSamples(now time.Time, points []badPoint) []model.Record {
+	now = now.UTC()
+	recs := make([]model.Record, 0, len(points))
+	for _, p := range points {
+		recs = append(recs, model.SampleRecord(model.Sample{
+			Device: p.device, Signal: p.signal, TS: now,
+			Value: model.Value{Kind: p.kind}, Quality: model.Bad, Priority: p.priority,
+		}))
+	}
+
+	return recs
+}
+
+// pointKind is the value kind of a point type; a point without a type is a
+// float.
+func pointKind(pointType string) model.ValueKind {
 	switch pointType {
 	case "bool":
-		return model.BoolValue(false)
+		return model.KindBool
 	case "int16", "uint16", "int32", "uint32", "int64", "uint64":
-		return model.IntValue(0)
+		return model.KindInt
 	case "string":
-		return model.StringValue("")
+		return model.KindString
 	default:
-		return model.Value{Kind: model.KindFloat}
+		return model.KindFloat
 	}
 }
 

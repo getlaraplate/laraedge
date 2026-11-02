@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/getlaraplate/laraedge-sdk/sdk"
 
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
@@ -54,12 +58,73 @@ func (h *processorHarness) startProcessor(t *testing.T, cfg config.Processor) *p
 	t.Helper()
 
 	p := h.processor(t, cfg)
+	h.open(t, p)
+
+	return p
+}
+
+// open starts p and waits until it is up: the stream open, its state sent
+// and its first tick fired.
+func (h *processorHarness) open(t *testing.T, p *plugin.Processor) {
+	t.Helper()
+
 	if err := p.Start(context.Background(), h.out.emit); err != nil {
 		t.Fatalf("Start() = %v", err)
 	}
-	h.waitFor("the stream up", func() bool { return p.Stats().Up })
+	h.tickUp(p)
+}
 
-	return p
+// tickUp fires the first tick of an opening stream and waits for p up.
+func (h *processorHarness) tickUp(p *plugin.Processor) {
+	h.t.Helper()
+
+	h.waitFor("the tick and the lifecycle timers", func() bool { return h.procClk.PendingTimers() == 2 })
+	h.procClk.Advance(time.Second)
+	h.waitFor("the stream up", func() bool { return p.Stats().Up })
+}
+
+// wireRecord is one line of records_file: a record as the plugin received
+// it.
+type wireRecord struct {
+	Sample *struct {
+		Device, Signal string
+		Value          struct{ Int int64 }
+	}
+	Event *struct {
+		Kind   int // sdk.EventKind, as the test plugin marshals it
+		Device string
+	}
+}
+
+func (r wireRecord) String() string {
+	switch {
+	case r.Sample != nil:
+		return fmt.Sprintf("%s/%s=%d", r.Sample.Device, r.Sample.Signal, r.Sample.Value.Int)
+	case r.Event != nil && r.Event.Kind == int(sdk.EventBirth):
+		return "birth " + r.Event.Device
+	case r.Event != nil && r.Event.Kind == int(sdk.EventDeath):
+		return "death " + r.Event.Device
+	default:
+		return "?"
+	}
+}
+
+// records returns the complete lines of records_file, rendered.
+func (h *processorHarness) records() []string {
+	h.t.Helper()
+
+	data := h.read("records")
+	data = data[:strings.LastIndex(data, "\n")+1]
+	var out []string
+	for line := range strings.Lines(data) {
+		var r wireRecord
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			h.t.Fatalf("records line %q: %v", line, err)
+		}
+		out = append(out, r.String())
+	}
+
+	return out
 }
 
 func (h *processorHarness) helper() *inputHarness { return &inputHarness{harness: h.harness} }
@@ -106,6 +171,22 @@ func observed(device string, value int64, quality model.Quality) model.Record {
 	ts, _ := time.Parse(time.RFC3339, ts1)
 
 	return model.SampleRecord(model.Sample{Device: device, Signal: "s1", TS: ts, Value: model.IntValue(value), Quality: quality, Priority: model.Critical})
+}
+
+// observedSignal is a good sample of signal of device with value.
+func observedSignal(device, signal string, value int64) model.Record {
+	ts, _ := time.Parse(time.RFC3339, ts1)
+
+	return model.SampleRecord(model.Sample{Device: device, Signal: signal, TS: ts, Value: model.IntValue(value), Quality: model.Good, Priority: model.Critical})
+}
+
+func birthOf(device string) model.Record {
+	return model.EventRecord(model.DeviceEvent{Kind: model.Birth, Device: device, TS: epoch,
+		Signals: []model.SignalInfo{{Signal: "s1", DataType: model.DataTypeNumber}}})
+}
+
+func deathOf(device string) model.Record {
+	return model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: device, TS: epoch})
 }
 
 func processSample(device, signal string, value int, kind string) string {
@@ -240,6 +321,7 @@ func TestProcessorCrashGoesBadThenDeathThenBirthAfterRestart(t *testing.T) {
 	h := newProcessorHarness(t, processorBehaviour(""))
 	p := h.startProcessor(t, testProcessor(`{}`))
 	h.waitTrace("process p1")
+	now := h.procClk.Now()
 
 	h.helper().setBehaviour(`{"crash_at_start":true}`)
 	h.kill()
@@ -256,7 +338,7 @@ func TestProcessorCrashGoesBadThenDeathThenBirthAfterRestart(t *testing.T) {
 	}
 	for i, s := range h.out.samples(model.Bad) {
 		w := want[i]
-		if s.Device != w.device || s.Signal != w.signal || s.Value != w.value || s.Priority != w.priority || !s.TS.Equal(epoch) {
+		if s.Device != w.device || s.Signal != w.signal || s.Value != w.value || s.Priority != w.priority || !s.TS.Equal(now) {
 			t.Fatalf("bad sample %d = %+v, want %+v at the clock time", i, s, w)
 		}
 	}
@@ -275,12 +357,16 @@ func TestProcessorCrashGoesBadThenDeathThenBirthAfterRestart(t *testing.T) {
 
 	h.helper().setBehaviour(processorBehaviour(""))
 	h.helper().restartHost()
-	h.waitFor("the stream up again", func() bool { return p.Stats().Up })
+	h.waitFor("the stream open again", func() bool { return strings.Count(h.read("trace"), "process p1") == 2 })
 	h.waitFor("the tick and the lifecycle timers", func() bool { return h.procClk.PendingTimers() == 2 })
 	if n := len(h.out.events(model.Birth)); n != 0 {
 		t.Fatalf("%d births before the first tick", n)
 	}
+	if p.Stats().Up {
+		t.Fatal("Stats().Up before the first tick")
+	}
 	h.procClk.Advance(time.Second)
+	h.waitFor("the stream up again", func() bool { return p.Stats().Up })
 	h.waitFor("birth of both derived devices", func() bool { return len(h.out.events(model.Birth)) == 2 })
 	for _, birth := range h.out.events(model.Birth) {
 		if len(birth.Signals) != 2 {
@@ -406,5 +492,198 @@ func TestProcessorInputDescribesTheDerivedDevices(t *testing.T) {
 	life.Check()
 	if fmt.Sprint(deaths) != "[line-1 line-2]" {
 		t.Fatalf("deaths = %v, want both derived devices", deaths)
+	}
+}
+
+// TestProcessorStreamOpensWithTheCurrentState: the copies queued before the
+// stream opens are superseded by the state, the last event then the last
+// sample of every signal.
+func TestProcessorStreamOpensWithTheCurrentState(t *testing.T) {
+	h := newProcessorHarness(t, processorBehaviour(""))
+	p := h.processor(t, testProcessor(`{}`))
+
+	p.Offer(birthOf("d1"))
+	p.Offer(observed("d1", 1, model.Good))
+	p.Offer(observed("d1", 2, model.Good))
+	h.open(t, p)
+	p.Offer(observedSignal("d1", "s2", 99))
+
+	h.waitFor("the live copy after the state", func() bool { return slices.Contains(h.records(), "d1/s2=99") })
+	if got, want := h.records(), []string{"birth d1", "d1/s1=2", "d1/s2=99"}; !slices.Equal(got, want) {
+		t.Fatalf("the plugin received %q, want %q", got, want)
+	}
+}
+
+// TestProcessorStateAfterAPluginRestart: a restarted plugin gets the state
+// of the observed devices without any new Offer.
+func TestProcessorStateAfterAPluginRestart(t *testing.T) {
+	h := newProcessorHarness(t, processorBehaviour(""))
+	p := h.startProcessor(t, testProcessor(`{}`))
+
+	p.Offer(birthOf("d1"))
+	p.Offer(observed("d1", 5, model.Good))
+	h.waitFor("both records in the plugin", func() bool { return len(h.records()) == 2 })
+
+	h.kill()
+	h.waitFor("the processor down", func() bool { return len(h.out.samples(model.Bad)) == 4 })
+	h.helper().restartHost()
+
+	h.waitFor("the state in the new process", func() bool { return len(h.records()) >= 4 })
+	if got, want := h.records()[2:4], []string{"birth d1", "d1/s1=5"}; !slices.Equal(got, want) {
+		t.Fatalf("the restarted plugin received %q first, want %q", got, want)
+	}
+}
+
+// TestProcessorStateSendsTheDeathOfADeadDevice is review focus 1: a device
+// that died during the outage is sent as dead, without its samples; it is
+// born again normally afterwards.
+func TestProcessorStateSendsTheDeathOfADeadDevice(t *testing.T) {
+	h := newProcessorHarness(t, processorBehaviour(""))
+	p := h.startProcessor(t, testProcessor(`{}`))
+
+	h.kill()
+	h.waitFor("the processor down", func() bool { return len(h.out.samples(model.Bad)) == 4 })
+	p.Offer(birthOf("d1"))
+	p.Offer(observed("d1", 5, model.Good))
+	p.Offer(deathOf("d1"))
+	h.helper().restartHost()
+
+	h.waitFor("the state in the new process", func() bool { return len(h.records()) >= 1 })
+	p.Offer(birthOf("d1"))
+	p.Offer(observed("d1", 6, model.Good))
+	h.waitFor("the live copies", func() bool { return len(h.records()) >= 3 })
+	if got, want := h.records(), []string{"death d1", "birth d1", "d1/s1=6"}; !slices.Equal(got, want) {
+		t.Fatalf("the plugin received %q, want %q", got, want)
+	}
+	h.waitFor("the derived sample of the new value", func() bool {
+		return slices.ContainsFunc(h.out.samples(model.Good), func(s model.Sample) bool { return s.Value == model.IntValue(6) })
+	})
+}
+
+// TestProcessorRecordOfferedDuringTheStateIsNotLost is review focus 2: a
+// record offered while the stream opens reaches the plugin, through the
+// state or the queue.
+func TestProcessorRecordOfferedDuringTheStateIsNotLost(t *testing.T) {
+	h := newProcessorHarness(t, processorBehaviour(""))
+	p := h.processor(t, testProcessor(`{}`))
+
+	const signals = 1000
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range signals {
+			p.Offer(observedSignal("d1", fmt.Sprintf("s%04d", i), int64(i)))
+		}
+	}()
+	h.open(t, p)
+	h.waitFor("every offer", func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+
+	h.waitFor("every last value in the plugin", func() bool {
+		got := map[string]bool{}
+		for _, rec := range h.records() {
+			got[rec] = true
+		}
+		for i := range signals {
+			if !got[fmt.Sprintf("d1/s%04d=%d", i, i)] {
+				return false
+			}
+		}
+
+		return true
+	})
+}
+
+// TestProcessorStateIsBounded is review focus 3: the state keeps at most
+// 10,000 signals per instance, and the first one past the limit is logged
+// once, without its name or value.
+func TestProcessorStateIsBounded(t *testing.T) {
+	h := newProcessorHarness(t, processorBehaviour(""))
+	p := h.processor(t, testProcessor(`{}`))
+
+	const limit = 10_000
+	for i := range limit + 1 {
+		p.Offer(observedSignal("d1", fmt.Sprintf("s%05d", i), int64(i)))
+	}
+	h.open(t, p)
+	p.Offer(observedSignal("d1", "s00000", -1))
+
+	h.waitFor("the live copy after the state", func() bool { return strings.Count(h.read("records"), "\n") >= limit+1 })
+	got := h.records()
+	if len(got) != limit+1 {
+		t.Fatalf("the plugin received %d records, want %d cached samples and the live copy", len(got), limit+1)
+	}
+	for i := range limit {
+		if want := fmt.Sprintf("d1/s%05d=%d", i, i); got[i] != want {
+			t.Fatalf("record %d = %q, want %q", i, got[i], want)
+		}
+	}
+	if got[limit] != "d1/s00000=-1" {
+		t.Fatalf("last record = %q, want the live copy", got[limit])
+	}
+
+	log := h.log.String()
+	const warning = "processor state is full"
+	if n := strings.Count(log, warning); n != 1 {
+		t.Fatalf("%d state warnings, want 1:\n%s", n, log)
+	}
+	for line := range strings.Lines(log) {
+		if strings.Contains(line, warning) &&
+			(!strings.Contains(line, "processor=p1") || !strings.Contains(line, "limit=10000") || strings.Contains(line, "s10000")) {
+			t.Fatalf("state warning %q, want the processor and the limit, no signal", line)
+		}
+	}
+}
+
+// sleepCounter is a processor clock counting the retry sleeps, the only
+// sleeps of a processor: a sleep counted and two timers pending is a retry
+// waiting, the stream before it ended.
+type sleepCounter struct {
+	*clock.Fake
+	sleeps atomic.Int64
+}
+
+func (c *sleepCounter) Sleep(ctx context.Context, d time.Duration) error {
+	c.sleeps.Add(1)
+
+	return c.Fake.Sleep(ctx, d)
+}
+
+// TestProcessorIsNotUpWhileThePluginAnswersAlreadyExists: up means the
+// plugin processes, not that a stream was opened (M18).
+func TestProcessorIsNotUpWhileThePluginAnswersAlreadyExists(t *testing.T) {
+	h := newProcessorHarness(t, processorBehaviour(`,"busy_process":3`))
+	clk := &sleepCounter{Fake: h.procClk}
+	p := plugin.NewProcessor(h.host, testProcessor(`{}`), h.resolver, clk, slog.New(slog.NewTextHandler(h.log, nil)))
+	t.Cleanup(func() { _ = p.Close() })
+	if err := p.Start(context.Background(), h.out.emit); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+
+	for i := range int64(3) {
+		h.waitFor(fmt.Sprintf("retry %d after a busy answer", i+1), func() bool {
+			return clk.sleeps.Load() == i+1 && h.procClk.PendingTimers() >= 2
+		})
+		if p.Stats().Up {
+			t.Fatalf("Stats().Up after %d busy answers", i+1)
+		}
+		h.procClk.Advance(100 * time.Millisecond)
+	}
+	h.waitTrace("process p1")
+	if p.Stats().Up {
+		t.Fatal("Stats().Up before the first tick")
+	}
+	h.tickUp(p)
+	if n := len(h.out.samples(model.Bad)); n != 0 {
+		t.Fatalf("%d bad samples while the plugin was only busy", n)
+	}
+	if got := h.read("trace"); strings.Count(got, "process p1") != 1 {
+		t.Fatalf("trace = %q, want one Process past the busy answers", got)
 	}
 }
