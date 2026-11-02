@@ -85,7 +85,8 @@ func (p installedPlugin) waitFile(t *testing.T, name, what string, cond func(str
 	}
 }
 
-// waitFor waits until cond holds; guard bounds the wait.
+// waitFor polls cond every millisecond until it holds; guard bounds the
+// wait.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 
@@ -94,7 +95,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatalf("%s not reached", what)
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -117,7 +118,9 @@ func withRestartClock(c *restartClock) fixtureOption {
 }
 
 // Sleep is clock.Fake's Sleep, counting a host restart wait once its timer
-// is pending.
+// is pending. It mirrors clock.Fake.Sleep and recognises the wait by the
+// stack name plugin.(*Host).restart: a change to either must be mirrored
+// here.
 func (c *restartClock) Sleep(ctx context.Context, d time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		return err
