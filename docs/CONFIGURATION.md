@@ -866,6 +866,15 @@ outputs:
 A relative path in a plugin's `config` means whatever the plugin makes of it: plugins run in the
 directory of their binary.
 
+#### Where plugin sockets live
+
+On Unix the agent talks to each plugin over a socket in `run_dir/plugins/<id>/`. `run_dir` is an
+optional key of the bootstrap (see USAGE.md): an absolute directory for the runtime files, default
+`data_dir/run`; a relative path is refused. When the default does not fit the Unix socket limit, the
+agent uses `<temp>/laraplate-edge-<hash>` instead, private to its user, and logs it (see "Known limits of
+this build"). Under systemd, `run_dir: /run/laraplate-edge` with `RuntimeDirectory=laraplate-edge` keeps
+the sockets out of `data_dir`. On Windows plugins use named pipes and `run_dir` holds nothing.
+
 ### Starting, restarting and applying
 
 - A plugin restarts, with all its inputs, processors and outputs, only when its `plugins` entry changes
@@ -1006,9 +1015,15 @@ is exact, but its `ts` range can span records that are still in the buffer.
 - A processor's `refused` and `dropped` counts start from 0 again when the processor restarts (a changed
   section, a restart of its plugin by a new document, a rollback); a plugin crash alone does not reset
   them. Prometheus `rate()` and `increase()` treat the drop as a counter reset.
-- On Unix the path of a plugin's socket, a file under `data_dir/run/plugins/<id>/`, must fit the
-  platform's limit (107 bytes on Linux): a deep `data_dir` makes every plugin fail to start with `socket path too
-  long`. Use a short absolute `data_dir`.
+- On Unix the path of a plugin's socket, a file under `run_dir/plugins/<id>/` (the bootstrap's
+  `run_dir`, default `data_dir/run`), must fit the platform's limit (107 bytes on Linux, 103 on macOS and the
+  BSDs). When the default under a deep `data_dir` does not fit, the agent uses
+  `<temp>/laraplate-edge-<hash>/plugins/<id>/` instead, `<temp>` the temporary directory (`TMPDIR`, else
+  `/tmp`) and `<hash>` the first 12 hex characters of the SHA-256 of the absolute `data_dir`; that
+  directory is created with mode `0700`, must stay private to the agent's user (a directory, not a
+  symbolic link, mode `0700`, owned by that user), or the plugin does not start, and the agent logs it at
+  `info`. An explicit `run_dir` is never replaced: one too deep makes every plugin fail to start with
+  `socket path too long`.
 - A corrupt record of the buffer, found when it opens (inside an older segment) or while it runs
   (anywhere), drops the rest of that segment with an error log and
   `laraplate_edge_corrupt_records_total`, without a loss marker (the protocol has no reason for it).

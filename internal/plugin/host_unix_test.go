@@ -213,3 +213,26 @@ func TestHostConcurrentStopsWaitForTheReap(t *testing.T) {
 		t.Fatalf("the stop sequence ran %d times, want 1", got)
 	}
 }
+
+// TestHostStartsWithADeepDataDir: a data directory too deep for the default
+// socket path makes the host use the private fallback under the temporary
+// directory, and the plugin starts.
+func TestHostStartsWithADeepDataDir(t *testing.T) {
+	tmp, err := os.MkdirTemp("/tmp", "lps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
+	t.Setenv("TMPDIR", tmp)
+
+	dataDir := filepath.Join(shortTempDir(t), strings.Repeat("d", 100))
+	h := newHarnessIn(t, newSpec(t, ""), dataDir)
+	h.start()
+
+	if got := h.host.Status().State; got != plugin.StateUp {
+		t.Fatalf("state = %s, want up", got)
+	}
+	if !strings.Contains(h.log.String(), "plugin socket directory too deep, using a private fallback") {
+		t.Fatalf("the fallback was not logged; log:\n%s", h.log.String())
+	}
+}

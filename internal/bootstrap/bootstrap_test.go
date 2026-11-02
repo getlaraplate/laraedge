@@ -62,6 +62,14 @@ func TestLoadValid(t *testing.T) {
 			},
 		},
 		{
+			name: "run_dir",
+			yaml: "agent_id: a\nrun_dir: /run/laraplate-edge\nconfig:\n  provider: file\n  file: /c.yaml\n",
+			want: File{
+				AgentID: "a", DataDir: hostDataDir(), StatusListen: "127.0.0.1:9180", RunDir: "/run/laraplate-edge",
+				Config: Config{Provider: "file", File: "/c.yaml", Laraplate: Laraplate{PollSeconds: 60}},
+			},
+		},
+		{
 			name: "http allowed on loopback",
 			yaml: "agent_id: a\nconfig:\n  provider: laraplate\n  laraplate:\n    url: http://127.0.0.1:8000\n    token: secret://env/T\n",
 			want: File{
@@ -137,6 +145,7 @@ func TestLoadRefusals(t *testing.T) {
 		{name: "poll below minimum", yaml: lara + "    poll_seconds: 4\n", wantErr: []string{"config.laraplate.poll_seconds", "5"}},
 		{name: "poll zero", yaml: lara + "    poll_seconds: 0\n", wantErr: []string{"config.laraplate.poll_seconds"}},
 		{name: "poll negative", yaml: lara + "    poll_seconds: -1\n", wantErr: []string{"config.laraplate.poll_seconds"}},
+		{name: "relative run_dir", yaml: "agent_id: a\nrun_dir: relative/run\n" + fileProvider, wantErr: []string{"run_dir must be an absolute path"}},
 		{name: "relative plugins_dir", yaml: "agent_id: a\nplugins_dir: plugins\n" + fileProvider, wantErr: []string{"plugins_dir", "absolute"}},
 		{name: "status_listen without port", yaml: "agent_id: a\nstatus_listen: localhost\n" + fileProvider, wantErr: []string{"status_listen"}},
 		{name: "status_listen bad port", yaml: "agent_id: a\nstatus_listen: 127.0.0.1:http\n" + fileProvider, wantErr: []string{"status_listen"}},
