@@ -178,7 +178,14 @@ type harness struct {
 func newHarness(t *testing.T, spec plugin.Spec) *harness {
 	t.Helper()
 
-	h := &harness{t: t, clk: clock.NewFake(epoch), spec: spec, log: &lockedBuffer{}, dataDir: shortTempDir(t)}
+	return newHarnessIn(t, spec, shortTempDir(t))
+}
+
+// newHarnessIn is newHarness with the given data directory.
+func newHarnessIn(t *testing.T, spec plugin.Spec, dataDir string) *harness {
+	t.Helper()
+
+	h := &harness{t: t, clk: clock.NewFake(epoch), spec: spec, log: &lockedBuffer{}, dataDir: dataDir}
 	h.host = plugin.NewHost(spec, plugin.HostOptions{
 		DataDir: h.dataDir,
 		Clock:   h.clk,

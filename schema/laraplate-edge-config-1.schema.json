@@ -430,6 +430,7 @@
           "description": "Device names of the inputs the processor receives.",
           "type": "array",
           "minItems": 1,
+          "uniqueItems": true,
           "items": { "$ref": "#/$defs/deviceName" }
         },
         "devices": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/derivedDevice" } },

@@ -78,13 +78,21 @@ type loopFixture struct {
 func startLoop(t *testing.T, maxSamples int, snd *fakeSender, records ...model.Record) *loopFixture {
 	t.Helper()
 
+	return startLoopWith(t, maxSamples, snd, snd, records...)
+}
+
+// startLoopWith runs the Loop over sender, which wraps the fake snd that
+// records the batches.
+func startLoopWith(t *testing.T, maxSamples int, sender output.Sender, snd *fakeSender, records ...model.Record) *loopFixture {
+	t.Helper()
+
 	f := &loopFixture{t: t, h: newHarness(t, output.BatchLimits{MaxSamples: maxSamples, MaxBody: 1 << 20}), snd: snd, done: make(chan error, 1)}
 	f.h.open()
 	f.h.append(records...)
 
 	f.loop = output.NewLoop(output.LoopConfig{
 		ID:          "plugin-out",
-		Sender:      snd,
+		Sender:      sender,
 		Batcher:     f.h.bt,
 		Clock:       f.h.clk,
 		Logger:      slog.New(slog.DiscardHandler),
@@ -254,9 +262,10 @@ func TestLoopDropsWithARejectedInvalidMarker(t *testing.T) {
 		outcome output.Outcome
 		limit   int
 		records []model.Record
+		wantErr string
 	}{
-		{name: "invalid batch", outcome: output.Outcome{Kind: output.Invalid, Reason: "field x"}, limit: 2, records: []model.Record{bulk(0), bulk(1), bulk(2)}},
-		{name: "one-record split", outcome: output.Outcome{Kind: output.Split, Reason: "too large"}, limit: 1, records: []model.Record{bulk(0), bulk(1)}},
+		{name: "invalid batch", outcome: output.Outcome{Kind: output.Invalid, Reason: "field x"}, limit: 2, records: []model.Record{bulk(0), bulk(1), bulk(2)}, wantErr: "field x: batch dropped as rejected_invalid"},
+		{name: "one-record split", outcome: output.Outcome{Kind: output.Split, Reason: "too large"}, limit: 1, records: []model.Record{bulk(0), bulk(1)}, wantErr: "too large: one record dropped as rejected_invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := startLoop(t, tc.limit, newFakeSender(tc.outcome), tc.records...)
@@ -274,8 +283,8 @@ func TestLoopDropsWithARejectedInvalidMarker(t *testing.T) {
 				t.Errorf("next batch seq %d id %q, want the refused seq %d under a new id", next.seq, next.messageID, refused.seq)
 			}
 
-			if msg, _ := f.loop.LastError(); msg == "" {
-				t.Error("LastError() is empty after a drop")
+			if msg, _ := f.loop.LastError(); msg != tc.wantErr {
+				t.Errorf("LastError() = %q, want %q", msg, tc.wantErr)
 			}
 
 			if f.h.clk.PendingTimers() != 0 {
@@ -326,5 +335,117 @@ func TestLoopSuspendWaitsFiveMinutesOrReload(t *testing.T) {
 				t.Errorf("Dropped = %v, want nothing dropped on a suspension", got)
 			}
 		})
+	}
+}
+
+// waitPoll waits for cond by polling with short sleeps, bounded by guard.
+func waitPoll(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(guard)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("waiting for %s", what)
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// wakingSender is a fakeSender that is also a Waker.
+type wakingSender struct {
+	*fakeSender
+	wake chan struct{}
+}
+
+func newWakingSender(outcomes ...output.Outcome) *wakingSender {
+	return &wakingSender{fakeSender: newFakeSender(outcomes...), wake: make(chan struct{}, 1)}
+}
+
+func (s *wakingSender) Wake() <-chan struct{} { return s.wake }
+
+func TestLoopWakeEndsABackoff(t *testing.T) {
+	snd := newWakingSender(output.Outcome{Kind: output.Retry, Reason: "plugin down"})
+	f := startLoopWith(t, 2, snd, snd.fakeSender, bulk(0), bulk(1))
+
+	first := f.snd.next(t)
+	waitPoll(t, "the backoff", func() bool { return f.loop.State() == output.Backoff && f.h.clk.PendingTimers() == 1 })
+
+	snd.wake <- struct{}{}
+
+	sameSent(t, f.snd.next(t), first)
+	f.waitDelivered()
+
+	if got := f.reconnects.Load(); got != 1 {
+		t.Errorf("OnReconnect called %d times, want 1", got)
+	}
+}
+
+func TestLoopWakeDoesNotEndASuspension(t *testing.T) {
+	snd := newWakingSender(output.Outcome{Kind: output.Suspend, Reason: "refused"})
+	f := startLoopWith(t, 2, snd, snd.fakeSender, bulk(0), bulk(1))
+
+	first := f.snd.next(t)
+	waitPoll(t, "the suspension", func() bool { return f.loop.State() == output.SuspendedAuth && f.h.clk.PendingTimers() == 1 })
+
+	snd.wake <- struct{}{}
+
+	f.h.clk.Advance(5*time.Minute - time.Nanosecond)
+	if got := f.loop.State(); got != output.SuspendedAuth {
+		t.Fatalf("State() = %s after a wake, want suspended_auth", got)
+	}
+
+	if len(snd.wake) != 1 {
+		t.Error("the suspension consumed the wake")
+	}
+
+	select {
+	case c := <-snd.calls:
+		t.Fatalf("batch %q sent during the suspension", c.messageID)
+	default:
+	}
+
+	f.h.clk.Advance(time.Nanosecond)
+	sameSent(t, f.snd.next(t), first)
+	f.waitDelivered()
+}
+
+// cancelSender cancels the loop's context during its first Send and answers
+// Retry, as an output does when the agent stops mid-request.
+type cancelSender struct {
+	cancel context.CancelFunc
+}
+
+func (s *cancelSender) Send(context.Context, *output.Batch) output.Outcome {
+	s.cancel()
+
+	return output.Outcome{Kind: output.Retry, Reason: "503"}
+}
+
+func (s *cancelSender) ReloadCredentials() {}
+
+func TestLoopRecordsARetryArrivingDuringShutdown(t *testing.T) {
+	h := newHarness(t, output.BatchLimits{MaxSamples: 1, MaxBody: 1 << 20})
+	h.open()
+	h.append(bulk(0))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	loop := output.NewLoop(output.LoopConfig{
+		ID: "plugin-out", Sender: &cancelSender{cancel: cancel}, Batcher: h.bt, Clock: h.clk,
+		Logger: slog.New(slog.DiscardHandler), Rand: func() float64 { return 1 },
+	})
+
+	if err := loop.Run(ctx); err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+
+	if msg, at := loop.LastError(); msg != "503" || !at.Equal(h.clk.Now()) {
+		t.Errorf("LastError() = %q at %v, want %q at %v", msg, at, "503", h.clk.Now())
+	}
+
+	if got := loop.State(); got != output.Backoff {
+		t.Errorf("State() = %s, want backoff", got)
 	}
 }

@@ -85,6 +85,7 @@ data_dir: /var/lib/laraplate-edge
 status_listen: 127.0.0.1:9180
 status_token: secret://env/LARAPLATE_EDGE_STATUS_TOKEN
 plugins_dir: /opt/laraplate-edge/plugins   # optional
+run_dir: /run/laraplate-edge                # optional
 ```
 
 | Key | Required | Default | Meaning |
@@ -98,6 +99,7 @@ plugins_dir: /opt/laraplate-edge/plugins   # optional
 | `data_dir` | no | `/var/lib/laraplate-edge`, on Windows `%ProgramData%\laraplate-edge` | Buffers, applied configuration, provider state. Created with mode `0700` when missing. Relative paths are relative to the working directory. |
 | `status_listen` | no | `127.0.0.1:9180` | `host:port` of the status endpoint; port `0` picks a free port (logged at start). |
 | `status_token` | no | | `secret://` reference to the read-only bearer token of the status endpoint. Required when `status_listen` is not a loopback address. |
+| `run_dir` | no | `data_dir/run` (made absolute on Unix when `data_dir` is relative) | Absolute directory of the runtime files: the plugin sockets, in `run_dir/plugins/<id>/`. A relative path is refused. On Unix a socket path must fit 107 bytes on Linux (103 on macOS and the BSDs): when the default under `data_dir` does not fit, the agent uses `<temp>/laraplate-edge-<hash>` instead, a directory private to its user, with `<temp>` the system temporary directory or `/tmp` when that one is too deep too, and logs it at `info`; when neither fits the plugin does not start. An explicit `run_dir` is never replaced. Under systemd, `RuntimeDirectory=` provides one (below). See CONFIGURATION.md, "Plugins". |
 | `plugins_dir` | no | none | Absolute directory every plugin binary (and so its `plugin.json`) must lie inside, symlinks resolved. It is the agent's own say on what may run: a backend cannot make the agent start a binary outside it. With the `laraplate` provider, plugins are disabled while it is unset. With the `file` provider it is optional. Needs not exist when the bootstrap loads. A relative path is refused. See CONFIGURATION.md, "Plugins". |
 
 ### Secret references
@@ -394,12 +396,15 @@ samples written to a local file, no Laraplate needed.
   input's `death_tolerance` unless the plugin is back before, and are born again at the first good
   read. Its processors go `down`: the machine data they observe flows to the outputs untouched, each
   derived signal is sent `bad` once and the derived devices die after the processor's
-  `death_tolerance`, to be born again once the processor's stream is back. After a shorter outage
-  the derived devices stay alive, are not born again, and their signals stay `bad` until the plugin
-  sends a new sample for them (see "Known limits of this build" in
-  [CONFIGURATION.md](CONFIGURATION.md#known-limits-of-this-build)). Its outputs go to `backoff`:
+  `death_tolerance`, to be born again once the processor's stream is back. When the stream opens
+  again the plugin first receives the current state of the observed devices (see "State at every
+  opening" in [CONFIGURATION.md](CONFIGURATION.md#processors)), so after a shorter outage, or a
+  restart of the plugin, a plugin deriving from that state sends its derived values again at once.
+  Its outputs go to `backoff`:
   their batches stay in the buffer and are delivered in order once the plugin is back, which
-  configures the output's instance again first.
+  configures the output's instance again first. An output in `backoff` tries again as soon as its
+  plugin is up, without waiting for the end of the backoff; one in `suspended_auth` (its secrets could
+  not be resolved, or the plugin refused the credentials) still waits for a `SIGHUP` or its 5 minutes.
 - Restarts back off from 1 second to 1 minute; the backoff starts again from 1 second after the plugin
   has run stable for one minute.
 
@@ -410,8 +415,9 @@ samples written to a local file, no Laraplate needed.
 `memory`, `hash`). The restart counters, and `restarts` in `/status`, start from 0 again when a new
 document restarts the plugin (not when only the section of one of its components changes).
 
-`/status` also has a `processors` list: `id`, `plugin`, `state` (`up` while its stream to the plugin is
-open, `down` while it is not, `failed` for a processor a rollback could not start again), `refused`,
+`/status` also has a `processors` list: `id`, `plugin`, `state` (`up` once the plugin processes on its
+open stream, from the first liveness tick or derived sample, `down` otherwise, a stream the plugin
+refuses included, `failed` for a processor a rollback could not start again), `refused`,
 `dropped` and `last_error`. The metrics are `laraplate_edge_processor_up{processor}`,
 `laraplate_edge_processor_refused_total{processor}` and `laraplate_edge_processor_dropped_total{processor}`.
 A plugin output appears among the `outputs` like any other, with its buffer, state and errors, but
@@ -443,7 +449,7 @@ Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
 |---|---|
 | `/healthz` | `200 ok` while the process serves; never needs the token |
 | `/readyz` | `200 {"ready":true}` once a configuration is applied and every input runs; otherwise `503 {"ready":false,"reason":"..."}` |
-| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`, and for an input that reports its health, such as `modbus` and `opcua`, `connected` and `read_errors`, the counts since the input was last started, restarting from 0 when its configuration changes or a rollback restarts it, always the four kinds `timeout`, `connection`, `exception` and `decode`, at 0 until the first error), `plugins` (`id`, `state` `starting`, `up`, `down` or `failed`, `pid` while it is up, `restarts`, `last_error`), `processors` (`id`, `plugin`, `state` `up`, `down` or `failed`, `refused` and `dropped` since the processor started, `last_error`) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds` except for a `plugin:<id>` output, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
+| `/status` | JSON: `agent_id`, `agent_version`, `uptime_seconds`, `config_applied`, `config_version`, `inputs` (`id`, `driver`, `state` `running` or `failed`, `last_error`, `transform_errors`, and for an input that reports its health, such as `modbus` and `opcua`, `connected` and `read_errors`, the counts since the input was last started, restarting from 0 when its configuration changes or a rollback restarts it, always the four kinds `timeout`, `connection`, `exception` and `decode`, at 0 until the first error), `plugins` (`id`, `state` `starting`, `up`, `down` or `failed`, `pid` while it is up, `restarts`, `last_error`), `processors` (`id`, `plugin`, `state` `up`, `down` or `failed`, `refused` and `dropped` since the processor started, `last_error`) and `outputs` (`id`, `type`, `state`, `clock_offset_seconds` except for a `plugin:<id>` output or a failed one, `buffer.critical` and `buffer.bulk` with `records`, `bytes`, `oldest_unconfirmed_age_seconds`, `dropped` by reason, `corrupt_records`, `last_confirmation`, `last_error`, `last_error_at`) |
 | `/metrics` | Prometheus text format 0.0.4, below |
 
 With `status_token` set, every path but `/healthz` needs `Authorization: Bearer <token>`. The endpoint
@@ -464,9 +470,9 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
 | `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |
-| `laraplate_edge_processor_up` | gauge | `processor` | 1 when the processor's stream to its plugin is open, 0 otherwise; machine data flows either way |
-| `laraplate_edge_processor_refused_total` | counter | `processor` | what the processor's plugin sent outside its declared derived devices and signals, or with a value of another kind, refused and never routed; restarts from 0 when the processor restarts |
-| `laraplate_edge_processor_dropped_total` | counter | `processor` | copies of observed records dropped because the processor's queue of 1,000 records was full, a copy was over the message limit, or the stream broke while it was being sent; restarts from 0 when the processor restarts |
+| `laraplate_edge_processor_up` | gauge | `processor` | 1 once the processor's plugin processes on its open stream (from the first liveness tick or derived sample), 0 otherwise, a stream the plugin refuses included; machine data flows either way |
+| `laraplate_edge_processor_refused_total` | counter | `processor` | what the processor's plugin sent outside its declared derived devices and signals, or with a value of another kind, refused and never routed; restarts from 0 when the processor instance restarts, which `rate()` handles as a counter reset. |
+| `laraplate_edge_processor_dropped_total` | counter | `processor` | copies of observed records dropped because the processor's queue of 1,000 records was full, a copy or a record of the state was over the message limit, or the stream broke while a copy or a record of the state was being sent; restarts from 0 when the processor instance restarts, which `rate()` handles as a counter reset. Copies offered while the stream is down are superseded by the state at the next opening, so a large increase after an outage means superseded copies, not lost machine data (machine data is never touched). |
 | `laraplate_edge_buffer_records` | gauge | `output`, `priority` | records not yet confirmed |
 | `laraplate_edge_buffer_bytes` | gauge | `output`, `priority` | bytes of the queue on disk |
 | `laraplate_edge_buffer_oldest_unconfirmed_seconds` | gauge | `output`, `priority` | age of the oldest unconfirmed record: agent clock minus the record's device `ts`, 0 when none |
@@ -474,7 +480,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_corrupt_records_total` | counter | `output` | corrupt records found since the buffer was opened, at the opening or while it runs; each one dropped the rest of its segment |
 | `laraplate_edge_last_confirmation_timestamp_seconds` | gauge | `output` | Unix time of the last confirmed batch, 0 before any |
 | `laraplate_edge_output_state` | gauge | `output`, `state` | 1 for the current state among `sending`, `backoff`, `suspended_auth`, `failed` |
-| `laraplate_edge_clock_offset_seconds` | gauge | `output` | backend clock minus agent clock, from the `Date` header of the last response; not for `plugin:<id>` outputs |
+| `laraplate_edge_clock_offset_seconds` | gauge | `output` | backend clock minus agent clock, from the `Date` header of the last response; not for `plugin:<id>` or failed outputs |
 | `laraplate_edge_last_error_timestamp_seconds` | gauge | `output` | Unix time of the output's last error, 0 when none; the text is in `/status` |
 
 The plugin series exist only for plugins the applied document uses, the processor series only for its
@@ -521,11 +527,16 @@ A unit sketch (packages with a sandboxed unit are a later plan):
 Type=notify
 User=laraplate-edge
 ExecStart=/usr/local/bin/laraplate-edge run --bootstrap /etc/laraplate-edge/bootstrap.yaml
+RuntimeDirectory=laraplate-edge
+RuntimeDirectoryMode=0700
 ExecReload=/bin/kill -HUP $MAINPID
 WatchdogSec=30s
 TimeoutStartSec=90s
 Restart=on-failure
 ```
+
+`RuntimeDirectory=` creates `/run/laraplate-edge`, owned by the service user, at every start and removes
+it at the stop: set `run_dir: /run/laraplate-edge` in the bootstrap to keep the plugin sockets there.
 
 `TimeoutStartSec` must leave about 60 seconds for the first `laraplate` poll (each request is bounded
 at 30 seconds) on a first start without a last valid document. The watchdog pings come from a timer:
@@ -586,11 +597,13 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | a plugin output `suspended_auth`, `last_error` `outputs.<id>.config.<key>: the secret cannot be resolved`, `WARN` "plugin output secrets cannot be resolved, the output is suspended" | a `secret://` reference in the output's `config` does not resolve when the agent configures the plugin again (after a plugin restart or a `SIGHUP`); the plugin was not contacted | fix the file or the environment as for an output token, then `SIGHUP` (a `secret://env/` value needs a restart). At apply the same problem rolls the document back instead. |
 | a plugin output `backoff`, `WARN` "plugin refused the configuration of the output, retrying" with the paths | the plugin refused the output's section when the agent configured it again after a plugin restart or a `SIGHUP` | fix the value and apply a document. The output keeps buffering and retries with backoff; nothing is dropped. |
 | `WARN` "plugin output rejected a batch as invalid" | the plugin answered `REJECT_INVALID`: the batch is dropped with a `rejected_invalid` loss marker; the `reason` is the plugin's, secrets removed | a defect of the plugin or of the data to report with the log line; the drop is counted in `laraplate_edge_dropped_samples_total{reason="rejected_invalid"}`. |
-| a processor `down`, `WARN` "plugin processor stream ended", derived signals `bad` and then the derived devices dead | the processor's plugin died, restarts or closed the stream; the machine data is not affected | look at the plugin's `state`, `restarts` and stderr lines. The agent opens the stream again once the plugin is back; derived devices that died are born again, and after a shorter outage the derived signals stay `bad` until the plugin sends a new sample for them. |
+| a processor `down`, `WARN` "plugin processor stream ended", derived signals `bad` and then the derived devices dead | the processor's plugin died, restarts or closed the stream; the machine data is not affected | look at the plugin's `state`, `restarts` and stderr lines. The agent opens the stream again once the plugin is back and sends it the current state of the observed devices first; derived devices that died are born again, and a plugin deriving from that state sends its derived values again at once. |
 | a processor `down` after a plugin restart, `WARN` "plugin refused the configuration after a restart, the processor stays down" | the plugin refused the processor's section when the agent configured it again (a `secret://` value it rejects, for instance) | fix the value and apply a document; a plugin restart does not roll back the document |
 | a processor's `refused` grows, `WARN` "plugin processor sample refused: ..." with `device` and `signal` | the plugin sends a device it did not declare, an undeclared signal, or a value of another kind than the signal's `type`; logged once per reason, device and signal | declare the device and signal in `processors[].devices` with the `type` the plugin sends, or fix the plugin. Refused samples never reach an output. |
-| a processor's `dropped` grows | the plugin reads the copies more slowly than the observed devices produce them (or not at all, when it hangs), and the queue of 1,000 records was full | the machine data is not affected; observe fewer devices, or fix the plugin's speed. |
-| a plugin `down`, `last_error` `... socket path too long: N bytes, the platform allows at most 107 ...` | the plugin's socket under `data_dir/run/plugins/<id>/` does not fit the Unix limit, because `data_dir` is deep | use a shorter absolute `data_dir` and restart the agent |
+| a processor's `dropped` grows | the plugin reads the copies more slowly than the observed devices produce them (or not at all, when it hangs), and the queue of 1,000 records was full | the machine data is not affected; observe fewer devices, or fix the plugin's speed. After an outage the count also includes copies superseded by the state at the next opening, which is not a loss. |
+| the apply refused naming the error (first apply), or a plugin `down` with `last_error` (restart after it was up): `... socket path too long: N bytes, the platform allows at most 107 ...` | the plugin's socket under an explicit `run_dir` (`run_dir/plugins/<id>/`) does not fit the Unix limit, because `run_dir` is deep. Without `run_dir` the agent falls back on its own to a short directory under the temporary one. | use a shorter absolute `run_dir` (for example `/run/laraplate-edge`) and restart the agent (at the first apply, apply again; a plugin that was up and restarts is retried with backoff) |
+| the apply refused naming the error (first apply), or a plugin `down` with `last_error` (restart after it was up): `plugin socket directory <path> is too long for a Unix socket ...: set a short absolute run_dir in the bootstrap` | there is no `run_dir`, `data_dir` is too deep for the socket limit, and so is the fallback under both the system temporary directory and `/tmp` | set a short absolute `run_dir` (for example `/run/laraplate-edge`) and restart the agent (at the first apply, apply again; a plugin that was up and restarts is retried with backoff) |
+| the apply refused naming the error (first apply), or a plugin `down` with `last_error` (restart after it was up): `plugin socket directory <temp>/laraplate-edge-<hash> is a symbolic link` (or `has mode ..., want 0700`, `is not owned by the agent's user`, `is not a directory`) | `data_dir` is too deep for the socket limit, so the agent uses its fallback directory under the system temporary directory (or `/tmp` when that one is too deep), and that path already exists without being a directory private to the agent's user: another user or a stale copy holds it | remove that path if nothing of yours uses it, or set a short absolute `run_dir` (a plugin that was up and restarts: the agent retries the start with backoff, after the fix; at the first apply, fix and apply again) |
 | `/readyz` `503` "input ... is failed" | an input could not start again during a rollback | see its `last_error`; it is retried only when a new document is applied |
 | start fails with `data_dir ... has format N, newer than this agent supports` | the data directory was written by a newer agent | run the newer agent; an older one never rewrites a newer layout |
 | `ERROR` "buffer: corrupt record inside a segment, dropped the rest of the segment" (or "... inside an evicted segment ..."), `corrupt_records` grows | a record of the output buffer failed its checksum or could not be read back: a disk fault, bit rot, a file changed by hand. It is found at start or while the agent runs. | nothing for the agent: it drops the rest of that segment (at most 16 MiB of that queue), counts it and keeps sending; the log line names the queue, the segment and the offset, never a value. The gap has no loss marker (the protocol has no reason for it), so the backend does not see it: check the disk (kernel log, SMART, file system). |

@@ -80,9 +80,13 @@ var (
 
 // HostOptions are the dependencies of a Host.
 type HostOptions struct {
-	// DataDir is the agent data directory; the plugin socket lives in
-	// DataDir/run/plugins/<id>/.
+	// DataDir is the agent data directory; without RunDir the plugin socket
+	// lives in DataDir/run/plugins/<id>/, or, on Unix when that path is too
+	// long for a socket, in a private directory under the temporary one.
 	DataDir string
+	// RunDir is the directory for runtime files; empty means DataDir/run.
+	// The plugin socket lives in RunDir/plugins/<id>/.
+	RunDir string
 	// Clock times every deadline, check and backoff of the host.
 	Clock clock.Clock
 	// Log receives the host events and the plugin output, with plugin=<id>.
@@ -108,13 +112,16 @@ type Status struct {
 // plugin.json, polls health and memory, restarts with backoff and stops the
 // process in the order Shutdown, SIGTERM, kill.
 type Host struct {
-	spec      Spec
-	clk       clock.Clock
-	log       *slog.Logger
-	socketDir string
-	limiter   *outputLimiter
-	backoff   *driverkit.Backoff // owned by Start, then by the supervise goroutine
-	changes   chan uint64
+	spec    Spec
+	clk     clock.Clock
+	log     *slog.Logger
+	dataDir string
+	runDir  string
+	// fallbackLogged makes the fallback socket directory logged once.
+	fallbackLogged sync.Once
+	limiter        *outputLimiter
+	backoff        *driverkit.Backoff // owned by Start, then by the supervise goroutine
+	changes        chan uint64
 
 	mu         sync.Mutex
 	state      State
@@ -125,6 +132,8 @@ type Host struct {
 	restarts  map[string]uint64
 	lastError string
 	binarySum string
+	// socketDir is the socket directory of the last launch, removed by Stop.
+	socketDir string
 	started   bool
 	// cancelStart cancels the launch of a Start in flight; startDone is
 	// closed when that Start returns.
@@ -166,15 +175,16 @@ func NewHost(spec Spec, opts HostOptions) *Host {
 	}
 
 	return &Host{
-		spec:      spec,
-		clk:       clk,
-		log:       log,
-		socketDir: filepath.Join(opts.DataDir, "run", "plugins", spec.ID),
-		limiter:   newOutputLimiter(clk, log),
-		backoff:   driverkit.NewBackoff(clk, draw),
-		changes:   make(chan uint64, 1),
-		state:     StateDown,
-		restarts:  map[string]uint64{},
+		spec:     spec,
+		clk:      clk,
+		log:      log,
+		dataDir:  opts.DataDir,
+		runDir:   opts.RunDir,
+		limiter:  newOutputLimiter(clk, log),
+		backoff:  driverkit.NewBackoff(clk, draw),
+		changes:  make(chan uint64, 1),
+		state:    StateDown,
+		restarts: map[string]uint64{},
 	}
 }
 
@@ -329,7 +339,7 @@ func (h *Host) Stop(ctx context.Context) error {
 	}
 
 	h.mu.Lock()
-	run := h.run
+	run, dir := h.run, h.socketDir
 	h.run = nil
 	h.mu.Unlock()
 
@@ -337,8 +347,8 @@ func (h *Host) Stop(ctx context.Context) error {
 		h.shutdown(ctx, run)
 	}
 	h.limiter.report(true)
-	if started {
-		_ = os.RemoveAll(h.socketDir)
+	if started && dir != "" {
+		_ = os.RemoveAll(dir)
 	}
 
 	h.mu.Lock()
@@ -468,13 +478,17 @@ func (h *Host) launch(ctx context.Context) (*running, error) {
 	if err != nil {
 		return nil, err
 	}
+	dir, err := h.resolveSocketDir()
+	if err != nil {
+		return nil, err
+	}
 
 	stdout := newLineWriter("stdout", h.limiter, h.log)
 	stderr := newLineWriter("stderr", h.limiter, h.log)
 	proc, err := handshake.Launch(ctx, handshake.LaunchConfig{
 		Path:      h.spec.Path,
 		Dir:       h.spec.Dir,
-		SocketDir: h.socketDir,
+		SocketDir: dir,
 		Protocols: protocols,
 		Env:       minimalEnv(),
 		Stdout:    stdout,
@@ -500,6 +514,26 @@ func (h *Host) launch(ctx context.Context) (*running, error) {
 	run.upSince = h.clk.Now()
 
 	return run, nil
+}
+
+// resolveSocketDir returns the socket directory of this launch, records it
+// for Stop and logs once when it is the fallback.
+func (h *Host) resolveSocketDir() (string, error) {
+	dir, fallback, err := socketDir(h.dataDir, h.runDir, h.spec.ID)
+	if err != nil {
+		return "", err
+	}
+	if fallback {
+		h.fallbackLogged.Do(func() {
+			h.log.Info("plugin socket directory too deep, using a private fallback", "socket_dir", dir)
+		})
+	}
+
+	h.mu.Lock()
+	h.socketDir = dir
+	h.mu.Unlock()
+
+	return dir, nil
 }
 
 // verifyFiles hashes the binary that will run and plugin.json, immediately

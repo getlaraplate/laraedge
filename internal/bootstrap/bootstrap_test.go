@@ -94,6 +94,19 @@ func TestLoadAcceptsAbsolutePluginsDir(t *testing.T) {
 	}
 }
 
+// TestLoadAcceptsAbsoluteRunDir uses a temporary directory: an absolute
+// path on every host, unlike a Unix path on Windows.
+func TestLoadAcceptsAbsoluteRunDir(t *testing.T) {
+	dir := t.TempDir()
+	got, err := Load(write(t, "agent_id: a\nrun_dir: '"+dir+"'\nconfig:\n  provider: file\n  file: /c.yaml\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.RunDir != dir {
+		t.Errorf("RunDir = %q, want %q", got.RunDir, dir)
+	}
+}
+
 func TestLoadRefusals(t *testing.T) {
 	const fileProvider = "config:\n  provider: file\n  file: /c.yaml\n"
 	const lara = "agent_id: a\nconfig:\n  provider: laraplate\n  laraplate:\n    url: https://mes.example.com\n    token: secret://env/T\n"
@@ -137,6 +150,7 @@ func TestLoadRefusals(t *testing.T) {
 		{name: "poll below minimum", yaml: lara + "    poll_seconds: 4\n", wantErr: []string{"config.laraplate.poll_seconds", "5"}},
 		{name: "poll zero", yaml: lara + "    poll_seconds: 0\n", wantErr: []string{"config.laraplate.poll_seconds"}},
 		{name: "poll negative", yaml: lara + "    poll_seconds: -1\n", wantErr: []string{"config.laraplate.poll_seconds"}},
+		{name: "relative run_dir", yaml: "agent_id: a\nrun_dir: relative/run\n" + fileProvider, wantErr: []string{"run_dir must be an absolute path"}},
 		{name: "relative plugins_dir", yaml: "agent_id: a\nplugins_dir: plugins\n" + fileProvider, wantErr: []string{"plugins_dir", "absolute"}},
 		{name: "status_listen without port", yaml: "agent_id: a\nstatus_listen: localhost\n" + fileProvider, wantErr: []string{"status_listen"}},
 		{name: "status_listen bad port", yaml: "agent_id: a\nstatus_listen: 127.0.0.1:http\n" + fileProvider, wantErr: []string{"status_listen"}},

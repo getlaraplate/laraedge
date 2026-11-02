@@ -53,6 +53,9 @@ type File struct {
 	// inside; no default. With the laraplate provider plugins are disabled
 	// while it is unset.
 	PluginsDir string `yaml:"plugins_dir"`
+	// RunDir is the optional absolute directory of the runtime files, the
+	// plugin sockets; empty means DataDir/run.
+	RunDir string `yaml:"run_dir"`
 }
 
 // Config selects the configuration provider.
@@ -140,6 +143,9 @@ func (f File) validate() error {
 	}
 	if f.PluginsDir != "" && !filepath.IsAbs(f.PluginsDir) {
 		return errors.New("plugins_dir must be an absolute path")
+	}
+	if f.RunDir != "" && !filepath.IsAbs(f.RunDir) {
+		return errors.New("run_dir must be an absolute path")
 	}
 	return nil
 }

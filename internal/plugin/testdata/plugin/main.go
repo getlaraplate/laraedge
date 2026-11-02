@@ -53,6 +53,8 @@
 //	derive_signal   signal of the echoed sample (default count)
 //	derive_kind     value kind of the echoed sample: int (default) or string
 //	stop_reading    Process never reads its records (a hung processor)
+//	busy_process    the first N Process calls of the process answer
+//	                ALREADY_EXISTS at once
 //
 // An echoed sample carries the value, ts and quality of the observed
 // sample, with priority bulk. Configure of a processor honours
@@ -128,6 +130,7 @@ type behaviour struct {
 	DeriveSignal  string   `json:"derive_signal"`
 	DeriveKind    string   `json:"derive_kind"`
 	StopReading   bool     `json:"stop_reading"`
+	BusyProcess   int64    `json:"busy_process"`
 }
 
 // event is one event of the script: exactly one field is set.
@@ -517,9 +520,10 @@ func (o *output) seen(id string) bool {
 
 // processor is a Processor driven by the behaviour file.
 type processor struct {
-	b   behaviour
-	dir string
-	mu  sync.Mutex
+	b     behaviour
+	dir   string
+	mu    sync.Mutex
+	calls atomic.Int64
 }
 
 func (p *processor) trace(line string) { input{b: p.b, dir: p.dir}.trace(line) }
@@ -529,6 +533,9 @@ func (p *processor) Configure(ctx context.Context, id string, cfg json.RawMessag
 }
 
 func (p *processor) Process(ctx context.Context, id string, in <-chan sdk.Record, out func(sdk.Sample) error) error {
+	if p.b.BusyProcess > 0 && p.calls.Add(1) <= p.b.BusyProcess {
+		return status.Error(codes.AlreadyExists, "busy")
+	}
 	p.trace("process " + id)
 	defer p.trace("process end " + id)
 

@@ -287,7 +287,7 @@ func TestMetrics(t *testing.T) {
 			`{output="spare",state="suspended_auth"}`: 0,
 			`{output="spare",state="failed"}`:         1,
 		},
-		"laraplate_edge_clock_offset_seconds": {`{output="main"}`: 1.5, `{output="spare"}`: 0},
+		"laraplate_edge_clock_offset_seconds": {`{output="main"}`: 1.5},
 		"laraplate_edge_last_error_timestamp_seconds": {
 			`{output="main"}`:  float64(epoch.Add(-10 * time.Second).Unix()),
 			`{output="spare"}`: 0,

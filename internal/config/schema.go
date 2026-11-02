@@ -146,6 +146,8 @@ func collectSchemaMessages(e *jsonschema.ValidationError, parent path, msgs *[]s
 		add("must be greater than " + ratText(k.Want))
 	case *kind.ExclusiveMaximum:
 		add("must be less than " + ratText(k.Want))
+	case *kind.UniqueItems:
+		*msgs = append(*msgs, p.index(k.Duplicates[1]).msg("duplicate of "+p.index(k.Duplicates[0]).String()))
 	case *kind.MinItems:
 		add(fmt.Sprintf("must have at least %d items", k.Want))
 	case *kind.MaxItems:

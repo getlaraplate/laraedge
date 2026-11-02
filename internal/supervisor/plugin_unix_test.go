@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// alive reports whether a process with pid exists (an exited child the
+// host has waited for does not).
+func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
 // TestCloseStopsPluginsWithinTheStopDeadline: plugins that answer neither
 // Shutdown nor SIGTERM (stopped with SIGSTOP) are killed once the stop
 // deadline of spec section 6 has passed, 5 s then 5 s more, all at once:

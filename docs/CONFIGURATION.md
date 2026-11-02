@@ -791,13 +791,28 @@ What the agent does with it:
 - **Copies.** After an input's transforms, a copy of every sample and device event of an observed device
   goes to the processor through a queue of 1,000 records, the `birth` an input sends when it starts
   included. A processor that starts after its inputs (a new or changed processor, a rollback) is sent
-  the current `birth` of each device it observes. The input never waits for it: when the queue is full
-  the copy is dropped and counted (`dropped` in `/status`).
+  the current `birth` of each device it observes that is not dead. The input never waits for it: when
+  the queue is full the copy is dropped and counted (`dropped` in `/status`).
+- **State at every opening.** Each time the processor's stream to the plugin opens (the first start, the
+  end of an outage, a restart of the plugin), the plugin first receives the current state of the observed
+  devices: for each device, in name order, its last event, then, unless that event is a `death`, the
+  last sample of each of its signals, in signal order. The live copies follow. The copies queued during
+  an outage are not replayed, since the state supersedes them: a processor that needs every change
+  cannot rely on the copies. Around the opening a record can arrive twice, once in the state and once
+  as a live copy, and that live copy can be older than the state: a record kept in the state just before
+  it was taken can still be queued afterwards and is then sent again after the state, after a newer
+  value of the same signal. A plugin must not take the last record it received as the current value
+  without comparing timestamps. The state keeps at most 10,000 signals per processor; the samples of further signals
+  are not kept, and a `WARN` "processor state is full" names the processor and the limit, once. A
+  plugin should keep its own state per stream and recompute it from the state it receives, as
+  `line-state` does.
 - **Derived samples.** A sample the plugin sends for a declared derived device and signal, with a value
   of the declared `type`, is routed to the outputs like a machine sample: it keeps the plugin's `ts` and
-  quality and takes the declared `priority`. Anything else (a device it did not declare, an undeclared
-  signal of a declared device, a value of another kind) is refused, never routed, and counted
-  (`refused` in `/status`).
+  quality and takes the declared `priority`. Anything else is refused, never routed, and counted
+  (`refused` in `/status`), checked in this order: an invalid sample (a missing or malformed `ts`, an
+  unspecified quality or priority, no value or a float that is not finite, an empty device or signal),
+  then a device it did not declare or an undeclared signal of a declared device, then a declared signal
+  with a value of another kind.
 - **Births and deaths.** The agent, not the plugin, sends the `birth` of the derived devices, within a
   second of the processor's stream to the plugin opening. A derived device is alive while that stream
   is up, whether or not it sends samples. When the stream goes down (the plugin died, restarts, or
@@ -805,11 +820,11 @@ What the agent does with it:
   the zero value of its type, and the derived devices are reported dead once the stream has been down
   for `death_tolerance`. A derived device is born again only after it died: when the stream is back
   after a death, it is born again within a second. After an outage shorter than `death_tolerance` the
-  derived devices stay alive and are not born again, and their signals keep the `bad` value until the
-  plugin sends a new sample for them. The new stream does not replay what the plugin missed: it
-  receives the copies still in the queue (those beyond its 1,000 records were dropped and counted) and
-  the copies from then on; a plugin that restarted has lost its own state and is not sent the births of
-  the observed devices again.
+  derived devices stay alive and are not born again; their signals keep the `bad` value until the
+  plugin sends a new sample for them, which a plugin deriving from the state it receives at the
+  opening does at once. The processor is `up` once the plugin processes: from the first liveness tick
+  of the open stream, a second after it opens, or its first derived sample. A stream the plugin
+  refuses (an instance still busy with its previous stream, for instance) is not `up`.
 
 `config validate` checks `observe`, the derived names and the `config` against the plugin's manifest
 offline, reporting each problem with its path, for instance `processors.0.observe.1: is not a device of
@@ -850,6 +865,18 @@ outputs:
 
 A relative path in a plugin's `config` means whatever the plugin makes of it: plugins run in the
 directory of their binary.
+
+#### Where plugin sockets live
+
+On Unix the agent talks to each plugin over a socket in `run_dir/plugins/<id>/`. `run_dir` is an
+optional key of the bootstrap (see USAGE.md): an absolute directory for the runtime files, default
+`data_dir/run`, made absolute when `data_dir` is relative; a relative `run_dir` is refused. When the
+default does not fit the Unix socket limit, the agent uses `<temp>/laraplate-edge-<hash>` instead,
+private to its user, and logs it; `<temp>` is the system temporary directory, or `/tmp` when the path
+does not fit there either (macOS gives each user a deep temporary directory). When neither fits, the
+plugin does not start and its `last_error` asks for a `run_dir` (see "Known limits of this build").
+Under systemd, `run_dir: /run/laraplate-edge` with `RuntimeDirectory=laraplate-edge` keeps the sockets
+out of `data_dir`. On Windows plugins use named pipes and `run_dir` holds nothing.
 
 ### Starting, restarting and applying
 
@@ -988,18 +1015,20 @@ is exact, but its `ts` range can span records that are still in the buffer.
 - A processor or plugin output removed from the document, or renamed, keeps its state inside the
   running plugin until the plugin restarts: the agent stops using the instance but does not ask the
   plugin to release it.
-- After a processor's stream was down for less than its `death_tolerance` (a plugin crash with a quick
-  restart, for instance), its derived signals stay at the `bad` value sent at the outage until the plugin
-  sends a new sample for each of them: the derived devices are not born again, nothing tells the plugin
-  to send its current values, and the new stream replays nothing beyond the copies still queued. A
-  plugin that restarted on its own is not sent the births of the observed devices again; it receives
-  them only at the next `birth` of each device, or when a document restarts the processor.
 - A processor's `refused` and `dropped` counts start from 0 again when the processor restarts (a changed
   section, a restart of its plugin by a new document, a rollback); a plugin crash alone does not reset
-  them.
-- On Unix the path of a plugin's socket, a file under `data_dir/run/plugins/<id>/`, must fit the
-  platform's limit (107 bytes on Linux): a deep `data_dir` makes every plugin fail to start with `socket path too
-  long`. Use a short absolute `data_dir`.
+  them. Prometheus `rate()` and `increase()` treat the drop as a counter reset.
+- On Unix the path of a plugin's socket, a file under `run_dir/plugins/<id>/` (the bootstrap's
+  `run_dir`, default `data_dir/run` made absolute), must fit the platform's limit (107 bytes on Linux, 103
+  on macOS and the BSDs). When the default under a deep `data_dir` does not fit, the agent uses
+  `<temp>/laraplate-edge-<hash>/plugins/<id>/` instead, `<temp>` the system temporary directory (`TMPDIR`,
+  else `/tmp`) or, when the path does not fit there (the per-user `TMPDIR` of macOS), `/tmp`, and `<hash>`
+  the first 12 hex characters of the SHA-256 of the absolute `data_dir`. That directory is created with
+  mode `0700`, must stay private to the agent's user (a directory, not a symbolic link, mode `0700`, owned
+  by that user), or the plugin does not start, and the agent logs it at `info`. When the path fits under
+  neither, the plugin does not start and `last_error` names the path and asks for a `run_dir`. An
+  explicit `run_dir` is never replaced: one too deep makes every plugin fail to start with `socket path
+  too long`.
 - A corrupt record of the buffer, found when it opens (inside an older segment) or while it runs
   (anywhere), drops the rest of that segment with an error log and
   `laraplate_edge_corrupt_records_total`, without a loss marker (the protocol has no reason for it).
