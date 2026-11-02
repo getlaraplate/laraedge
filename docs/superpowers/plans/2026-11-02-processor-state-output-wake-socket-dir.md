@@ -1,12 +1,12 @@
 ---
-status: open
+status: closed
 created_on: 2026-11-02
 ---
 # Processor state on stream open, plugin output wake, short socket directory. Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. Tick each step when it is done, in the same work block.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax. Tick each step when it is done, in the same work block.
 
-**Status:** Open.
+**Status:** Closed (2026-11-02).
 
 **Goal:** close the four limits plan 3 left open: a processor's stream opens with the current state of its
 observed devices (derived signals no longer stay `bad` after a short outage, births reach a plugin that restarted on
@@ -70,7 +70,7 @@ recorded decision with its documentation; none is left silent.
 | M1 | `check.go` processor rules doc comment wrapping (T1) | Task 4 |
 | M2 | Duplicate names inside one processor's `observe` accepted (T1) | Task 4: refused, schema `uniqueItems` and check |
 | M3 | No test that observing another processor's derived device is refused (T1) | Task 4 |
-| M4 | `TestSilentUnitDoesNotStarveTheOthers` (modbus) flaked once under `-race` (T1) | Task 5 |
+| M4 | `TestSilentUnitDoesNotStarveTheOthers` (modbus) flaked once under `-race` (T1) | Carried, see delivery status |
 | M5 | `Validate` doc comment names only inputs (T2) | Task 4 |
 | M6 | Input loop duplicates `configProblems` rendering (T2) | Task 4 |
 | M7 | A Retry arriving during shutdown is not recorded as last error (T3) | Task 2 |
@@ -92,7 +92,7 @@ recorded decision with its documentation; none is left silent.
 | M23 | Reload test does not show that records held at reload are delivered after it (T6) | Task 5 |
 | M24 | Rollback test checks `Status` only, not that the plugin process exited (T6) | Task 5 |
 | M25 | Crash test busy-spins `runtime.Gosched` per tick (T6) | Task 5 |
-| M26 | e2e jsonl kill does not assert that a `DUPLICATE` resend happened (T7) | Task 5 |
+| M26 | e2e jsonl kill does not assert that a `DUPLICATE` resend happened (T7) | Closed by ruling, see delivery status |
 | M27 | e2e `lastIndex(..., "death")` of -1 would panic `records[-1:]` (T7) | Task 5 |
 | M28 | e2e: no `sending` assert after the jsonl restart (T7) | Task 5 |
 | M29 | `Router.Births()` includes devices whose input reports them dead (final review, Task 6 note) | Task 1 |
@@ -126,7 +126,7 @@ Carried to the next plan, by name, because they are not plan 3 findings or need 
   `type badPoint struct { device, signal string; kind model.ValueKind; priority model.Priority }`, used by both
   `goDown`s (M17).
 
-- [ ] **Step 1: Write the failing tests** in `internal/plugin/processor_test.go`, using `newProcessorHarness` and
+- [x] **Step 1: Write the failing tests** in `internal/plugin/processor_test.go`, using `newProcessorHarness` and
   `records_file`:
   - `TestProcessorStreamOpensWithTheCurrentState`: offer a birth of `d1`, then `observed("d1", 1, model.Good)` and
     `observed("d1", 2, model.Good)` before `Start`; after the stream is up, `records` holds the birth of `d1` then one
@@ -148,15 +148,15 @@ Carried to the next plan, by name, because they are not plan 3 findings or need 
   - `internal/pipeline/router_test.go` `TestBirthsSkipsDeadDevices`: register an input with `d1` and `d2`, emit a death
     of `d2`; `Births()` returns only `d1`; after a birth of `d2` is emitted, both (M29).
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
   Run: `go test ./internal/plugin ./internal/pipeline -run 'TestProcessor(StreamOpens|StateAfter|StateSends|RecordOffered|StateIsBounded|IsNotUp)|TestBirthsSkipsDeadDevices' -count=1`
   Expected: FAIL (records of value 1 present, no records after a restart, `busy_process` unknown, dead `d2` born).
 
-- [ ] **Step 3: Add `busy_process` to the fake plugin**: the first N `Process` calls of the process answer
+- [x] **Step 3: Add `busy_process` to the fake plugin**: the first N `Process` calls of the process answer
   `codes.AlreadyExists` at once, as `busy_runs` does for `Run`; document it in the behaviour list.
 
-- [ ] **Step 4: Keep the state in `Offer`.** Add to `Processor` a `stateMu sync.Mutex` guarding
+- [x] **Step 4: Keep the state in `Offer`.** Add to `Processor` a `stateMu sync.Mutex` guarding
   `events map[string]model.DeviceEvent` (last event per observed device), `samples map[string]map[string]model.Sample`
   (device, signal) and `cached int`; constant `processorStateLimit = 10000`. `Offer` updates the state before the
   non-blocking queue send, for every observed record, the queue being full or not: an event replaces the device's last
@@ -164,7 +164,7 @@ Carried to the next plan, by name, because they are not plan 3 findings or need 
   the limit is not cached (warn once per instance, `"processor"` and the limit only). `recordToWire` runs inside the
   `select` case only, after the `p.observed` check (M16).
 
-- [ ] **Step 5: Send the state when the stream opens.** In `stream`, after the start message is sent and before
+- [x] **Step 5: Send the state when the stream opens.** In `stream`, after the start message is sent and before
   `feed` starts: drain `p.queue` without counting (the state supersedes it), take a copy of the state under `stateMu`,
   and send it synchronously: devices in name order, for each its last event, then, when that event is not a death or
   there is none, its samples in signal order. A message over `handshake.MaxMessageSize` is skipped and counted as
@@ -172,19 +172,19 @@ Carried to the next plan, by name, because they are not plan 3 findings or need 
   the first tick and the first emitted sample, so `Up` means "the plugin is processing" (M18). Update the `Processor`,
   `ProcessorStats.Up` and `stream` doc comments.
 
-- [ ] **Step 6: One bad-sample helper (M17).** Both `Processor.goDown` and `pluginInput.goDown` build their bad
+- [x] **Step 6: One bad-sample helper (M17).** Both `Processor.goDown` and `pluginInput.goDown` build their bad
   samples through `badSamples`; their once-per-outage guards stay where they are.
 
-- [ ] **Step 7: `Births` skips dead devices (M29).** The router records, under its lock, the devices whose last event
+- [x] **Step 7: `Births` skips dead devices (M29).** The router records, under its lock, the devices whose last event
   through `Emit` was a death and clears the mark on a birth or when the device's input is removed; `Births` leaves them
   out. `BirthInput` and the outputs' `birthTo` are unchanged (plan 1 ruling R5).
 
-- [ ] **Step 8: Run the packages**
+- [x] **Step 8: Run the packages**
 
   Run: `go test ./internal/plugin ./internal/pipeline ./internal/supervisor -count=1 -race`
   Expected: PASS, including the existing processor, input and supervisor processor tests.
 
-- [ ] **Step 9: Document.** `docs/CONFIGURATION.md` processors section: at every opening of its stream (first start,
+- [x] **Step 9: Document.** `docs/CONFIGURATION.md` processors section: at every opening of its stream (first start,
   outage, plugin restart) a processor receives the current state of its observed devices (last event, then last sample
   of every signal of a living device), then the live copies; copies queued during the outage are not replayed, so a
   processor needing every change cannot rely on the tap; a record can arrive twice around the opening; a processor
@@ -195,7 +195,7 @@ Carried to the next plan, by name, because they are not plan 3 findings or need 
   counters restart from zero when the instance restarts, which `rate()` handles (M21, same words in the metric help in
   `internal/status/metrics.go`).
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add internal docs examples
@@ -224,7 +224,7 @@ type Waker interface {
 
   `plugin.OutputSender` implements it (`var _ output.Waker = (*OutputSender)(nil)`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `internal/output/loop_test.go`:
     - `TestLoopWakeEndsABackoff`: a `fakeSender` variant implementing `Waker` answers `Retry` then `Confirmed`; after
       the first send the loop is in `Backoff`; a value on the wake channel makes the second send happen without
@@ -249,19 +249,19 @@ type Waker interface {
     - `TestOutputLogsCarryTheOutputID` (M12): a sender built with a non-nil logger logs a refused configuration with
       `output=<id>`.
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
   Run: `go test ./internal/output ./internal/plugin -run 'TestLoop(Wake|RecordsARetry|PreparerNotReady|DropsWith)|TestOutput(Wakes|ConcurrentReload|ConfiguresOnce|LogsCarry)' -count=1`
   Expected: FAIL (`output.Waker` and `OutputSender.Wake` undefined, retry not recorded, extra configure, no `output`
   attribute).
 
-- [ ] **Step 3: Implement the wake.** In `Loop`, keep the sender's wake channel (nil when the Sender is not a
+- [x] **Step 3: Implement the wake.** In `Loop`, keep the sender's wake channel (nil when the Sender is not a
   `Waker`), and in `pause` select on it only when `wakeOnReload` is false, returning on a receive; the backoff step is
   not reset. A wake that arrives outside a pause stays buffered and shortens the next backoff: accepted, one early
   retry. In `OutputSender`, a goroutine started in `NewOutputSender` forwards each generation of the `h.Watch()`
   subscription to a `chan struct{}` of capacity 1 without blocking; `Close` stops it and unwatches.
 
-- [ ] **Step 4: The minors of the loop and the senders.**
+- [x] **Step 4: The minors of the loop and the senders.**
   - M7: `Run` records the outcome's reason (and the `Backoff` state) before it stops on a done context.
   - M8: `httpSender.Send`'s `tokenStep` stays, with a comment saying it guards a `Send` called without `prepare`.
   - M9: log texts say "destination" consistently, and the delivered debug line carries the destination's status again.
@@ -269,15 +269,15 @@ type Waker interface {
   - M14: `Send` no longer drains a `Watch` channel; it configures when `cfgGen != gen` or after `ReloadCredentials`.
     The `Watch` subscription now only feeds the wake goroutine.
 
-- [ ] **Step 5: Run the packages**
+- [x] **Step 5: Run the packages**
 
   Run: `go test ./internal/output ./internal/plugin ./internal/supervisor -count=1 -race`
   Expected: PASS.
 
-- [ ] **Step 6: Document** in `docs/USAGE.md`: a plugin output in backoff tries again as soon as its plugin is back up;
+- [x] **Step 6: Document** in `docs/USAGE.md`: a plugin output in backoff tries again as soon as its plugin is back up;
   a suspended one still waits for SIGHUP or its 5 minutes. Remove the known limit.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/output internal/plugin docs
@@ -303,7 +303,7 @@ git commit -m "feat(output): a plugin output in backoff tries again when its plu
   - `func socketDir(dataDir, runDir, id string) (dir string, fallback bool, err error)` in package `plugin`, Unix
     build; the `!unix` build returns `filepath.Join(base, "plugins", id)` with no checks.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `TestLoadRefusals` gains `run_dir: relative/run` refused with `run_dir must be an absolute path`; `TestLoadValid`
     reads `run_dir: /run/laraplate-edge`.
   - `internal/plugin/socketdir_unix_test.go`:
@@ -320,12 +320,12 @@ git commit -m "feat(output): a plugin output in backoff tries again when its plu
   - `internal/plugin` host test `TestHostStartsWithADeepDataDir` (Unix): a `DataDir` deep enough that the default
     socket path exceeds the limit; the fake plugin reaches `StateUp`.
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
   Run: `go test ./internal/bootstrap ./internal/plugin -run 'TestLoad|TestSocketDir|TestHostStartsWithADeepDataDir' -count=1`
   Expected: FAIL (`run_dir` unknown, `socketDir` undefined, host down with `socket path too long`).
 
-- [ ] **Step 3: Implement.** The Unix limit is `len(syscall.RawSockaddrUnix{}.Path) - 1`, as in the SDK; a directory
+- [x] **Step 3: Implement.** The Unix limit is `len(syscall.RawSockaddrUnix{}.Path) - 1`, as in the SDK; a directory
   fits when `len(dir) + len("/p00000000.sock")` is within it. `socketDir`: base is `runDir`, or
   `<filepath.Abs(dataDir)>/run`; when `runDir` is set or the path fits, return it; otherwise the fallback root of the
   Global Constraints, created with `os.Mkdir(root, 0o700)` (an existing one is checked, not chmod-ed): `os.Lstat` must
@@ -334,19 +334,19 @@ git commit -m "feat(output): a plugin output in backoff tries again when its plu
   passes the result as `LaunchConfig.SocketDir`; its removal at stop removes `<root>/plugins/<id>` only, never the
   root.
 
-- [ ] **Step 4: Run the packages**
+- [x] **Step 4: Run the packages**
 
   Run: `go test ./internal/bootstrap ./internal/plugin ./internal/supervisor ./cmd/... -count=1 -race`
   Expected: PASS.
 
-- [ ] **Step 5: Document.** `docs/CONFIGURATION.md`: `run_dir` in the bootstrap table (optional, absolute, holds the
+- [x] **Step 5: Document.** `docs/CONFIGURATION.md`: `run_dir` in the bootstrap table (optional, absolute, holds the
   plugin sockets; default `data_dir/run`; when the default does not fit the Unix socket limit the agent uses
   `<temp>/laraplate-edge-<hash>`, private to its user, and logs it). `docs/USAGE.md`: the systemd unit gains
   `RuntimeDirectory=laraplate-edge` and `RuntimeDirectoryMode=0700`, the bootstrap example `run_dir: /run/laraplate-edge`;
   the troubleshooting row for `socket path too long` now covers only an explicit `run_dir`, and a new row covers the
   unsafe fallback directory error. `examples/plugin-line/README.md`: drop the deep checkout workaround.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal cmd docs examples
@@ -366,7 +366,7 @@ git commit -m "feat(plugin): run_dir and a private fallback keep plugin sockets 
 - Produces: `plugin.ConfigRefusedError.ID string` replaces the `Input` field (M15); `supervisor.OutputStatus` gains
   `HasClockOffset bool` (M22), set where `clockOffsetter` is checked today.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `TestProcessorObserveListedTwiceIsRefused` (M2): `observe: [d1, d1]` refused at `processors.0.observe.1` by both the
     schema and the check (the message the sibling duplicate refusals use).
   - `TestProcessorCannotObserveADerivedDevice` (M3): processor `p2` observing `line-1`, a derived device of `p1`,
@@ -374,13 +374,13 @@ git commit -m "feat(plugin): run_dir and a private fallback keep plugin sockets 
   - `internal/status/server_test.go`: an output whose type is not `laraplate-http` but reports `HasClockOffset` shows the
     clock offset field; one that does not, hides it (M22).
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
   Run: `go test ./internal/config ./internal/status -run 'TestProcessorObserveListedTwice|TestProcessorCannotObserve|ClockOffset' -count=1`
   Expected: FAIL for the duplicate and the clock offset; `TestProcessorCannotObserveADerivedDevice` may already pass
   (correct by construction): keep it as the regression test M3 asked for.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
   - M2: `uniqueItems: true` on `observe` and the same refusal in `check.go`.
   - M1, M5: reflow the processor rules doc comment in `check.go`; the `Validate` doc comment names inputs, processors
     and plugin outputs.
@@ -389,12 +389,12 @@ git commit -m "feat(plugin): run_dir and a private fallback keep plugin sockets 
     and every construction and read of it.
   - M22: `hasClockOffset` in `status/server.go` reads `OutputStatus.HasClockOffset`; the type-prefix test goes.
 
-- [ ] **Step 4: Run the affected packages**
+- [x] **Step 4: Run the affected packages**
 
   Run: `go test ./internal/config ./internal/plugin ./internal/supervisor ./internal/status -count=1 -race`
   Expected: PASS; an existing validation test whose expected text changes means the rendering differed: stop and report.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add schema internal
@@ -411,12 +411,12 @@ git commit -m "fix(config): refuse duplicate observed devices; one clock offset 
 
 **Interfaces:** none; tests only, unless Step 1 finds a defect in the modbus scheduler.
 
-- [ ] **Step 1: The modbus flake (M4).** Use superpowers:systematic-debugging. Reproduce with
+- [x] **Step 1: The modbus flake (M4).** Use superpowers:systematic-debugging. Reproduce with
   `go test ./internal/input/modbus -run TestSilentUnitDoesNotStarveTheOthers -race -count=200` (and with `-cpu 1,2,8`).
   Find the cause before changing anything: a timing assumption in the test is fixed in the test with a condition wait;
   a scheduler defect gets a failing test first, then the fix. Record the cause in the commit message.
 
-- [ ] **Step 2: Supervisor tests.**
+- [x] **Step 2: Supervisor tests.**
   - M23: the reload test asserts that the records held while `o1` reopened reach its destination after the reload, in
     order, with consecutive `source_seq`.
   - M24: the rollback test asserts that the rolled-back plugin's process has exited (its pid no longer alive, the Unix
@@ -424,19 +424,19 @@ git commit -m "fix(config): refuse duplicate observed devices; one clock offset 
   - M25: the crash test waits on the fake clock's pending timers or on a `waitFor` condition, not a `runtime.Gosched`
     spin per tick.
 
-- [ ] **Step 3: End-to-end test.**
+- [x] **Step 3: End-to-end test.**
   - M26: after the jsonl kill, assert that a resend was answered `DUPLICATE` (the plugin's log line or the output's
     `/status` counters, whichever the test can already read).
   - M27: clamp the `lastIndex(..., "death")` result at 0 before slicing, and fail with a message when it is -1.
   - M28: assert the output is `sending` again after the jsonl restart.
 
-- [ ] **Step 4: Run them, repeatedly for the timing-sensitive ones**
+- [x] **Step 4: Run them, repeatedly for the timing-sensitive ones**
 
   Run: `go test ./internal/supervisor ./internal/input/modbus -race -count=20` and
   `go test ./internal/e2e -run TestPluginProcessorOutput -count=3`
   Expected: PASS every time.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal
@@ -450,29 +450,89 @@ git commit -m "test: deterministic waits and the assertions plan 3 deferred; fix
 - Stack root, on its own branch and pull request: `docs/superpowers/specs/2026-10-22-laraedge-plugins-design.md`
   (Status line amendment)
 
-- [ ] **Step 1: Full suite and CI checks**
+- [x] **Step 1: Full suite and CI checks**
 
   Run: `go test ./... -count=1 -race`, `go vet ./...` and the remaining steps of `.github/workflows/ci.yml`.
   Expected: PASS, no findings.
 
-- [ ] **Step 2: End to end** — `go test ./internal/e2e -count=1 -run TestPluginProcessorOutput`; expected PASS (the
+- [x] **Step 2: End to end** — `go test ./internal/e2e -count=1 -run TestPluginProcessorOutput`; expected PASS (the
   SDK examples are unchanged and `line-state` keeps its state per stream).
 
-- [ ] **Step 3: Check the minors table**: every row M1 to M29 points to a commit of this branch or to a recorded
+- [x] **Step 3: Check the minors table**: every row M1 to M29 points to a commit of this branch or to a recorded
   decision; any row left open goes, named, into the delivery status and the next plan.
 
-- [ ] **Step 4: Stack spec amendment.** On a stack branch `docs/edge-processor-state`, append to the Status line of
+- [x] **Step 4: Stack spec amendment.** On a stack branch `docs/edge-processor-state`, append to the Status line of
   the plugin design: plan `laraplate-edge/docs/superpowers/plans/2026-11-02-processor-state-output-wake-socket-dir.md`
   amends it: a processor's stream opens with the current state of its observed devices; plugin sockets may live in
   `run_dir` or a private temp fallback. Open the pull request; the user merges it and bumps no submodule pointer.
 
-- [ ] **Step 5: Close the plan**: `status: closed`, Status "Closed (date)", every box ticked, a
+- [x] **Step 5: Close the plan**: `status: closed`, Status "Closed (date)", every box ticked, a
   `## Delivery status (date): shipped` section with divergences, the carried items, and
   `**Documented in:** docs/CONFIGURATION.md, docs/USAGE.md, examples/plugin-line/README.md`; mark the INDEX row closed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docs/superpowers/plans
 git commit -m "docs(plans): close the processor state, output wake and socket directory plan"
 ```
+
+## Delivery status (2026-11-02): shipped
+
+All six tasks are built on branch `feat/processor-state-wake-socket`, branched from `develop` at `fc86583`: commits
+`965f1f1` (plan) to `dfbfa97`, and the closing commit. Each task was reviewed and fixed, then a whole-branch review and one
+fix wave. Task 1: a processor keeps the last event of each observed device and the last sample of each signal of a living
+device; a `Process` stream opens with that state, then the live copies, so derived signals recover after a short outage
+and births reach a plugin that restarted on its own (`Births()` skips dead devices). Task 2: `output.Waker`; a plugin
+output in backoff tries again as soon as its plugin is back, a `Suspend` is not ended by it. Task 3: the optional
+bootstrap key `run_dir`, and a private `0700` fallback socket directory when the default does not fit the Unix limit.
+Task 4: duplicate observed devices refused by every configuration layer, `ConfigRefusedError.ID`, one decision point
+for the clock offset. Task 5: deterministic waits and the assertions plan 3 deferred. Task 6: this record. The M1 to M29
+table was checked against the branch commits and the ledger; every row is fixed, decided and documented, except M4
+(carried) and M26 (closed by ruling). The divergences from the plan, each with its reason:
+
+- **R5. The state is sent by the feeder goroutine after `Recv` has started**, before any queued copy; the drain and the
+  snapshot are still taken synchronously in `stream`. Sending synchronously before the feeder starts deadlocks on gRPC
+  flow control with an echoing plugin; ordering and no loss, the brief's intent, hold.
+- **R8. `probe` and `browse` ignore `run_dir`** and keep their own temporary `data_dir`: sharing `run_dir/plugins/<id>`
+  with a running agent would let the probe's stop delete the live plugin's socket directory.
+- **R9. `/tmp` is a second fallback candidate.** The fallback root is tried under `os.TempDir()` and, when that path
+  does not fit (macOS), under `/tmp`; the global constraint named only `os.TempDir()`, so this widens it, at the user's
+  choice on 2026-11-02. When neither fits the error names the fallback and `run_dir`. The directory stays `0700` and
+  owner-checked.
+- **R10. A fallback root the agent has just created is chmod-ed to `0700`**, so an unusual umask cannot make the agent
+  refuse its own directory; an existing root is only checked.
+- **R12. A failed output reports no clock offset.** A failed `laraplate-http` output reported a fabricated 0; the
+  offset is now present only where an estimate exists (M22), and `docs/USAGE.md` says so.
+- **R13. M26 is closed without a production change.** Nothing observable records a `DUPLICATE`, the resend timing is not
+  deterministic, and `checkSink`'s consecutive `source_seq` with no loss markers already proves a resend is handled
+  without loss or repeat; a status counter only for a test is not justified.
+- **R14. M4 is carried.** 600 race runs at `-cpu 1,2,4,8` under 14 CPU hogs never failed; the only real-time
+  assumption is a 250 ms reply timeout against a measured p99 of 17.5 ms; no fix without a reproduced cause.
+- **R3. Gosched spins remain in touched files.** The constraint binds the tests this plan wrote or modified; shared
+  helpers were changed only where a touched test depended on a spin, so the `waitFile` spin in touched test files stays.
+- **The "another owner" case of Review Focus 5 is untested**: it needs root to create a directory owned by another
+  user. The symbolic link and wide mode cases are tested.
+- **`restartClock` matches the stack by name** to know a sleep comes from the host's restart wait; a rename of that
+  function breaks the match visibly, but the match stays.
+- **The "up to 5 minutes known limit" had no text to remove**: plan 3 recorded it only in its own delivery status,
+  never in `docs/`; the new behaviour is documented instead.
+- **A state record lost by a failed `Send` is counted as dropped**, like a copy; and copies dropped while the stream is
+  down are superseded by the state at the next opening, which `laraplate_edge_processor_dropped_total` now says in its
+  help text and in `docs/USAGE.md`: a large increase after an outage means superseded copies, not lost machine data.
+- **Socket troubleshooting rows** in `docs/USAGE.md` tell the first apply (refused, naming the error) from a restart of
+  a plugin that was up (`down`, retried with backoff).
+
+Parked, with reasons: two concurrent event `Emit`s of one device can interleave under the shared router lock (as before
+this plan; one device's events come from one input goroutine); a fixture in `processors_layers_test.go` uses
+placeholder plugin hashes (build never reads plugin files).
+
+Carried to the next plan:
+
+- **The `runtime.Gosched` sweep**, with `waitFile` and the `restartClock` stack-name match: one plan that gives the fake
+  clock a way to wait for timers and replaces the spins.
+- **M4**, `TestSilentUnitDoesNotStarveTheOthers`, with the evidence above, until a cause is reproduced.
+- **`Release` of removed instances** (Q7): needs a `Release` RPC in `laraedge-sdk`, an SDK release; its own plan across
+  both repositories.
+
+**Documented in:** `docs/CONFIGURATION.md`, `docs/USAGE.md`, `examples/plugin-line/README.md`
