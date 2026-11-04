@@ -181,28 +181,15 @@ func TestRunAgentUptimeCountsFromTheProcessStart(t *testing.T) {
 		logger:  slog.New(slog.DiscardHandler),
 	})
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+a.addr+"/status", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+statusToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET /status: %v", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /status = %d %s", resp.StatusCode, body)
+	code, body := httpGet(t, "http://"+a.addr+"/status", bearer(statusToken))
+	if code != http.StatusOK {
+		t.Fatalf("GET /status = %d %s", code, body)
 	}
 
 	var st struct {
 		UptimeSeconds float64 `json:"uptime_seconds"`
 	}
-	if err := json.Unmarshal(body, &st); err != nil {
+	if err := json.Unmarshal([]byte(body), &st); err != nil {
 		t.Fatalf("GET /status = %s: %v", body, err)
 	}
 	if st.UptimeSeconds != 3600 {
@@ -223,12 +210,22 @@ func TestRunAgentRefusesAnOpenStatusEndpointWithoutAToken(t *testing.T) {
 	}
 }
 
-func httpGet(t *testing.T, url string) (int, string) {
+// bearer sets the Authorization of a request to the Bearer token.
+func bearer(token string) func(*http.Request) {
+	return func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+token) }
+}
+
+// httpGet GETs url, changed by each option first (bearer), and returns the
+// status code and the body.
+func httpGet(t *testing.T, url string, options ...func(*http.Request)) (int, string) {
 	t.Helper()
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, option := range options {
+		option(req)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
