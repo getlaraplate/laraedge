@@ -3,6 +3,7 @@ package modbus
 import (
 	"net"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -60,12 +61,13 @@ func TestCloseDuringADialToABlackHole(t *testing.T) {
 	}))
 	opening := make(chan struct{}, 1)
 	returned := make(chan struct{})
+	var once sync.Once
 	h.in.newClient = func(c Connection) (client, error) {
 		lib, err := newLibraryClient(c)
 		if err != nil {
 			return nil, err
 		}
-		return signalOpen{client: lib, opening: opening, returned: returned}, nil
+		return signalOpen{client: lib, opening: opening, returned: returned, once: &once}, nil
 	}
 	if err := h.in.Start(t.Context(), h.emit); err != nil {
 		t.Fatal(err)
@@ -105,10 +107,11 @@ type signalOpen struct {
 	client
 	opening  chan<- struct{}
 	returned chan struct{}
+	once     *sync.Once
 }
 
 func (s signalOpen) Open() error {
-	defer close(s.returned)
+	defer s.once.Do(func() { close(s.returned) })
 
 	select {
 	case s.opening <- struct{}{}:

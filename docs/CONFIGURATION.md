@@ -256,8 +256,8 @@ answer.
 **Serial port.** For `rtu` the port is opened when the input starts, as the one local resource the driver
 needs: a port that cannot be opened fails the start with `cannot open the serial port: it does not exist`
 (wrong path), `cannot open the serial port: permission denied` (no permission) or plain `cannot open the
-serial port` (any other failure; the path is never repeated), so the document is `rolled_back` and the previous one keeps
-running. On Linux the user running the agent usually needs the `dialout` group (or the group that owns
+serial port` (any other failure; the path is never repeated), so the document is `rolled_back` and the
+previous one keeps running. On Linux the user running the agent usually needs the `dialout` group (or the group that owns
 the device). A port that fails later is opened again in the background, like a lost network connection.
 `config validate` checks the serial fields but cannot open the port; `probe` opens it itself: stop the
 agent before probing an `rtu` input, because both would read the same port and corrupt each other's

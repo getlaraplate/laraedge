@@ -357,6 +357,19 @@ func TestPointTypeTableDrivesTypesAndSizes(t *testing.T) {
 			t.Errorf("refusal %q does not name %s", err, typ.name)
 		}
 	}
+	sizes := map[string]uint16{
+		"bool": 1, "int16": 1, "uint16": 1, "int32": 2, "uint32": 2, "float32": 2,
+		"int64": 4, "uint64": 4, "float64": 4, "string": 7,
+	}
+	if len(sizes) != len(pointTypes) {
+		t.Errorf("test knows %d types, the table %d", len(sizes), len(pointTypes))
+	}
+	for _, typ := range pointTypes {
+		got, err := Size(point(typ.name, "", config.ReadPoll), Address{Registers: 7})
+		if err != nil || got != sizes[typ.name] {
+			t.Errorf("Size(%s) = %d, %v, want %d", typ.name, got, err, sizes[typ.name])
+		}
+	}
 	const want = "type: want bool, int16, uint16, int32, uint32, float32, int64, uint64, float64 or string"
 	if err.Error() != want {
 		t.Errorf("refusal = %q, want %q", err, want)
