@@ -138,9 +138,11 @@ func TestRunAgentServesTheStatusEndpoint(t *testing.T) {
 }
 
 // lateClock answers the base time until late is set and an hour after it
-// from then on. The test sets it from the environment lookup, which runAgent
-// makes after it has noted the process start and before the status endpoint
-// starts, whatever number of Now calls come before.
+// from then on. The test sets it from the lookup of the status token, which
+// runAgent makes after it has noted the process start and status.Listen makes
+// before the endpoint could note a start of its own, whatever number of Now
+// calls come before. The watchdog's lookups are no such point: outside Linux
+// it reads no environment at all.
 type lateClock struct {
 	*clock.Fake
 	late atomic.Bool
@@ -159,14 +161,18 @@ func TestRunAgentUptimeCountsFromTheProcessStart(t *testing.T) {
 	dir := t.TempDir()
 	be := newIngest(t)
 	bootstrapFile := filepath.Join(dir, "bootstrap.yaml")
-	writeFile(t, bootstrapFile, bootstrapYAML("plant-a-edge-01", quietConfig(t, dir, be.srv.URL), filepath.Join(dir, "data")))
+	const statusEnv, statusToken = "EDGE_STATUS_TOKEN", "status-tok-5c2e-SECRET"
+	writeFile(t, bootstrapFile, bootstrapYAML("plant-a-edge-01", quietConfig(t, dir, be.srv.URL), filepath.Join(dir, "data"))+
+		"status_token: secret://env/"+statusEnv+"\n")
 	base := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
 
 	clk := &lateClock{Fake: clock.NewFake(base), base: base}
-	env := &fakeEnv{vars: map[string]string{runEnv: runToken}}
+	env := &fakeEnv{vars: map[string]string{runEnv: runToken, statusEnv: statusToken}}
 	a := startAgent(t, bootstrapFile, agentDeps{
 		lookupEnv: func(key string) (string, bool) {
-			clk.late.Store(true)
+			if key == statusEnv {
+				clk.late.Store(true)
+			}
 
 			return env.lookup(key)
 		},
@@ -175,11 +181,28 @@ func TestRunAgentUptimeCountsFromTheProcessStart(t *testing.T) {
 		logger:  slog.New(slog.DiscardHandler),
 	})
 
-	_, body := httpGet(t, "http://"+a.addr+"/status")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+a.addr+"/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+statusToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /status = %d %s", resp.StatusCode, body)
+	}
+
 	var st struct {
 		UptimeSeconds float64 `json:"uptime_seconds"`
 	}
-	if err := json.Unmarshal([]byte(body), &st); err != nil {
+	if err := json.Unmarshal(body, &st); err != nil {
 		t.Fatalf("GET /status = %s: %v", body, err)
 	}
 	if st.UptimeSeconds != 3600 {
