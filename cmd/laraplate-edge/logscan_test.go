@@ -126,7 +126,7 @@ func withoutCountingAttributes(t *testing.T, line string) string {
 		t.Fatalf("a log line is not a JSON object: %s", line)
 	}
 	for _, key := range countingAttributes {
-		if _, isNumber := fields[key].(float64); isNumber {
+		if _, isNumber := fields[key].(float64); isNumber || key == "time" || key == "level" {
 			delete(fields, key)
 		}
 	}

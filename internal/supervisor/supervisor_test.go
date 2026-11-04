@@ -34,6 +34,9 @@ type fixture struct {
 	be      *backend
 	logs    *lockedBuffer
 	sup     *Supervisor
+	// baseTimers is the number of timers pending before any component runs:
+	// the router's flush loop.
+	baseTimers int
 }
 
 type fixtureOption func(*Config)
@@ -78,6 +81,10 @@ func newFixture(t *testing.T, opts ...fixtureOption) *fixture {
 		t.Fatalf("New() = %v", err)
 	}
 	f.sup = sup
+	// The router's flush loop keeps one timer pending for the whole life of
+	// the supervisor; the waits below count the timers above it.
+	f.clk.BlockUntil(t, 1)
+	f.baseTimers = f.clk.PendingTimers()
 
 	// A poller reads the concurrent accessors for the whole test (-race).
 	ctx, cancel := context.WithCancel(context.Background())
@@ -261,9 +268,9 @@ func (f *fixture) advanceUntil(what string, cond func() bool, got func() string)
 		if time.Now().After(deadline) {
 			f.t.Fatalf("%s not reached; main received %s", what, got())
 		}
-		f.clk.BlockUntil(f.t, 1)
+		f.clk.BlockUntil(f.t, f.baseTimers+1)
 		f.clk.Advance(time.Minute)
-		waitFor(f.t, what, func() bool { return cond() || f.clk.PendingTimers() > 0 })
+		waitFor(f.t, what, func() bool { return cond() || f.clk.PendingTimers() > f.baseTimers })
 	}
 }
 
