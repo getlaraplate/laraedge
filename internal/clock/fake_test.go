@@ -226,6 +226,7 @@ func TestBlockUntilCountsLiveTimers(t *testing.T) {
 
 	f.BlockUntil(t, 1)
 
+	// Swapping blockUntilBound: tests doing so must not run in parallel.
 	old := blockUntilBound
 	blockUntilBound = 50 * time.Millisecond
 	defer func() { blockUntilBound = old }()
@@ -235,25 +236,41 @@ func TestBlockUntilCountsLiveTimers(t *testing.T) {
 	if !rec.failed {
 		t.Fatal("BlockUntil(2) did not fail with a single live timer")
 	}
+	if want := "PendingTimers() = 1, want at least 2"; rec.msg != want {
+		t.Fatalf("Fatalf message = %q, want %q", rec.msg, want)
+	}
 }
 
-func TestBlockUntilWakesOnStopAndAdvance(t *testing.T) {
+func TestBlockUntilIgnoresStopAndReturnsOnNewTimer(t *testing.T) {
 	f := NewFake(epoch)
-	f.NewTimer(time.Second)
+	first := f.NewTimer(time.Second)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.BlockUntil(t, 1)
+		f.BlockUntil(t, 2)
 	}()
-	<-done
 
-	// A waiter for 2 is woken by the NewTimer that completes it.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		f.NewTimer(time.Second)
-	}()
-	f.BlockUntil(t, 2)
+	first.Stop()
+	select {
+	case <-done:
+		t.Fatal("BlockUntil(2) returned after a Stop left no live timer")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	f.NewTimer(time.Second)
+	select {
+	case <-done:
+		t.Fatal("BlockUntil(2) returned with a single live timer")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	f.NewTimer(time.Minute)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BlockUntil(2) did not return once two timers were live")
+	}
 }
 
 func TestAdvanceNegativeDoesNotMoveBack(t *testing.T) {
@@ -278,8 +295,8 @@ func TestAdvanceFiresInDeadlineOrder(t *testing.T) {
 
 	f.Advance(5 * time.Second)
 
-	// Channels are buffered, so receive by deadline order of delivery:
-	// each timer's own value must equal its deadline.
+	// Order across separate channels is not observable; this pins the value
+	// each timer was delivered: its own deadline, not the Advance target.
 	for _, c := range []struct {
 		timer Timer
 		after time.Duration
