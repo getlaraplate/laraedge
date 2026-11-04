@@ -159,6 +159,10 @@ type Supervisor struct {
 	// closed processors of that input, so the count reported never goes
 	// back when an input restarts.
 	transformErrors map[string]uint64
+	// abandoned holds, by input id, one channel per abandoned start of that
+	// id still running, closed once that start has returned and its input is
+	// closed (C43). A wait that ran out drops the channels it waited for.
+	abandoned map[string][]chan struct{}
 }
 
 // runningInput is a started input with its transform processor. The
@@ -179,6 +183,13 @@ type runningInput struct {
 // one step with retire, so after retire nothing is registered or routed for
 // this instance, and its router registration, owned by its token, is removed
 // without touching one of a later instance of the same id (ruling R50).
+//
+// The emits of one instance therefore serialise on mu, after the lock of its
+// transform processor: this is by design (C45). The records of one input are
+// routed in the order it emitted them, and a retire never interleaves with a
+// record half routed; the lock is held while one record is routed. Each start
+// of an input has its own instance, so different inputs never wait on each
+// other here.
 //
 // Lock order: the input's transform processor, then inputInstance.mu, then
 // the router's locks (Router.mu, then a hold queue's), then an output
@@ -296,13 +307,6 @@ func (i *inputInstance) retire() {
 	}
 }
 
-// runningPlugin is a plugin with its host. Its spec is the one the host was
-// built from: a document changing the entry (Raw) restarts it (decision H5).
-type runningPlugin struct {
-	spec plugin.Spec
-	host *plugin.Host
-}
-
 // runningOutput is a started output: an HTTP output, or a plugin output
 // whose output.Loop sends through sender (ruling R3).
 type runningOutput struct {
@@ -322,6 +326,7 @@ type outputLoop interface {
 	State() output.State
 	LastConfirmation() time.Time
 	LastError() (string, time.Time)
+	SettleFailures() uint64
 	ReloadCredentials()
 }
 
@@ -370,6 +375,7 @@ func New(cfg Config) (*Supervisor, error) {
 		processors:      map[string]*runningProcessor{},
 		failedProc:      map[string]failure{},
 		transformErrors: map[string]uint64{},
+		abandoned:       map[string][]chan struct{}{},
 	}
 	if s.store == nil {
 		s.store = config.NewStore(cfg.DataDir)
@@ -385,6 +391,7 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	s.router = pipeline.NewRouter(s.clk, s.log)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.wg.Go(func() { s.router.Run(s.ctx) })
 
 	return s, nil
 }
@@ -619,11 +626,6 @@ func (s *Supervisor) check(doc config.Document) ([]plugin.Spec, []string) {
 	return specs, msgs
 }
 
-// pluginOf returns the plugin id of a plugin driver, plugin:<id>.
-func pluginOf(driver string) (string, bool) {
-	return strings.CutPrefix(driver, plugin.DriverPrefix)
-}
-
 // diff compares doc with what runs. Only Apply changes the running maps, so
 // reading them under mu once is enough. A plugin an input, a processor or
 // an output of doc uses is kept when its entry and the hash of its binary
@@ -768,52 +770,6 @@ func (s *Supervisor) build(doc config.Document, p plan, specs []plugin.Spec) (pe
 	return b, msgs
 }
 
-// newPlugin returns the plugin of spec, its host built and not started.
-func (s *Supervisor) newPlugin(spec plugin.Spec) *runningPlugin {
-	return &runningPlugin{spec: spec, host: plugin.NewHost(spec, plugin.HostOptions{
-		DataDir: s.dataDir,
-		RunDir:  s.runDir,
-		Clock:   s.clk,
-		Log:     s.log,
-	})}
-}
-
-// pluginHosts returns the hosts of the running plugins, by id.
-func (s *Supervisor) pluginHosts() map[string]*plugin.Host {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	hosts := make(map[string]*plugin.Host, len(s.plugins))
-	for id, rp := range s.plugins {
-		hosts[id] = rp.host
-	}
-
-	return hosts
-}
-
-// factory returns the factory of driver: for plugin:<id> the input factory
-// of the host of that id in hosts (decision H4), else the registry's. It
-// returns a factory that refuses when there is none, which check prevents
-// for the documents it accepts.
-func (s *Supervisor) factory(driver string, hosts map[string]*plugin.Host) input.Factory {
-	if id, ok := pluginOf(driver); ok {
-		if h := hosts[id]; h != nil {
-			return plugin.InputFactory(h, s.resolver)
-		}
-
-		return func(config.Input, clock.Clock) (input.Input, error) {
-			return nil, errors.New("its plugin is not running")
-		}
-	}
-	if f := s.drivers[driver]; f != nil {
-		return f
-	}
-
-	return func(config.Input, clock.Clock) (input.Input, error) {
-		return nil, errors.New("driver not available in this build")
-	}
-}
-
 // execute stops, then starts, what p says: inputs and processors stop
 // before outputs, so nothing is routed to an output being stopped, and
 // before the plugins they use; plugins start first, so a plugin output, a
@@ -891,42 +847,6 @@ func componentErrors(prefix string, err error) []string {
 	}
 
 	return []string{fmt.Sprintf("%s: %v", prefix, err)}
-}
-
-// startPlugin starts the host of rp and records it as running. A host that
-// does not start is stopped, which removes what its launch left.
-func (s *Supervisor) startPlugin(ctx context.Context, rp *runningPlugin) error {
-	if err := rp.host.Start(ctx); err != nil {
-		if serr := rp.host.Stop(context.Background()); serr != nil {
-			s.log.Warn("supervisor: cannot stop a plugin that did not start", "plugin", rp.spec.ID, "error", serr)
-		}
-
-		return err
-	}
-	s.step("plugin " + rp.spec.ID)
-
-	s.mu.Lock()
-	s.plugins[rp.spec.ID] = rp
-	delete(s.failedPlugins, rp.spec.ID)
-	s.mu.Unlock()
-
-	return nil
-}
-
-// stopPlugin stops the running plugin id and waits for its host's Stop,
-// bounded by the stop deadline of spec section 6, and returns its spec. The
-// inputs using it are stopped first.
-func (s *Supervisor) stopPlugin(id string) plugin.Spec {
-	s.mu.Lock()
-	rp := s.plugins[id]
-	delete(s.plugins, id)
-	s.mu.Unlock()
-
-	if err := rp.host.Stop(context.Background()); err != nil {
-		s.log.Warn("supervisor: cannot stop a plugin", "plugin", id, "error", err)
-	}
-
-	return rp.spec
 }
 
 // rollback stops what j started, in the order execute stops (inputs,
@@ -1177,6 +1097,10 @@ func (s *Supervisor) stopOutput(id string, how outputStop, holdRoute config.Rout
 // instance a rollback started meanwhile. Its processor is closed before
 // startInput returns, the input of an abandoned start still running: no two
 // live processors of one input ever share the state file (ruling R11).
+// Before it starts, it waits for an abandoned start of the same id to return
+// and close its input (waitAbandoned): an input holding an exclusive
+// resource, as a serial port, frees it before the next instance opens it
+// (C43).
 func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.Input) error {
 	proc, err := transform.NewProcessor(cfg, s.dataDir, s.clk, s.log)
 	if err != nil {
@@ -1192,18 +1116,37 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 		return errors.New("the transform chains cannot be built")
 	}
 
+	s.waitAbandoned(ctx, cfg.ID)
+
 	lifeCtx, cancel := context.WithCancel(s.ctx)
 	inst := &inputInstance{router: s.router, cfg: cfg, live: true, taps: &s.taps}
 	proc.Start(lifeCtx)
 	emit := proc.Wrap(inst.emit)
 
+	closed := make(chan struct{})
 	err = s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, emit) }, func() {
 		inst.retire()
 		if err := in.Close(); err != nil {
 			s.log.Warn("supervisor: cannot close an input that did not start", "input", cfg.ID, "error", err)
 		}
+
+		s.mu.Lock()
+		s.dropAbandoned(cfg.ID, closed)
+		close(closed)
+		s.mu.Unlock()
 	})
 	if err != nil {
+		// An abandoned start closes its input later, in its goroutine: the
+		// next start of the id waits for it, and for every other abandoned
+		// start of the id still running.
+		s.mu.Lock()
+		select {
+		case <-closed:
+		default:
+			s.abandoned[cfg.ID] = append(s.abandoned[cfg.ID], closed)
+		}
+		s.mu.Unlock()
+
 		inst.retire()
 		cancel()
 		s.closeProcessor(cfg.ID, proc)
@@ -1220,6 +1163,71 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 	s.mu.Unlock()
 
 	return nil
+}
+
+// waitAbandoned waits for every abandoned start of input id still running
+// to return and close its input, at most one start timeout in total or until
+// ctx is done. When the wait runs out, the starts still running are left to
+// their goroutines, as before, and dropped from abandoned, so a later start of
+// the id does not wait for them again; the next instance starts anyway, with
+// a warning: a driver whose Start never returns must not keep the input down.
+// The input never started, so nothing of it is lost meanwhile. A shutdown
+// during a rollback that waits here can take up to one start timeout more:
+// the rollback runs on the supervisor's context.
+func (s *Supervisor) waitAbandoned(ctx context.Context, id string) {
+	s.mu.Lock()
+	pending := slices.Clone(s.abandoned[id])
+	s.mu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+
+	timer := s.clk.NewTimer(s.timeout)
+	defer timer.Stop()
+	s.step("wait abandoned input " + id)
+
+	for i, closed := range pending {
+		select {
+		case <-closed:
+		case <-timer.C():
+			s.log.Warn("supervisor: an abandoned start of the input has not returned; starting the input again anyway", "input", id, "waited", s.timeout.String(), "still_running", stillRunning(pending[i:]))
+			s.mu.Lock()
+			for _, c := range pending[i:] {
+				s.dropAbandoned(id, c)
+			}
+			s.mu.Unlock()
+
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// stillRunning counts the starts in pending that have not closed yet.
+func stillRunning(pending []chan struct{}) int {
+	n := 0
+	for _, c := range pending {
+		select {
+		case <-c:
+		default:
+			n++
+		}
+	}
+
+	return n
+}
+
+// dropAbandoned removes closed from the abandoned starts of input id. The
+// caller holds s.mu.
+func (s *Supervisor) dropAbandoned(id string, closed chan struct{}) {
+	left := slices.DeleteFunc(s.abandoned[id], func(c chan struct{}) bool { return c == closed })
+	if len(left) == 0 {
+		delete(s.abandoned, id)
+
+		return
+	}
+	s.abandoned[id] = left
 }
 
 // closeProcessor closes the processor of input id, which waits for its

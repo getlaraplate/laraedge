@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/input/driverkit"
 	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/plugin"
 )
@@ -81,7 +81,7 @@ func (p installedPlugin) waitFile(t *testing.T, name, what string, cond func(str
 		if time.Now().After(deadline) {
 			t.Fatalf("%s of plugin %s: %s not reached:\n%s", name, p.id, what, p.read(t, name))
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -118,9 +118,13 @@ func withRestartClock(c *restartClock) fixtureOption {
 }
 
 // Sleep is clock.Fake's Sleep, counting a host restart wait once its timer
-// is pending. It mirrors clock.Fake.Sleep and recognises the wait by the
-// stack name plugin.(*Host).restart: a change to either must be mirrored
-// here.
+// is pending. It mirrors clock.Fake.Sleep. A restart wait is the host's
+// driverkit.Backoff, which draws at least BackoffMin/2; the only other
+// sleepers in these tests are the plugin busy waits of busyWait (100 ms;
+// plugin.TestBusyWaitStaysBelowBackoffFloor guards the gap), so
+// the duration tells them apart and no stack frame is read. The count cannot
+// come from BlockUntil: the hosts' health, memory and deadline timers are
+// pending too.
 func (c *restartClock) Sleep(ctx context.Context, d time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -128,7 +132,7 @@ func (c *restartClock) Sleep(ctx context.Context, d time.Duration) error {
 
 	timer := c.NewTimer(d)
 	defer timer.Stop()
-	if calledFrom("plugin.(*Host).restart") {
+	if d >= driverkit.BackoffMin/2 {
 		c.restarts.Add(1)
 	}
 
@@ -137,22 +141,6 @@ func (c *restartClock) Sleep(ctx context.Context, d time.Duration) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	}
-}
-
-// calledFrom reports whether a function whose name ends with name is on the
-// caller's stack.
-func calledFrom(name string) bool {
-	pcs := make([]uintptr, 32)
-	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
-	for {
-		frame, more := frames.Next()
-		if strings.HasSuffix(frame.Function, name) {
-			return true
-		}
-		if !more {
-			return false
-		}
 	}
 }
 

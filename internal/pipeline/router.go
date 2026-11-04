@@ -3,20 +3,66 @@
 package pipeline
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/buffer"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/lograte"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
 // HoldLimit bounds the records kept in memory for an output while it
 // restarts; the records beyond it become buffer_full loss markers.
 const HoldLimit = 10_000
+
+// refusedLogWindow is the shortest interval between two summaries of the
+// records the buffers refused. Every refusal still reaches the buffer, whose
+// drop counters count it.
+const refusedLogWindow = time.Minute
+
+// refusalKind classifies a refusal for the rate limit: a different kind in
+// the same episode is logged in full. The kinds are few, never the error
+// text. A key is the output id and the kind joined by a dot, so it never
+// equals a fixed attribute of the summary (suppressed, window_seconds).
+func refusalKind(err error) string {
+	switch {
+	case errors.Is(err, buffer.ErrDropped):
+		return "dropped"
+	case errors.Is(err, buffer.ErrTooLarge):
+		return "too_large"
+	case errors.Is(err, buffer.ErrNotDurable):
+		return "not_durable"
+	case errors.Is(err, buffer.ErrClosed):
+		return "closed"
+	default:
+		return "failed"
+	}
+}
+
+// Run flushes the rate-limited refusal log every refusedLogWindow until ctx
+// is done, so that the summary of a burst of refusals is logged once the
+// refusals stop, without waiting for another one: within one to two windows
+// of the first refusal. The supervisor owns the goroutine that runs it.
+func (r *Router) Run(ctx context.Context) {
+	for {
+		timer := r.clk.NewTimer(refusedLogWindow)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+
+			return
+		case <-timer.C():
+			r.refused.Flush(r.clk.Now())
+		}
+	}
+}
 
 // Appender is what the router uses of an output's buffer (*buffer.Buffer).
 type Appender interface {
@@ -37,6 +83,9 @@ type Appender interface {
 type Router struct {
 	clk clock.Clock
 	log *slog.Logger
+	// refused rate-limits the warning for a record a buffer refuses: a
+	// buffer that refuses every record would log once per record.
+	refused *lograte.Reporter
 
 	mu      sync.RWMutex
 	outputs map[string]target
@@ -133,7 +182,7 @@ func NewRouter(clk clock.Clock, log *slog.Logger) *Router {
 		log = slog.Default()
 	}
 
-	return &Router{clk: clk, log: log, outputs: map[string]target{}, inputs: map[string]registeredInput{}, dead: map[string]bool{}}
+	return &Router{clk: clk, log: log, refused: lograte.New(log, refusedLogWindow, "router: records refused by a buffer repeated since the last report"), outputs: map[string]target{}, inputs: map[string]registeredInput{}, dead: map[string]bool{}}
 }
 
 // SetOutput routes to buf the records matching route, from now on, after
@@ -470,7 +519,7 @@ func (r *Router) append(id string, buf Appender, rec model.Record) {
 		} else {
 			attrs = append(attrs, "event", rec.Event.Kind.String())
 		}
-		r.log.Warn("router: cannot buffer a record", attrs...)
+		r.refused.Report(r.clk.Now(), id+"."+refusalKind(err), slog.LevelWarn, "router: cannot buffer a record", attrs...)
 	}
 }
 

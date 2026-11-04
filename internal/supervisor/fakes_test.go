@@ -59,6 +59,45 @@ type fakeDriver struct {
 	called chan string
 	// health makes the input of an id report its health (input.HealthReporter).
 	health map[string]input.Health
+	// exclusive makes the inputs of an id hold one exclusive resource, as a
+	// serial port: a Start finding it held by another instance fails with
+	// errBusy; the instance holding it releases it in Close.
+	exclusive map[string]bool
+	held      map[string]*fakeInput
+	// gates makes the nth Start of an input (by id, then n from 1) wait,
+	// ignoring its context, until its gate is released; several starts of
+	// one id can each have their own.
+	gates map[string]map[int]*startGate
+}
+
+// startGate holds one Start of a fake input: started is closed when the
+// Start begins, release lets it return its context's error, and closed is
+// closed when that instance is closed.
+type startGate struct {
+	started, release, closed chan struct{}
+	releaseOnce, closeOnce   sync.Once
+}
+
+func newStartGate() *startGate {
+	return &startGate{started: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (g *startGate) open() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+// gate holds the nth Start of input id; the gate is released at cleanup.
+func (d *fakeDriver) gate(t *testing.T, id string, n int) *startGate {
+	t.Helper()
+
+	g := newStartGate()
+	t.Cleanup(g.open)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.gates[id] == nil {
+		d.gates[id] = map[int]*startGate{}
+	}
+	d.gates[id][n] = g
+
+	return g
 }
 
 func newFakeDriver() *fakeDriver {
@@ -78,6 +117,9 @@ func newFakeDriver() *fakeDriver {
 		emits:        map[string][]func(model.Record){},
 		called:       make(chan string, 64),
 		health:       map[string]input.Health{},
+		exclusive:    map[string]bool{},
+		held:         map[string]*fakeInput{},
+		gates:        map[string]map[int]*startGate{},
 	}
 }
 
@@ -180,11 +222,20 @@ type fakeInput struct {
 	emit    func(model.Record)
 	started bool
 	blocked bool
+	gate    *startGate
 }
 
 func (in *fakeInput) Start(ctx context.Context, emit func(model.Record)) error {
 	d := in.d
 	d.mu.Lock()
+	if d.exclusive[in.cfg.ID] {
+		if h := d.held[in.cfg.ID]; h != nil && h != in {
+			d.mu.Unlock()
+
+			return errBusy
+		}
+		d.held[in.cfg.ID] = in
+	}
 	d.starts = append(d.starts, in.cfg.ID+" "+string(in.cfg.Raw))
 	d.emits[in.cfg.ID] = append(d.emits[in.cfg.ID], emit)
 	hang, err := d.hang[in.cfg.ID], d.failStart[in.cfg.ID]
@@ -194,9 +245,17 @@ func (in *fakeInput) Start(ctx context.Context, emit func(model.Record)) error {
 	late := d.lateEmit[in.cfg.ID]
 	block := d.blockNth[in.cfg.ID] > 0 && d.countStarts(in.cfg.ID) == d.blockNth[in.cfg.ID]
 	in.blocked = block
+	gate := d.gates[in.cfg.ID][d.countStarts(in.cfg.ID)]
+	in.gate = gate
 	d.mu.Unlock()
 	d.called <- in.cfg.ID
 
+	if gate != nil {
+		close(gate.started)
+		<-gate.release
+
+		return ctx.Err()
+	}
 	if block {
 		close(d.blockStarted)
 		<-d.blockRelease
@@ -252,12 +311,18 @@ func (in *fakeInput) Close() error {
 		in.blocked = false
 		close(d.blockClosed)
 	}
+	if g := in.gate; g != nil {
+		g.closeOnce.Do(func() { close(g.closed) })
+	}
 	if in.started {
 		d.closed = append(d.closed, in.cfg.ID)
 		in.started = false
 	}
 	if d.running[in.cfg.ID] == in {
 		delete(d.running, in.cfg.ID)
+	}
+	if d.held[in.cfg.ID] == in {
+		delete(d.held, in.cfg.ID)
 	}
 
 	return nil
@@ -315,6 +380,10 @@ type backend struct {
 	unique     map[string][]string
 	uniqueSeqs map[string][]uint64
 	seen       map[string]map[string]bool // per output, accepted message_ids
+	// sentAs holds, per output and message_id, the body and source_seq of
+	// its first acceptance: a resend must be identical (violations).
+	sentAs     map[string]map[string]sentMessage
+	violations []string
 	seqs       map[string][]uint64
 	auth       map[string][]string
 	changed    chan struct{}
@@ -330,6 +399,7 @@ func newBackend(t *testing.T) *backend {
 		unique:     map[string][]string{},
 		uniqueSeqs: map[string][]uint64{},
 		seen:       map[string]map[string]bool{},
+		sentAs:     map[string]map[string]sentMessage{},
 		seqs:       map[string][]uint64{},
 		auth:       map[string][]string{},
 		changed:    make(chan struct{}, 1),
@@ -338,8 +408,22 @@ func newBackend(t *testing.T) *backend {
 	be.srv.Config.ErrorLog = log.New(io.Discard, "", 0)
 	be.srv.Start()
 	t.Cleanup(be.srv.Close)
+	t.Cleanup(func() {
+		be.mu.Lock()
+		defer be.mu.Unlock()
+
+		for _, v := range be.violations {
+			t.Error("fake backend: " + v)
+		}
+	})
 
 	return be
+}
+
+// sentMessage is what the backend keeps of an accepted message_id.
+type sentMessage struct {
+	body string
+	seq  uint64
 }
 
 // refuse makes output out answer statuses first.
@@ -381,7 +465,16 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 		status, be.script[out] = s[0], s[1:]
 	}
 	be.auth[out] = append(be.auth[out], r.Header.Get("Authorization"))
-	if status == http.StatusAccepted {
+	accepted, answer := status == http.StatusAccepted, `{"status":"accepted"}`
+	if accepted && be.seen[out][env.MessageID] {
+		// A resend of an accepted message: the real backend answers 200
+		// duplicate, and the agent must send it identical.
+		status, answer = http.StatusOK, `{"status":"duplicate","duplicate":true}`
+		if first := be.sentAs[out][env.MessageID]; first.body != string(body) || first.seq != env.SourceSeq {
+			be.violations = append(be.violations, fmt.Sprintf("output %s resent message %s with another body or source_seq (%d, then %d)", out, env.MessageID, first.seq, env.SourceSeq))
+		}
+	}
+	if accepted {
 		be.seqs[out] = append(be.seqs[out], env.SourceSeq)
 		var items, detail []string
 		for _, d := range env.Devices {
@@ -411,6 +504,10 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if !be.seen[out][env.MessageID] {
 			be.seen[out][env.MessageID] = true
+			if be.sentAs[out] == nil {
+				be.sentAs[out] = map[string]sentMessage{}
+			}
+			be.sentAs[out][env.MessageID] = sentMessage{body: string(body), seq: env.SourceSeq}
 			be.unique[out] = append(be.unique[out], items...)
 			be.uniqueSeqs[out] = append(be.uniqueSeqs[out], env.SourceSeq)
 		}
@@ -424,7 +521,7 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = io.WriteString(w, `{"status":"accepted"}`)
+	_, _ = io.WriteString(w, answer)
 }
 
 func (be *backend) got(out string) []string {
@@ -573,3 +670,5 @@ func (b *lockedBuffer) String() string {
 }
 
 var errRefused = errors.New("connection refused by the fake machine")
+
+var errBusy = errors.New("the fake machine port is held by another instance")

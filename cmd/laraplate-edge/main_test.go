@@ -27,6 +27,42 @@ func TestRun(t *testing.T) {
 			wantStdout: version.String() + "\n",
 		},
 		{
+			name:       "run refuses an extra argument with its own message",
+			args:       []string{"run", "--bootstrap", "b.yaml", "extra"},
+			wantCode:   2,
+			wantStderr: []string{"laraplate-edge run:", `unexpected argument "extra"`},
+		},
+		{
+			name:       "help prints the usage on stdout",
+			args:       []string{"help"},
+			wantCode:   0,
+			wantStdout: usageText,
+		},
+		{
+			name:       "--help prints the usage on stdout",
+			args:       []string{"--help"},
+			wantCode:   0,
+			wantStdout: usageText,
+		},
+		{
+			name:       "-h prints the usage on stdout",
+			args:       []string{"-h"},
+			wantCode:   0,
+			wantStdout: usageText,
+		},
+		{
+			name:       "a word after -- is a positional argument, not a flag",
+			args:       []string{"plugin", "hash", "--", "--no-such-dir"},
+			wantCode:   1,
+			wantStderr: []string{"laraplate-edge plugin hash:", "--no-such-dir"},
+		},
+		{
+			name:       "two positionals around -- get the usage",
+			args:       []string{"plugin", "hash", "d", "--", "--also", "--more"},
+			wantCode:   2,
+			wantStderr: []string{"usage:"},
+		},
+		{
 			name:       "no subcommand prints usage",
 			args:       nil,
 			wantCode:   2,
@@ -485,5 +521,38 @@ func TestConfigValidateChecksPluginProcessorsAndOutputs(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want %q", stderr.String(), want)
 		}
+	}
+}
+
+func TestParseArgsStopsAtDoubleDash(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		want     []string
+		wantFlag string
+	}{
+		{"flags around positionals", []string{"x", "--input", "a", "y"}, []string{"x", "y"}, "a"},
+		{"dash-led words after the terminator stay positional", []string{"x", "--input", "a", "--", "--not-a-flag", "--also"}, []string{"x", "--not-a-flag", "--also"}, "a"},
+		{"terminator first", []string{"--", "--input", "a"}, []string{"--input", "a"}, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			fs := newFlagSet("test", &stderr)
+			input := fs.String("input", "", "")
+
+			got, code, ok := parseArgs(fs, tt.args)
+
+			if !ok || code != exitOK {
+				t.Fatalf("parseArgs: code %d ok %v (stderr: %q)", code, ok, stderr.String())
+			}
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("positional = %q, want %q", got, tt.want)
+			}
+			if *input != tt.wantFlag {
+				t.Errorf("--input = %q, want %q", *input, tt.wantFlag)
+			}
+		})
 	}
 }

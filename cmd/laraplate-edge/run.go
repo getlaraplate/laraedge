@@ -71,6 +71,11 @@ func productionDeps() agentDeps {
 // in use) stops the agent at start. logs receives the JSON logs when
 // deps.logger is nil; run passes stdout (spec 10.5).
 func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload <-chan struct{}, logs io.Writer) (err error) {
+	var processStart time.Time
+	if deps.clock != nil {
+		processStart = deps.clock.Now()
+	}
+
 	boot, err := bootstrap.Load(bootstrapPath)
 	if err != nil {
 		return err
@@ -134,6 +139,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 		Version:  version.String(),
 		Source:   sup,
 		Clock:    deps.clock,
+		Started:  processStart,
 		Logger:   log,
 	})
 	if err != nil {

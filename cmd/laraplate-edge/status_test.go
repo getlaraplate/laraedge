@@ -142,3 +142,31 @@ func TestStatusCommandWithoutAnAgent(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %q; want 1 naming the address", code, stderr.String())
 	}
 }
+
+func TestStatusCommandReportsAnOversizedAnswer(t *testing.T) {
+	e := newStatusEndpoint(t, http.StatusOK, strings.Repeat("x", maxStatusBody+1))
+	var stdout, stderr bytes.Buffer
+
+	code := run([]string{"status", "--listen", e.addr()}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "answer too large (over 4 MiB)") {
+		t.Errorf("stderr = %q, want the oversize message", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+}
+
+func TestStatusCommandReportsTheHTTPStatusOfAnOversizedErrorBody(t *testing.T) {
+	e := newStatusEndpoint(t, http.StatusInternalServerError, strings.Repeat("x", maxStatusBody+1))
+	var stdout, stderr bytes.Buffer
+
+	code := run([]string{"status", "--listen", e.addr()}, &stdout, &stderr)
+
+	if code != 1 || !strings.Contains(stderr.String(), "HTTP 500") {
+		t.Fatalf("code %d, stderr %q, want exit 1 and HTTP 500", code, stderr.String())
+	}
+}

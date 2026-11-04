@@ -220,6 +220,28 @@ func (f *laraplateFixture) pollAgain(gets int) {
 	waitTimers(f.t, f.clk, 1)
 }
 
+// expectWait checks that the provider waits exactly d before its next poll:
+// nothing is polled at d minus one nanosecond, one poll at d.
+func (f *laraplateFixture) expectWait(d time.Duration) {
+	f.t.Helper()
+
+	waitTimers(f.t, f.clk, 1)
+	gets := len(f.be.getsSoFar())
+	f.clk.Advance(d - 1)
+	// A shorter wait fired in Advance: its timer is gone until the poll
+	// ended, so this returns after that poll's request.
+	waitTimers(f.t, f.clk, 1)
+	if got := len(f.be.getsSoFar()); got != gets {
+		f.t.Fatalf("polled before %s", d)
+	}
+	f.clk.Advance(1)
+	f.be.waitGets(f.t, gets+1)
+	waitTimers(f.t, f.clk, 1)
+	if got := len(f.be.getsSoFar()); got != gets+1 {
+		f.t.Fatalf("%d polls within %s, want 1", got-gets, d)
+	}
+}
+
 // providerState is the persisted state of the provider.
 type providerState struct {
 	LastAttempt *struct {
@@ -313,10 +335,13 @@ func TestLaraplateAppliesReportsAndThenAsksWithTheVersion(t *testing.T) {
 // running configuration stays.
 func TestLaraplateRefusesAnOlderVersionOnce(t *testing.T) {
 	f := newLaraplateFixture(t)
+	// The supervisor runs on a clock of its own: its router's flush timer
+	// stays pending for its whole life, and on f.clk it would satisfy the
+	// waits for the provider's poll timer before the provider arms it.
 	sup, err := supervisor.New(supervisor.Config{
 		DataDir:  f.dataDir,
 		Resolver: secrets.NewResolver(secrets.WithLookupEnv(f.lookup)),
-		Clock:    f.clk,
+		Clock:    clock.NewFake(start),
 		Logger:   slog.New(slog.NewJSONHandler(f.logs, nil)),
 	})
 	if err != nil {
@@ -359,6 +384,46 @@ func TestLaraplateRefusesAnOlderVersionOnce(t *testing.T) {
 	if v := sup.AppliedVersion(); v != 5 {
 		t.Fatalf("AppliedVersion() = %d, want 5", v)
 	}
+}
+
+// TestLaraplateBacksOffOnAnOlderActiveVersion is C44: a backend that keeps
+// answering an active document older than the applied one, instead of 304,
+// has it downloaded at every poll. After the one attempt the provider polls
+// less often, the interval doubling up to its maximum, with one warning; a
+// newer version brings the configured interval back.
+func TestLaraplateBacksOffOnAnOlderActiveVersion(t *testing.T) {
+	f := newLaraplateFixture(t)
+	a := newFakeApplier()
+	f.be.setActive(5, doc(5))
+	f.start(a)
+	a.next(t)
+	f.be.waitReports(t, 1)
+
+	f.be.setActive(3, doc(3))
+	a.setOutcome(supervisor.Outcome{Result: supervisor.ResultRejected, Errors: []string{"version: 3 is older than the applied version 5"}})
+	f.expectWait(poll) // attempted once, rejected and reported
+	a.next(t)
+	f.be.waitReports(t, 2)
+
+	for _, wait := range []time.Duration{poll, 2 * poll, 4 * poll, 8 * poll, 16 * poll, provider.MaxStalePollInterval, provider.MaxStalePollInterval} {
+		f.expectWait(wait)
+	}
+	if got := strings.Count(f.logs.String(), "answered again the configuration version last attempted and not applied"); got != 1 {
+		t.Fatalf("%d warnings for the older active version, want 1; logs:\n%s", got, f.logs.String())
+	}
+	if n := a.count(); n != 2 {
+		t.Fatalf("%d applies, want 2: the older version was applied again", n)
+	}
+	if got := f.be.reportsSoFar(); len(got) != 2 {
+		t.Fatalf("the older version was reported again: %v", got)
+	}
+
+	f.be.setActive(6, doc(6))
+	a.setOutcome(supervisor.Outcome{Result: supervisor.ResultApplied})
+	f.expectWait(provider.MaxStalePollInterval)
+	a.next(t)
+	f.be.waitReports(t, 3)
+	f.expectWait(poll)
 }
 
 func TestLaraplateRetriesAFailedReportOnTheNextPoll(t *testing.T) {

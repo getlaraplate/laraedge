@@ -122,3 +122,20 @@ func TestDescribeDecodeErrorKeepsConstantSyntaxErrors(t *testing.T) {
 		t.Errorf("DescribeYAMLError = %q, want %q", got, err.Error())
 	}
 }
+
+func TestUnknownKey(t *testing.T) {
+	tests := []struct {
+		prefix, key, want string
+	}{
+		{"connection.", "retries", "connection.retries: unknown field"},
+		{"connection.auth.", "token", "connection.auth.token: unknown field"},
+		{"connection.", "Token-Abc123", "connection.*: unknown field"},
+		{"connection.", plainToken, "connection.*: unknown field"},
+		{"connection.", "", "connection.*: unknown field"},
+	}
+	for _, tt := range tests {
+		if got := UnknownKey(tt.prefix, tt.key); got == nil || got.Error() != tt.want {
+			t.Errorf("UnknownKey(%q, %q) = %v, want %q", tt.prefix, tt.key, got, tt.want)
+		}
+	}
+}

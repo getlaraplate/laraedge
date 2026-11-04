@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -191,7 +192,7 @@ func NewClient(c *http.Client) (*http.Client, error) {
 	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 	if c == nil {
-		t := http.DefaultTransport.(*http.Transport).Clone()
+		t := defaultTransport()
 		t.Proxy = http.ProxyFromEnvironment
 		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 
@@ -208,13 +209,40 @@ func NewClient(c *http.Client) (*http.Client, error) {
 	return &cp, nil
 }
 
+// defaultTransport returns a clone of http.DefaultTransport, or, when another
+// package replaced it with a RoundTripper that is no *http.Transport, a fresh
+// transport with the same settings as the standard library's.
+func defaultTransport() *http.Transport {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+}
+
 // Run sends the batches of the output until ctx is done, then returns nil;
-// call it once.
+// call it once. When it returns, the idle connections of its client are
+// closed, so that an output stopped by a reload leaves no transport
+// goroutine behind.
 // A batch is settled only from the destination's answer: confirmed on 2xx,
 // split on 413, dropped with a rejected_invalid loss marker on 422 or on a
 // one-record 413; every other answer and every local failure keeps it in
 // flight to be resent identical after a backoff or a suspension.
 func (h *HTTP) Run(ctx context.Context) error {
+	// The client's transport is this output's own, not shared with another
+	// output: NewClient builds one per output when HTTPConfig.Client is nil,
+	// and only tests pass a client. Closing its idle connections touches no
+	// other output.
+	defer h.sender.client.CloseIdleConnections()
+
 	return h.loop.Run(ctx)
 }
 
@@ -241,6 +269,12 @@ func (h *HTTP) ClockOffset() time.Duration {
 // LastConfirmation returns when the last batch was confirmed, zero before any.
 func (h *HTTP) LastConfirmation() time.Time {
 	return h.loop.LastConfirmation()
+}
+
+// SettleFailures returns how many times settling a batch failed
+// (Loop.SettleFailures).
+func (h *HTTP) SettleFailures() uint64 {
+	return h.loop.SettleFailures()
 }
 
 // LastError returns the last error, a short text without secrets, and when

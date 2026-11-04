@@ -1002,3 +1002,68 @@ func mustJSON(t *testing.T, v any) []byte {
 
 	return data
 }
+
+func TestSortMessagesIsNaturalAndStable(t *testing.T) {
+	got := config.SortMessages([]string{
+		"inputs.10.id: is required",
+		"inputs.2.id: is required",
+		"inputs.2.driver: zeta",
+		"inputs.2.driver: alpha",
+		"inputs.2.driver: zeta",
+		"inputs.2: is invalid",
+		"document: first",
+		"inputs.1.name: x",
+		"inputs.1.name2: x",
+	})
+	want := []string{
+		"document: first",
+		"inputs.1.name: x",
+		"inputs.1.name2: x",
+		"inputs.2: is invalid",
+		"inputs.2.driver: zeta",
+		"inputs.2.driver: alpha",
+		"inputs.2.id: is required",
+		"inputs.10.id: is required",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("SortMessages =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestParseOrdersMessagesNaturally(t *testing.T) {
+	doc := base
+	for i := 1; i <= 11; i++ {
+		doc += "  - {type: laraplate-http, url: 'https://x.example.com', token: 'secret://env/T'}\n"
+	}
+	_, msgs, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, m := range msgs {
+		if strings.HasSuffix(m, ".id: is required") {
+			ids = append(ids, m)
+		}
+	}
+	if len(ids) != 11 || ids[1] != "outputs.2.id: is required" || ids[9] != "outputs.10.id: is required" {
+		t.Errorf("messages not in natural order: %q", ids)
+	}
+}
+
+// TestParseOrdersUnknownTransformNamesByName checks that several unknown
+// names in one step come out in name order, not in the schema library's map
+// order. Run with -count=200 to see the old behaviour.
+func TestParseOrdersUnknownTransformNamesByName(t *testing.T) {
+	doc := transformChain(t, "[{alpha: 1, beta: 2, gamma: 3, delta: 4}]")
+
+	_, msgs, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loc := "inputs.0.devices.0.points.0.transforms.0: "
+	want := []string{loc + "must have at most 1 keys", loc + "unknown transform alpha", loc + "unknown transform beta", loc + "unknown transform delta", loc + "unknown transform gamma"}
+	if !slices.Equal(msgs, want) {
+		t.Errorf("messages =\n%s\nwant\n%s", strings.Join(msgs, "\n"), strings.Join(want, "\n"))
+	}
+}

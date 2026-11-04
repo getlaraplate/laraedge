@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/backoff"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
@@ -150,11 +151,14 @@ type Loop struct {
 	reload        chan struct{}
 	reloadPending atomic.Bool
 
+	// settleFailures counts the failed Confirm, Drop and Shrink attempts.
+	settleFailures atomic.Uint64
+
 	// wake is the Sender's Waker channel, nil when it is not a Waker.
 	wake <-chan struct{}
 
 	// Owned by the Run goroutine.
-	backoff    backoff
+	backoff    backoff.Exponential
 	recovering bool
 
 	mu          sync.Mutex
@@ -181,7 +185,6 @@ func NewLoop(cfg LoopConfig) *Loop {
 		log:         cfg.Logger,
 		onReconnect: cfg.OnReconnect,
 		reload:      make(chan struct{}, 1),
-		backoff:     backoff{rand: cfg.Rand},
 		state:       Sending,
 	}
 
@@ -201,9 +204,12 @@ func NewLoop(cfg LoopConfig) *Loop {
 		l.onReconnect = func() {}
 	}
 
-	if l.backoff.rand == nil {
-		l.backoff.rand = rand.Float64
+	draw := cfg.Rand
+	if draw == nil {
+		draw = rand.Float64
 	}
+
+	l.backoff = newBackoff(draw)
 
 	return l
 }
@@ -279,6 +285,7 @@ func (l *Loop) settle(ctx context.Context, b *Batch, out Outcome) {
 // confirm settles b as delivered.
 func (l *Loop) confirm(ctx context.Context, b *Batch, status int) {
 	if err := l.batcher.Confirm(b); err != nil {
+		l.settleFailures.Add(1)
 		l.log.Error("output: cannot settle a delivered batch; it will be resent", "output", l.id, "seq", b.Seq, "error", err)
 		l.recordError("confirm: " + err.Error())
 		l.backOff(ctx, 0)
@@ -293,7 +300,7 @@ func (l *Loop) confirm(ctx context.Context, b *Batch, status int) {
 
 	l.log.Debug("output: batch delivered", attrs...)
 
-	l.backoff.reset()
+	l.backoff.Reset()
 	if l.recovering {
 		l.recovering = false
 		l.onReconnect()
@@ -317,6 +324,7 @@ func (l *Loop) split(ctx context.Context, b *Batch, reason string) {
 
 	n := b.Len() / 2
 	if _, err := l.batcher.Shrink(b, n); err != nil {
+		l.settleFailures.Add(1)
 		l.log.Error("output: cannot split the refused batch; it will be resent", "output", l.id, "seq", b.Seq, "error", err)
 		l.recordError("split: " + err.Error())
 		l.backOff(ctx, 0)
@@ -332,6 +340,7 @@ func (l *Loop) split(ctx context.Context, b *Batch, reason string) {
 // what was done.
 func (l *Loop) drop(ctx context.Context, b *Batch, reason, done string) {
 	if err := l.batcher.Drop(b, model.LossRejectedInvalid); err != nil {
+		l.settleFailures.Add(1)
 		l.log.Error("output: cannot drop the refused batch; it will be resent", "output", l.id, "seq", b.Seq, "error", err)
 		l.recordError("drop: " + err.Error())
 		l.backOff(ctx, 0)
@@ -349,7 +358,7 @@ func (l *Loop) drop(ctx context.Context, b *Batch, reason, done string) {
 
 // backOff waits the next backoff step, at least retryAfter (capped).
 func (l *Loop) backOff(ctx context.Context, retryAfter time.Duration) {
-	wait := max(l.backoff.next(), min(retryAfter, backoffMax))
+	wait := max(l.backoff.Next(), min(retryAfter, backoffMax))
 
 	l.setState(Backoff)
 	l.recovering = true
@@ -447,6 +456,12 @@ func (l *Loop) LastConfirmation() time.Time {
 
 	return l.lastConfirm
 }
+
+// SettleFailures returns how many times settling a batch failed: a Confirm
+// of a delivered batch, or a Drop or a Shrink of a refused one, that could
+// not be applied, each attempt counted. The batch stays in flight and is
+// resent after a backoff; the text is in LastError.
+func (l *Loop) SettleFailures() uint64 { return l.settleFailures.Load() }
 
 // LastError returns the last error, a short text without secrets, and when
 // it happened; empty before any.

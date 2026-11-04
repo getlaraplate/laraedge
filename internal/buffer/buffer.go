@@ -26,6 +26,7 @@ import (
 
 	"github.com/getlaraplate/laraedge/internal/atomicfile"
 	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/lograte"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
@@ -39,6 +40,10 @@ const (
 
 // MaxSegmentSize bounds Options.SegmentSize and a pinned queue segment size.
 const MaxSegmentSize int64 = 1 << 30
+
+// failureLogWindow is the shortest interval between two summaries of the
+// write and drop path's failures.
+const failureLogWindow = time.Minute
 
 const (
 	diskCheckInterval   = time.Second
@@ -154,7 +159,11 @@ type Buffer struct {
 	lossesDirty bool
 	frozen      int // leading markers handed out by PendingLosses: never changed again
 	dropped     map[string]uint64
-	failures    *failureLog
+	failures    *lograte.Reporter
+
+	// unsealedSince is the clock time of the Append of the oldest record not
+	// yet sealed, or earlier: zero when no record waits (UnsealedAge).
+	unsealedSince time.Time
 
 	diskChecked   bool
 	diskCheckedAt time.Time
@@ -221,7 +230,7 @@ func open(dir string, opts Options, h hooks) (*Buffer, error) {
 		hooks:    h,
 		losses:   losses,
 		dropped:  map[string]uint64{},
-		failures: newFailureLog(opts.Logger),
+		failures: lograte.New(opts.Logger, failureLogWindow, "buffer: write and drop failures repeated since the last report"),
 		changed:  make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -240,6 +249,9 @@ func open(dir string, opts Options, h hooks) (*Buffer, error) {
 	}
 
 	b.critical, b.bulk = critical, bulk
+	if critical.unacked+bulk.unacked > 0 {
+		b.unsealedSince = opts.Clock.Now()
+	}
 
 	go b.syncLoop()
 
@@ -341,9 +353,9 @@ func (b *Buffer) Append(r model.Record) error {
 
 	err = b.store(q, frame)
 	if err != nil && !errors.Is(err, errFloorBreached) {
-		b.failures.report(b.opts.Clock.Now(), q.priority.String()+".write_retry", slog.LevelWarn, "buffer: write failed, evicting and retrying once", "queue", q.priority.String(), "error", err)
+		b.failures.Report(b.opts.Clock.Now(), q.priority.String()+".write_retry", slog.LevelWarn, "buffer: write failed, evicting and retrying once", "queue", q.priority.String(), "error", err)
 		if _, evictErr := b.evictOne(); evictErr != nil {
-			b.failures.report(b.opts.Clock.Now(), q.priority.String()+".evict_failed", slog.LevelError, "buffer: eviction after a failed write failed", "queue", q.priority.String(), "error", evictErr)
+			b.failures.Report(b.opts.Clock.Now(), q.priority.String()+".evict_failed", slog.LevelError, "buffer: eviction after a failed write failed", "queue", q.priority.String(), "error", evictErr)
 		}
 
 		if err = b.store(q, frame); err != nil && !errors.Is(err, errFloorBreached) {
@@ -357,6 +369,10 @@ func (b *Buffer) Append(r model.Record) error {
 		b.dropRecord(q.priority, r, "floor_breached", "free disk floor breached by other data", nil)
 
 		return fmt.Errorf("buffer: append to the %s queue: %w", q.priority, errors.Join(ErrDropped, err))
+	}
+
+	if b.unsealedSince.IsZero() {
+		b.unsealedSince = b.opts.Clock.Now()
 	}
 
 	select {
@@ -398,7 +414,7 @@ func (b *Buffer) dropRecord(p model.Priority, r model.Record, kind, why string, 
 		attrs = append(attrs, "error", cause)
 	}
 
-	b.failures.report(now, p.String()+"."+kind, level, "buffer: record dropped", attrs...)
+	b.failures.Report(now, p.String()+"."+kind, level, "buffer: record dropped", attrs...)
 
 	if r.Event != nil {
 		if r.Event.Kind == model.Death {
@@ -429,7 +445,7 @@ func (b *Buffer) dropRecord(p model.Priority, r model.Record, kind, why string, 
 	}
 
 	if err := b.addLossLocked(model.Loss{Priority: p, FromTS: ts, ToTS: ts, Samples: 1, Reason: model.LossBufferFull}); err != nil {
-		b.failures.report(now, "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "reason", why, "error", err)
+		b.failures.Report(now, "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "reason", why, "error", err)
 	}
 }
 
@@ -617,6 +633,12 @@ func (b *Buffer) Read(p model.Priority, from Position, limit int) ([]Entry, erro
 // and deletes the segments wholly before it. upTo at or before the current
 // confirmed position or the head is a no-op; beyond the tail, or not at a
 // record boundary, it is an error.
+//
+// Ack re-reads the frames it acknowledges, by design: that read is what
+// detects and counts a frame corrupted at runtime inside the acknowledged
+// range (TestAckAcrossARuntimeCorruptFrame). A cached record count would
+// skip the read and lose the check; the cost is bounded by one batch of
+// frames, usually served from the page cache.
 func (b *Buffer) Ack(p model.Priority, upTo Position) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -659,6 +681,7 @@ func (b *Buffer) Ack(p model.Priority, upTo Position) error {
 	q.unacked -= min(n, q.unacked)
 	q.oldestValid = false
 	q.deleteWhere(func(s *segment) bool { return s.end() <= q.ack })
+	b.clearUnsealedLocked()
 
 	return nil
 }
@@ -681,8 +704,40 @@ func (b *Buffer) MarkSealed(p model.Priority, upTo Position) error {
 	}
 
 	q.sealed = upTo
+	b.clearUnsealedLocked()
 
 	return nil
+}
+
+// clearUnsealedLocked forgets the unsealed time once neither queue holds a
+// record beyond its sealed mark. A seal that leaves records behind keeps the
+// time of the oldest append: the records left waited at least that long.
+func (b *Buffer) clearUnsealedLocked() {
+	if !b.critical.hasUnsealed() && !b.bulk.hasUnsealed() {
+		b.unsealedSince = time.Time{}
+	}
+}
+
+// UnsealedAge returns how long the oldest record not yet sealed has waited
+// since its Append, measured on the buffer's clock. A seal that leaves
+// records behind keeps the time of the oldest one before it, and the records
+// found at Open count from Open. It is zero when no record waits. The
+// batcher subtracts it from MaxWait.
+//
+// It is exact in neither direction, and the error is latency only, never
+// data: after a Shrink or a Drop lowers the sealed mark, records that already
+// waited are unsealed again with the time cleared, so they can wait a full
+// MaxWait once more; after an eviction or a runtime cut the kept time can be
+// older than any record left, and the next batch may seal at once.
+func (b *Buffer) UnsealedAge() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.unsealedSince.IsZero() {
+		return 0
+	}
+
+	return max(b.opts.Clock.Now().Sub(b.unsealedSince), 0)
 }
 
 // AddLoss records a loss marker (rejected_invalid from outputs; buffer_full
@@ -928,11 +983,11 @@ func (b *Buffer) syncPass() {
 
 	if b.lossesDirty {
 		if err := b.persistLossesLocked(); err != nil {
-			b.failures.report(b.opts.Clock.Now(), "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "pending", len(b.losses), "error", err)
+			b.failures.Report(b.opts.Clock.Now(), "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "pending", len(b.losses), "error", err)
 		}
 	}
 
-	b.failures.flush(b.opts.Clock.Now())
+	b.failures.Flush(b.opts.Clock.Now())
 	b.mu.Unlock()
 
 	if b.hooks.beforeSync != nil {

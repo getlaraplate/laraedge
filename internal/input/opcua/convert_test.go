@@ -1,6 +1,7 @@
 package opcua
 
 import (
+	"encoding/binary"
 	"errors"
 	"math"
 	"strings"
@@ -25,6 +26,19 @@ func mustFloat(t *testing.T, f float64) model.Value {
 	}
 
 	return v
+}
+
+// A negative zero is a zero: the model has one zero, so a sample never carries
+// the sign bit (model.FloatValue).
+func TestConvertNegativeZeroHasNoSign(t *testing.T) {
+	for _, in := range []interface{}{math.Copysign(0, -1), float32(math.Copysign(0, -1))} {
+		for _, typ := range []string{"float32", "float64"} {
+			got, _, err := Convert(goodDV(in), typ)
+			if err != nil || math.Signbit(got.Float) {
+				t.Errorf("Convert(%T -0, %s) = %+v, %v; want +0", in, typ, got, err)
+			}
+		}
+	}
 }
 
 func TestConvertTable(t *testing.T) {
@@ -52,6 +66,11 @@ func TestConvertTable(t *testing.T) {
 		{"int32 -1 to uint16", int32(-1), "uint16", model.IntValue(0), errConvertRange},
 		{"int32 -1 to uint64", int32(-1), "uint64", model.IntValue(0), errConvertRange},
 		{"int64 max to int64", maxInt64, "int64", model.IntValue(maxInt64), nil},
+		{"int64 min to int64", int64(math.MinInt64), "int64", model.IntValue(math.MinInt64), nil},
+		{"int64 min to int16", int64(math.MinInt64), "int16", model.IntValue(0), errConvertRange},
+		{"int64 min to uint64", int64(math.MinInt64), "uint64", model.IntValue(0), errConvertRange},
+		{"int64 min to float64", int64(math.MinInt64), "float64", mustFloat(t, 0), errConvertPrecision},
+		{"int64 min to float32", int64(math.MinInt64), "float32", mustFloat(t, 0), errConvertPrecision},
 		{"int64 to int32 too big", int64(1) << 31, "int32", model.IntValue(0), errConvertRange},
 		{"uint32 max to int32", uint32(math.MaxUint32), "int32", model.IntValue(0), errConvertRange},
 		{"uint32 max to uint32", uint32(math.MaxUint32), "uint32", model.IntValue(math.MaxUint32), nil},
@@ -83,6 +102,9 @@ func TestConvertTable(t *testing.T) {
 		{"+Inf to float64", math.Inf(1), "float64", mustFloat(t, 0), errConvertNotFinite},
 		{"-Inf to float32", math.Inf(-1), "float32", mustFloat(t, 0), errConvertNotFinite},
 		{"float32 NaN to float64", float32(math.NaN()), "float64", mustFloat(t, 0), errConvertNotFinite},
+		{"float64 -0 to float64", math.Copysign(0, -1), "float64", mustFloat(t, 0), nil},
+		{"float32 -0 to float32", float32(math.Copysign(0, -1)), "float32", mustFloat(t, 0), nil},
+		{"float64 -0 to int32", math.Copysign(0, -1), "int32", model.IntValue(0), errConvertType},
 		// float to integer never
 		{"double to int32", 5.0, "int32", model.IntValue(0), errConvertType},
 		{"float to uint16", float32(1), "uint16", model.IntValue(0), errConvertType},
@@ -289,6 +311,28 @@ func TestQuality(t *testing.T) {
 	}
 }
 
+// The library decodes a DateTime before 1677, the OPC UA minimum (one tick)
+// included, and its maximum (MaxInt64 ticks) to a date from 2185-07-21 on, and
+// a date from 1677 to 1969 as it is: none of them is a real reading time.
+func TestTimestampOfDecodedOutOfRangeDateTimes(t *testing.T) {
+	now := time.Date(2026, 10, 21, 9, 30, 0, 0, time.UTC)
+
+	for _, ticks := range []uint64{1, 116444736000000000 - 10000000, math.MaxInt64} {
+		b := make([]byte, 9)
+		b[0] = byte(ua.DataValueSourceTimestamp)
+		binary.LittleEndian.PutUint64(b[1:], ticks)
+
+		var dv ua.DataValue
+		if _, err := dv.Decode(b); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := Timestamp(&dv, now); !got.Equal(now) {
+			t.Errorf("ticks %d decoded as %v: Timestamp = %v, want now %v", ticks, dv.SourceTimestamp, got, now)
+		}
+	}
+}
+
 func TestTimestamp(t *testing.T) {
 	now := time.Date(2026, 10, 21, 9, 30, 0, 0, time.UTC)
 	src := time.Date(2026, 10, 21, 9, 29, 0, 0, time.UTC)
@@ -312,6 +356,11 @@ func TestTimestamp(t *testing.T) {
 		{"nil data value", nil, now, now},
 		{"now in another zone is returned in UTC", &ua.DataValue{}, now.In(zone), now},
 		{"source in another zone is returned in UTC", &ua.DataValue{EncodingMask: ua.DataValueSourceTimestamp, SourceTimestamp: src.In(zone)}, now, src},
+		{"source before 1970 falls back to the server", &ua.DataValue{EncodingMask: ua.DataValueSourceTimestamp | ua.DataValueServerTimestamp, SourceTimestamp: time.Date(1969, 12, 31, 23, 59, 59, 0, time.UTC), ServerTimestamp: srv}, now, srv},
+		{"source and server before 1970 fall back to now", &ua.DataValue{EncodingMask: ua.DataValueSourceTimestamp | ua.DataValueServerTimestamp, SourceTimestamp: time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC), ServerTimestamp: time.Date(1969, 1, 1, 0, 0, 0, 0, time.UTC)}, now, now},
+		{"the Unix epoch itself is kept", &ua.DataValue{EncodingMask: ua.DataValueSourceTimestamp, SourceTimestamp: time.Unix(0, 0)}, now, time.Unix(0, 0)},
+		{"source on the wrap floor falls back to the server", &ua.DataValue{EncodingMask: ua.DataValueSourceTimestamp | ua.DataValueServerTimestamp, SourceTimestamp: time.Date(2185, 7, 21, 0, 0, 0, 0, time.UTC), ServerTimestamp: srv}, now, srv},
+		{"source just below the wrap floor is kept", &ua.DataValue{EncodingMask: ua.DataValueSourceTimestamp, SourceTimestamp: time.Date(2185, 7, 20, 23, 59, 59, 0, time.UTC)}, now, time.Date(2185, 7, 20, 23, 59, 59, 0, time.UTC)},
 	}
 
 	for _, tc := range tests {

@@ -92,13 +92,21 @@ The scenario (at most 1 MiB, unknown keys refused; see `examples/simulated/scena
 | `scrap_rate` | `0` | probability, 0 to 1, that a part is scrap (`scrap_count`), else good (`good_count`) |
 | `measurements` | | `{signal, mean, stddev, unit}` drawn once per completed part; the name is not `state`, `good_count` or `scrap_count`; `unit` is informative (the point's `unit` is reported) |
 
+A `scenario_file` larger than 1 MiB, or one that is not a valid scenario, is refused when the document
+is checked (`config validate`, or the apply, which rejects the document), with the message
+`connection.scenario_file: <path> is larger than 1 MiB` naming the file. A file that cannot be opened
+or read when the document is checked fails the input's start instead, so a file that appears later is
+picked up by the next start.
+
 ### The `modbus` driver
 
 Reads coils, discrete inputs, input registers and holding registers from a Modbus device or gateway, by
 polling. The driver is read-only: it sends only the four read functions (1, 2, 3, 4), never a write.
 `examples/modbus` is a complete document.
 
-**Connection.** An unknown field is an error here, named with its path (`connection.<key>: unknown field`).
+**Connection.** An unknown field is an error here, named with its path (`connection.<key>: unknown field`;
+a key that is not snake_case, at most 32 characters, shows as `*`, so a secret written as a key is not
+repeated).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -248,15 +256,17 @@ answer.
   baud with a turnaround of up to about 700 ms.
 
 **Serial port.** For `rtu` the port is opened when the input starts, as the one local resource the driver
-needs: a port that cannot be opened (wrong path, no permission) fails the start with `cannot open the
-serial port` (the path is not repeated), so the document is `rolled_back` and the previous one keeps
-running. On Linux the user running the agent usually needs the `dialout` group (or the group that owns
-the device). A port that fails later is opened again in the background, like a lost network connection.
-`config validate` checks the serial fields but cannot open the port; `probe` opens it itself: stop the
-agent before probing an `rtu` input, because both would read the same port and corrupt each other's
-frames (on Windows the second open is refused). For the same reason two inputs must never name the same
-`device`: on Linux both opens succeed and the two inputs corrupt each other's frames. A real serial port
-is not exercised by the automated tests (see "Known limits of this build"); `rtuovertcp` is.
+needs: a port that cannot be opened fails the start with `cannot open the serial port: it does not exist`
+(wrong path), `cannot open the serial port: permission denied` (no permission) or plain `cannot open the
+serial port` (any other failure; the path is never repeated), so the document is `rolled_back` and the
+previous one keeps running. On Linux the user running the agent usually needs the `dialout` group (or
+the group that owns the device). A port that fails later is opened again in the background, like a lost
+network connection. `config validate` checks the serial fields but cannot open the port; `probe` opens
+it itself: stop the agent before probing an `rtu` input, because both would read the same port and
+corrupt each other's frames (on Windows the second open is refused). For the same reason two inputs
+must never name the same `device`: on Linux both opens succeed and the two inputs corrupt each other's
+frames. A real serial port is not exercised by the automated tests (see "Known limits of this build");
+`rtuovertcp` is.
 
 **Health.** `/status` shows, for the input, `connected` (true while the connection to the device is up)
 and `read_errors` (the counts since the input was last started, always the four kinds `timeout`,
@@ -274,7 +284,9 @@ Reads variables of an OPC UA server, by subscription or by polling. The driver i
 complete document; [USAGE.md](USAGE.md#opc-ua-servers) describes the `opcua trust`, `browse` and `probe`
 commands that go with it.
 
-**Connection.** An unknown field in `connection` or in `auth` is an error, named with its path (`connection.<key>: unknown field`).
+**Connection.** An unknown field in `connection` or in `auth` is an error, named with its path
+(`connection.<key>: unknown field`; a key that is not snake_case, at most 32 characters, shows as `*`, so a
+secret written as a key is not repeated).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -317,14 +329,32 @@ characters. Only the leaf certificate is stored and compared.
   and the host name as alternative names. It is never renewed and its expiry is not checked; to replace it, stop
   the agent and delete the `own/` directory. Most servers refuse a client certificate they were not told to
   trust: add `own/cert.der` to the list of trusted client certificates of the server. The key file mode
-  `0600` is a no-op on Windows: protect `data_dir` with ACLs.
+  `0600` is a no-op on Windows: protect `data_dir` with ACLs. On Linux and the other Unix systems a
+  `key.pem` whose mode grants anything beyond `0600` (readable by the group or by others) is refused, and
+  the start of the input fails with `opcua pki: <path> has mode 0640, want 0600 or narrower (chmod 600
+  it)`: another user may have read the key, so either `chmod 600` it or delete `own/` for a new pair.
+- **Leftovers of an interrupted run.** The pair is written into a temporary `own-<number>.tmp` directory
+  next to `own/` and then renamed. One that a crash left behind (it can hold a key) is removed whenever an
+  `opcua` input, `browse` or `probe` starts, once it is more than an hour old: a younger one may be a
+  generation still running. A directory whose time is in the future (the clock was set back) is removed
+  only once the clock is an hour past that time. Each removed directory gets one `WARN` naming it: `opcua
+  pki: removed a temporary own certificate directory left by an interrupted run`; inputs that start
+  together report it once, because each first claims the directory by renaming it to
+  `own-<number>.tmp.sweep-<claim time>-<random>` and only the one whose rename succeeds removes it. A
+  claimed name a crash leaves behind is removed the same way an hour after the claim; a claim time that is
+  not a real time (beyond any clock) never counts as an hour old. A directory replaced
+  by something else while it was being claimed is left in place, with a `WARN` naming it (`... changed
+  while it was claimed; left in place`); one already gone once claimed is skipped silently. Only plain directories of those exact names directly under `pki/`
+  are removed, never a symlink, junction or mount point, nor what it points to.
 - **The server's certificate is trusted explicitly.** With a policy other than `None`, at every connect the
   agent discovers the server's endpoints, takes the one for the policy and mode, computes the thumbprint of
-  its certificate and goes on only when `trusted/<thumbprint>.der` exists. Otherwise the attempt fails (a
-  `connection` error), the certificate is stored in `rejected/`, and one `WARN` names the input, the thumbprint
-  and the command to run (`laraplate-edge opcua trust <input>`). That warning comes once per thumbprint per run
-  of the input, not at every retry. There is no certificate chain or revocation check: your decision on the
-  thumbprint is the whole trust. Its expiry is shown by `opcua trust`, not enforced.
+  its certificate and goes on only when `trusted/<thumbprint>.der` exists and holds a certificate with that
+  thumbprint (a file whose content does not match its name is not trusted, and is left in place; `opcua
+  trust --list` names it). Otherwise the attempt fails (a `connection` error), the certificate is stored in
+  `rejected/`, and one `WARN` names the input, the thumbprint and the command to run (`laraplate-edge opcua
+  trust <input>`). That warning comes once per thumbprint per run of the input, not at every retry. There
+  is no certificate chain or revocation check: your decision on the thumbprint is the whole trust. Its
+  expiry is shown by `opcua trust`, not enforced.
 - **A newly trusted certificate is picked up at the next retry, without restarting the agent.** The
   retries follow the reconnection backoff (up to 1 minute). A server that was reinstalled, or whose
   certificate was renewed, presents another thumbprint: it is untrusted again until you trust it. The old
@@ -399,7 +429,9 @@ Uncertain is `uncertain` (its value is kept), Bad is `bad`. A Bad status is the 
 failed conversion: the sample is `bad`, carries the zero of the kind, whatever the server sent with it, and
 counts as `exception`, not `decode`. A Good or Uncertain status without a value is `bad` with a `decode` error.
 The sample time is the server's source timestamp when the value carries one, else its server timestamp, else
-the agent clock.
+the agent clock. A timestamp before 1970, or from 2185-07-21 on (what the OPC UA library makes of a date before
+1677 and of the protocol's minimum and maximum dates), counts as absent: a server sends such a time for a clock
+that was never set.
 
 **Reconnection and liveness.** Starting the input opens only local resources (the certificates) and returns;
 the server is connected in the background, so an unreachable or untrusted server is never a failing start:
@@ -656,7 +688,7 @@ written atomically (directory mode `0700`, file `0600`) on every count:
 | `route.include` | no | `["*"]` | patterns matched against `device/signal` (Go `path.Match`: `*`, `?`, `[...]`). `*` alone matches everything; a pattern without `/` means `<pattern>/*`. A device's `birth` and `death` go to every output routing at least one of its signals, and the `birth` lists only those. |
 | `batch.max_samples` | no | `1000` | records per batch, 1 to 5000 (the backend default of `mes.machine.max_samples`) |
 | `batch.max_body` | no | `1024KiB` | bytes per request body, at most `1024KiB` (`mes.machine.max_body_kb`) |
-| `batch.max_wait` | no | `2s` | how long a batch waits to fill, from its first record |
+| `batch.max_wait` | no | `2s` | how long a batch waits to fill, from the moment its first record entered the buffer |
 | `buffer.max_size` | no | `1GiB` | bytes both queues of the output may use on disk, at least `32MiB` (two segments of 16 MiB) |
 | `buffer.min_free_percent` | no | `5` | share of the disk kept free, above 0 and at most 50 |
 | `buffer.fsync_interval` | no | `200ms` | group sync period of written records |
@@ -810,9 +842,9 @@ What the agent does with it:
   of the declared `type`, is routed to the outputs like a machine sample: it keeps the plugin's `ts` and
   quality and takes the declared `priority`. Anything else is refused, never routed, and counted
   (`refused` in `/status`), checked in this order: an invalid sample (a missing or malformed `ts`, an
-  unspecified quality or priority, no value or a float that is not finite, an empty device or signal),
-  then a device it did not declare or an undeclared signal of a declared device, then a declared signal
-  with a value of another kind.
+  unspecified quality or priority, no value, a float that is not finite or a string that is not valid
+  UTF-8, an empty device or signal), then a device it did not declare or an undeclared signal of a
+  declared device, then a declared signal with a value of another kind.
 - **Births and deaths.** The agent, not the plugin, sends the `birth` of the derived devices, within a
   second of the processor's stream to the plugin opening. A derived device is alive while that stream
   is up, whether or not it sends samples. When the stream goes down (the plugin died, restarts, or
@@ -1005,6 +1037,11 @@ is exact, but its `ts` range can span records that are still in the buffer.
   served on the agent's clock: a device clock far from the agent's shifts them, and a backward step of
   the agent's clock delays a `heartbeat` by the size of the step.
 - `valid_range` compares integers as floats, exactly up to 2^53 in magnitude.
+- After a corrupt record is found while the agent runs, the buffer counts its records again. A segment
+  file it cannot open at that moment (an I/O error, too many open files) keeps its records, which are
+  still sent, but they are left out of the `records` count of `/status` and of the metrics until the
+  next count or restart; with the count at 0 the output seals the next batch only on the next incoming
+  record. The `ERROR` "cannot open a segment to count its records" names the queue and the segment.
 - Every counted edge of an `edge_counter` writes and syncs the input's state file while the input's
   transform processor holds its lock: the other signals of that input wait for the write, tens of
   milliseconds on an SD card. A fast pulse train on a slow disk delays the input's samples accordingly.

@@ -34,6 +34,9 @@ type fixture struct {
 	be      *backend
 	logs    *lockedBuffer
 	sup     *Supervisor
+	// baseTimers is the number of timers pending before any component runs:
+	// the router's flush loop.
+	baseTimers int
 }
 
 type fixtureOption func(*Config)
@@ -78,6 +81,10 @@ func newFixture(t *testing.T, opts ...fixtureOption) *fixture {
 		t.Fatalf("New() = %v", err)
 	}
 	f.sup = sup
+	// The router's flush loop keeps one timer pending for the whole life of
+	// the supervisor; the waits below count the timers above it.
+	f.clk.BlockUntil(t, 1)
+	f.baseTimers = f.clk.PendingTimers()
 
 	// A poller reads the concurrent accessors for the whole test (-race).
 	ctx, cancel := context.WithCancel(context.Background())
@@ -87,6 +94,7 @@ func newFixture(t *testing.T, opts ...fixtureOption) *fixture {
 		for ctx.Err() == nil {
 			_ = sup.Status()
 			_ = sup.AppliedVersion()
+			// Hammers the accessors on purpose for the race detector; not a wait.
 			runtime.Gosched()
 		}
 	}()
@@ -221,6 +229,65 @@ func (f *fixture) apply(doc config.Document) Outcome {
 	return out
 }
 
+// applyResult is what Apply returned, sent by applyAsync.
+type applyResult struct {
+	out Outcome
+	err error
+}
+
+// applyAsync applies doc in a goroutine and sends what Apply returned on the
+// channel it returns: the test goroutine checks the error (outcome), since
+// t.Fatal may not be called from another goroutine.
+func (f *fixture) applyAsync(doc config.Document) <-chan applyResult {
+	done := make(chan applyResult, 1)
+	go func() {
+		out, err := f.sup.Apply(f.t.Context(), doc)
+		done <- applyResult{out: out, err: err}
+	}()
+
+	return done
+}
+
+// stepSeen installs a trace that closes the returned channel the first time
+// the supervisor reaches step. Install it before the Apply it observes.
+func (f *fixture) stepSeen(step string) <-chan struct{} {
+	seen := make(chan struct{})
+	var once sync.Once
+	f.sup.trace = func(s string) {
+		if s == step {
+			once.Do(func() { close(seen) })
+		}
+	}
+
+	return seen
+}
+
+// expireAbandonedWait waits until the rollback waits for the abandoned start
+// of an input (seen, from stepSeen), then lets that wait run out, so the
+// rollback restarts the input while the abandoned start still runs.
+func (f *fixture) expireAbandonedWait(seen <-chan struct{}) {
+	f.t.Helper()
+
+	select {
+	case <-seen:
+	case <-time.After(guard):
+		f.t.Fatal("the rollback did not wait for the abandoned start")
+	}
+	f.clk.Advance(DefaultStartTimeout)
+}
+
+// outcome returns the outcome of res, failing the test on an Apply error.
+// Call it from the test goroutine.
+func (f *fixture) outcome(res applyResult) Outcome {
+	f.t.Helper()
+
+	if res.err != nil {
+		f.t.Fatalf("Apply() error = %v", res.err)
+	}
+
+	return res.out
+}
+
 func (f *fixture) mustApply(doc config.Document) {
 	f.t.Helper()
 
@@ -245,7 +312,24 @@ func (f *fixture) waitStatus(what string, cond func(Status) bool) {
 		if time.Now().After(deadline) {
 			f.t.Fatalf("status: %s not reached: %+v", what, f.sup.Status())
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// advanceUntil moves the clock one minute at a time, each time once the output
+// waits on a backoff timer, until cond holds. After each step it waits for the
+// output either to satisfy cond or to arm its next timer.
+func (f *fixture) advanceUntil(what string, cond func() bool, got func() string) {
+	f.t.Helper()
+
+	deadline := time.Now().Add(guard)
+	for !cond() {
+		if time.Now().After(deadline) {
+			f.t.Fatalf("%s not reached; main received %s", what, got())
+		}
+		f.clk.BlockUntil(f.t, f.baseTimers+1)
+		f.clk.Advance(time.Minute)
+		waitFor(f.t, what, func() bool { return cond() || f.clk.PendingTimers() > f.baseTimers })
 	}
 }
 
@@ -418,12 +502,12 @@ func TestApplyRollsBackAFailingInput(t *testing.T) {
 			name:    "start timeout",
 			prepare: func(d *fakeDriver) { d.hang["b"] = true },
 			apply: func(f *fixture, doc config.Document) Outcome {
-				done := make(chan Outcome, 1)
-				go func() { done <- f.apply(doc) }()
+				done := f.applyAsync(doc)
 				f.drv.waitCalled(f.t, "b")
 				f.clk.Advance(DefaultStartTimeout)
 				select {
-				case out := <-done:
+				case res := <-done:
+					out := f.outcome(res)
 					return out
 				case <-time.After(guard):
 					f.t.Fatal("Apply did not return after the start timeout")
@@ -613,14 +697,8 @@ func TestBirthsAgainOnOutputReconnection(t *testing.T) {
 	f.waitStatus("main backing off", outputState("main", "backoff"))
 
 	// Move the clock until the backoff ends and the batch is resent.
-	deadline := time.Now().Add(guard)
-	for len(f.be.got("main")) < 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("main received %q, want the birth resent and the reconnection birth", f.be.got("main"))
-		}
-		f.clk.Advance(time.Minute)
-		runtime.Gosched()
-	}
+	f.advanceUntil("the birth resent and the reconnection birth", func() bool { return len(f.be.got("main")) >= 2 },
+		func() string { return fmt.Sprintf("%q", f.be.got("main")) })
 
 	if got := f.be.got("main"); !reflect.DeepEqual(got, []string{birthA1, birthA1}) {
 		t.Fatalf("main received %q, want the birth then the reconnection birth", got)
@@ -741,14 +819,8 @@ func TestRollbackOfAChangedOutputKeepsItsBufferAndSeq(t *testing.T) {
 		t.Fatalf("main runs %s, want the previous configuration", got)
 	}
 
-	deadline := time.Now().Add(guard)
-	for !slices.Contains(f.be.got("main"), "a1/state") {
-		if time.Now().After(deadline) {
-			t.Fatalf("main received %q, want the buffered sample after the rollback", f.be.got("main"))
-		}
-		f.clk.Advance(time.Minute)
-		runtime.Gosched()
-	}
+	f.advanceUntil("the buffered sample after the rollback", func() bool { return slices.Contains(f.be.got("main"), "a1/state") },
+		func() string { return fmt.Sprintf("%q", f.be.got("main")) })
 	seqs := f.be.seqsOf("main")
 	for i := 1; i < len(seqs); i++ {
 		if seqs[i] != seqs[i-1]+1 {
@@ -763,10 +835,7 @@ func TestBirthsOnlyForLiveInputs(t *testing.T) {
 	f.be.waitItem(t, "main", birthA1)
 
 	f.drv.hang["b"] = true
-	done := make(chan Outcome, 1)
-	go func() {
-		done <- f.apply(f.document(2, []inSpec{{id: "a", devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}}, []outSpec{{id: "main"}}))
-	}()
+	done := f.applyAsync(f.document(2, []inSpec{{id: "a", devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}}, []outSpec{{id: "main"}}))
 	f.drv.waitCalled(t, "b")
 
 	// An output reconnecting while b is still starting.
@@ -774,7 +843,8 @@ func TestBirthsOnlyForLiveInputs(t *testing.T) {
 
 	f.clk.Advance(DefaultStartTimeout)
 	select {
-	case out := <-done:
+	case res := <-done:
+		out := f.outcome(res)
 		if out.Result != ResultRolledBack {
 			t.Fatalf("Apply() = %+v, want rolled_back", out)
 		}
@@ -989,6 +1059,243 @@ func TestInputEmittingAfterAFailedStartRegistersNothing(t *testing.T) {
 	}
 }
 
+// TestRollbackWaitsForTheAbandonedStartOfTheSameInput: a changed input that
+// holds an exclusive resource, as a serial port, does not start within the
+// timeout and is abandoned; the rollback restarts the previous input only once
+// the abandoned start has returned and closed, so the restart finds the
+// resource free (C43).
+func TestRollbackWaitsForTheAbandonedStartOfTheSameInput(t *testing.T) {
+	f := newFixture(t)
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(f.drv.blockRelease) }) })
+	f.drv.exclusive["a"] = true
+
+	f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	f.be.waitItem(t, "main", birthA1)
+
+	waiting := f.stepSeen("wait abandoned input a")
+
+	f.drv.blockNth["a"] = 2
+	done := f.applyAsync(f.document(2, []inSpec{{id: "a", variant: 1, devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	select {
+	case <-f.drv.blockStarted:
+	case <-time.After(guard):
+		t.Fatal("the changed input a did not start")
+	}
+	f.clk.Advance(DefaultStartTimeout)
+
+	select {
+	case <-waiting:
+	case res := <-done:
+		t.Fatalf("Apply() = %+v before the abandoned start of a closed", f.outcome(res))
+	case <-time.After(guard):
+		t.Fatal("the rollback did not wait for the abandoned start of a")
+	}
+	if n := f.drv.startCount("a"); n != 2 {
+		t.Fatalf("a was started %d times while its abandoned start ran, want 2", n)
+	}
+	release.Do(func() { close(f.drv.blockRelease) })
+
+	var out Outcome
+	select {
+	case res := <-done:
+		out = f.outcome(res)
+	case <-time.After(guard):
+		t.Fatal("Apply did not return after the abandoned start closed")
+	}
+	if out.Result != ResultRolledBack {
+		t.Fatalf("Apply() = %+v, want rolled_back", out)
+	}
+	for _, e := range out.Errors {
+		if strings.Contains(e, "rollback") {
+			t.Fatalf("Apply() errors = %q: the rollback did not restart a", out.Errors)
+		}
+	}
+	if got := f.drv.instance(t, "a").cfg.Raw; string(got) != string(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, nil).Inputs[0].Raw) {
+		t.Fatalf("input a runs %s, want the previous configuration", got)
+	}
+}
+
+// recv waits for ch to be closed or to deliver, failing the test after guard.
+func recv[T any](t *testing.T, ch <-chan T, what string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	case <-time.After(guard):
+		t.Fatalf("%s did not happen", what)
+	}
+}
+
+// TestAnExpiredAbandonedWaitIsNotWaitedAgain: once the rollback's wait for an
+// abandoned start ran out, a later document restarting the same input does
+// not wait for that start again.
+func TestAnExpiredAbandonedWaitIsNotWaitedAgain(t *testing.T) {
+	f := newFixture(t)
+	f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+
+	g := f.drv.gate(t, "a", 2)
+	waiting := f.stepSeen("wait abandoned input a")
+	done := f.applyAsync(f.document(2, []inSpec{{id: "a", variant: 1, devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	recv(t, g.started, "the changed start of a")
+	f.clk.Advance(DefaultStartTimeout)
+	f.expireAbandonedWait(waiting)
+	select {
+	case res := <-done:
+		if out := f.outcome(res); out.Result != ResultRolledBack {
+			t.Fatalf("Apply() = %+v, want rolled_back", out)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return")
+	}
+
+	// The abandoned start still runs.
+	again := f.stepSeen("wait abandoned input a")
+	done = f.applyAsync(f.document(3, []inSpec{{id: "a", variant: 2, devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	select {
+	case res := <-done:
+		if out := f.outcome(res); out.Result != ResultApplied {
+			t.Fatalf("Apply() = %+v, want applied", out)
+		}
+	case <-again:
+		t.Fatal("the next start of a waited again for the abandoned start whose wait ran out")
+	case <-time.After(guard):
+		t.Fatal("Apply did not return")
+	}
+
+	g.open()
+	recv(t, g.closed, "the close of the abandoned start")
+}
+
+// TestEveryAbandonedStartOfAnInputIsKept: a second start of an input
+// abandoned while the first abandoned one still runs does not hide the first;
+// both are waited for, and both leave once they closed.
+func TestEveryAbandonedStartOfAnInputIsKept(t *testing.T) {
+	f := newFixture(t)
+	b := inSpec{id: "b", devices: []string{"b1"}}
+	a := inSpec{id: "a", devices: []string{"a1"}}
+	f.mustApply(f.document(1, []inSpec{b}, []outSpec{{id: "main"}}))
+
+	// a is new: its abandoned start is not restarted by the rollback.
+	g1 := f.drv.gate(t, "a", 1)
+	done := f.applyAsync(f.document(2, []inSpec{b, a}, []outSpec{{id: "main"}}))
+	recv(t, g1.started, "the first start of a")
+	f.clk.Advance(DefaultStartTimeout)
+	select {
+	case res := <-done:
+		if out := f.outcome(res); out.Result != ResultRolledBack {
+			t.Fatalf("Apply() = %+v, want rolled_back", out)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return")
+	}
+
+	// The next start of a waits for the first; a shutdown ends that wait and
+	// abandons the second start too.
+	g2 := f.drv.gate(t, "a", 2)
+	waiting := f.stepSeen("wait abandoned input a")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cancelled := make(chan error, 1)
+	go func() {
+		_, err := f.sup.Apply(ctx, f.document(3, []inSpec{b, a}, []outSpec{{id: "main"}}))
+		cancelled <- err
+	}()
+	recv(t, waiting, "the wait for the first abandoned start")
+	cancel()
+	recv(t, g2.started, "the second start of a")
+	select {
+	case err := <-cancelled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Apply() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return after cancel")
+	}
+
+	pending := func() int {
+		f.sup.mu.Lock()
+		defer f.sup.mu.Unlock()
+
+		return len(f.sup.abandoned["a"])
+	}
+	if n := pending(); n != 2 {
+		t.Fatalf("%d abandoned starts of a recorded, want 2", n)
+	}
+
+	g1.open()
+	g2.open()
+	recv(t, g1.closed, "the close of the first abandoned start")
+	recv(t, g2.closed, "the close of the second abandoned start")
+	waitFor(t, "the abandoned starts to leave", func() bool { return pending() == 0 })
+	f.mustApply(f.document(4, []inSpec{b, a}, []outSpec{{id: "main"}}))
+}
+
+// TestWaitAbandonedWaitsForEveryStartWithinOneTimeout: the wait ends when
+// every abandoned start closed, or after one start timeout in total, which
+// drops the starts still running and warns.
+func TestWaitAbandonedWaitsForEveryStartWithinOneTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		closeFirst  bool
+		closeSecond bool
+		wantWarn    bool
+		wantStill   int
+	}{
+		{name: "every start closed", closeFirst: true, closeSecond: true},
+		{name: "the first still runs", closeSecond: true, wantWarn: true, wantStill: 1},
+		{name: "the second still runs", closeFirst: true, wantWarn: true, wantStill: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			first, second := make(chan struct{}), make(chan struct{})
+			f.sup.mu.Lock()
+			f.sup.abandoned["x"] = []chan struct{}{first, second}
+			f.sup.mu.Unlock()
+
+			waiting := f.stepSeen("wait abandoned input x")
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				f.sup.waitAbandoned(t.Context(), "x")
+			}()
+			recv(t, waiting, "the wait")
+			// As a start's cleanup does: leave abandoned, then close.
+			closeStart := func(c chan struct{}) {
+				f.sup.mu.Lock()
+				f.sup.dropAbandoned("x", c)
+				close(c)
+				f.sup.mu.Unlock()
+			}
+			if tt.closeFirst {
+				closeStart(first)
+			}
+			if tt.closeSecond {
+				closeStart(second)
+			}
+			if tt.wantWarn {
+				f.clk.Advance(DefaultStartTimeout)
+			}
+			recv(t, done, "the end of the wait")
+
+			warned := strings.Contains(f.logs.String(), "an abandoned start of the input has not returned")
+			if warned != tt.wantWarn {
+				t.Fatalf("warned = %v, want %v; logs:\n%s", warned, tt.wantWarn, f.logs.String())
+			}
+			if tt.wantWarn && !strings.Contains(f.logs.String(), fmt.Sprintf(`"still_running":%d`, tt.wantStill)) {
+				t.Fatalf("want still_running=%d in the warning; logs:\n%s", tt.wantStill, f.logs.String())
+			}
+			f.sup.mu.Lock()
+			left := len(f.sup.abandoned["x"])
+			f.sup.mu.Unlock()
+			if left != 0 {
+				t.Fatalf("%d abandoned starts left after the wait, want 0", left)
+			}
+		})
+	}
+}
+
 // TestAbandonedStartDoesNotUnregisterTheRestoredInput: a changed input that
 // does not start within the timeout is abandoned and the previous one is
 // restarted by the rollback; when the abandoned Start returns later, its
@@ -1003,18 +1310,20 @@ func TestAbandonedStartDoesNotUnregisterTheRestoredInput(t *testing.T) {
 	f.be.waitItem(t, "main", birthA1)
 
 	f.drv.blockNth["a"] = 2
-	done := make(chan Outcome, 1)
-	go func() {
-		done <- f.apply(f.document(2, []inSpec{{id: "a", variant: 1, devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
-	}()
+	waiting := f.stepSeen("wait abandoned input a")
+	done := f.applyAsync(f.document(2, []inSpec{{id: "a", variant: 1, devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
 	select {
 	case <-f.drv.blockStarted:
 	case <-time.After(guard):
 		t.Fatal("the changed input a did not start")
 	}
 	f.clk.Advance(DefaultStartTimeout)
+	// The abandoned start does not return within the rollback's wait: a is
+	// restarted while it still runs (C43).
+	f.expireAbandonedWait(waiting)
 	select {
-	case out := <-done:
+	case res := <-done:
+		out := f.outcome(res)
 		if out.Result != ResultRolledBack {
 			t.Fatalf("Apply() = %+v, want rolled_back", out)
 		}
@@ -1038,6 +1347,9 @@ func TestAbandonedStartDoesNotUnregisterTheRestoredInput(t *testing.T) {
 	a.send("a1", "count")
 
 	got := f.be.waitItem(t, "main", "a1/count")
+	if !strings.Contains(f.logs.String(), "an abandoned start of the input has not returned") {
+		t.Errorf("no warning for the restart over a running abandoned start; logs:\n%s", f.logs.String())
+	}
 	if n := countItems(got, birthA1); n != 3 {
 		t.Errorf("main received %q: %d births of a1, want 3 (start, rollback, BirthTo)", got, n)
 	}

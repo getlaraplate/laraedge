@@ -479,6 +479,8 @@ func (r rangeStep) Apply(s model.Sample) ([]model.Sample, error) {
 	return []model.Sample{s}, nil
 }
 
+// buildValidRange compares integers through float64, exact up to 2^53 in
+// magnitude (docs/CONFIGURATION.md, valid_range).
 func buildValidRange(c buildContext) (Step, error) {
 	obj, err := objectParam(c.Params, "min", "max")
 	if err != nil {

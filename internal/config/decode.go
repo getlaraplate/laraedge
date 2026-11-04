@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,57 @@ func (p path) String() string {
 }
 
 func (p path) msg(text string) string { return p.String() + ": " + text }
+
+// sortMessages drops repeated messages and orders the rest by the location
+// they start with, segment by segment: segments that are both whole numbers
+// compare as numbers, so inputs.2 comes before inputs.10; any other pair
+// compares as text. Messages on the same location keep the order they were
+// produced in.
+func sortMessages(msgs []string) []string {
+	seen := make(map[string]struct{}, len(msgs))
+	out := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		if _, dup := seen[m]; dup {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	slices.SortStableFunc(out, func(a, b string) int {
+		return comparePaths(messagePath(a), messagePath(b))
+	})
+	return out
+}
+
+func messagePath(msg string) string {
+	loc, _, _ := strings.Cut(msg, ": ")
+	return loc
+}
+
+func comparePaths(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		if c := compareSegments(as[i], bs[i]); c != 0 {
+			return c
+		}
+	}
+	return cmp.Compare(len(as), len(bs))
+}
+
+func isWholeNumber(s string) bool { return s != "" && strings.Trim(s, "0123456789") == "" }
+
+// compareSegments compares two whole numbers by value without parsing them,
+// so no digit string can overflow.
+func compareSegments(a, b string) int {
+	if !isWholeNumber(a) || !isWholeNumber(b) {
+		return strings.Compare(a, b)
+	}
+	a, b = strings.TrimLeft(a, "0"), strings.TrimLeft(b, "0")
+	if c := cmp.Compare(len(a), len(b)); c != 0 {
+		return c
+	}
+	return strings.Compare(a, b)
+}
 
 func safeToken(token string) string {
 	if token != "" && strings.Trim(token, "0123456789") == "" {

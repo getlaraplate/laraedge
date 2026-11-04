@@ -74,13 +74,17 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		w.sample("transform_errors_total", float64(in.TransformErrors), "input", in.ID)
 	}
 
+	// A series that ends is stale to Prometheus. The health series are kept
+	// only for an input that runs and reports: the supervisor keeps no health
+	// of a failed or removed input, and input_up (0 for a failed one) is the
+	// series to alert on. Decision of the deferred-minors cleanup (C30, C31).
 	if reporting := reportingInputs(st.Inputs); len(reporting) > 0 {
-		w.family("input_connected", "gauge", "1 when the input's connection to the machine is up, 0 when it is down; only inputs that keep a connection.")
+		w.family("input_connected", "gauge", "1 when the input's connection to the machine is up, 0 when it is down; only inputs that run and keep a connection; the series of an input that failed or was removed ends, so alert on input_up for a failed input.")
 		for _, in := range reporting {
 			w.sample("input_connected", boolValue(*in.Connected), "input", in.ID)
 		}
 
-		w.family("input_read_errors_total", "counter", "Read errors of the input since it was last started, by kind: timeout, connection, exception, decode; reset to 0 when the input restarts after a configuration change or a rollback.")
+		w.family("input_read_errors_total", "counter", "Read errors of the input since it was last started, by kind: timeout, connection, exception, decode; reset to 0 when the input restarts after a configuration change or a rollback; like input_connected, the series of an input that failed or was removed ends.")
 		for _, in := range reporting {
 			for _, kind := range readErrorKinds(in.ReadErrors) {
 				w.sample("input_read_errors_total", float64(in.ReadErrors[kind]), "input", in.ID, "kind", kind)
@@ -174,6 +178,11 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 	w.family("last_error_timestamp_seconds", "gauge", "Unix time of the last error of the output, 0 when none; the text is in /status.")
 	for _, out := range st.Outputs {
 		w.sample("last_error_timestamp_seconds", unixSeconds(out.LastErrorAt), "output", out.ID)
+	}
+
+	w.family("output_settle_failures_total", "counter", "Failed attempts to settle a batch (to acknowledge a delivered batch in the buffer, or to save the loss marker or the split of a batch the destination refused), since the output started; the batch stays in flight and is resent after a backoff, and the text is in /status last_error.")
+	for _, out := range running {
+		w.sample("output_settle_failures_total", float64(out.SettleFailures), "output", out.ID)
 	}
 }
 

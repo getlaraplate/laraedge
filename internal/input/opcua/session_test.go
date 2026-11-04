@@ -923,6 +923,23 @@ func TestOnLostNeverForAFailedDial(t *testing.T) {
 	}
 }
 
+// A loss the library reports between Connect and the end of dial (before the
+// watcher is armed) is kept and reported once dial arms it.
+func TestOnLostForALossBeforeTheDialEnded(t *testing.T) {
+	deps, _ := testDeps(t)
+	lost := newLossCounter(&deps)
+	withFake(&deps, &fakeClient{lossOnConnect: true})
+
+	s := mustDial(t, noneConnection("opc.tcp://fake:4840"), deps)
+	defer s.Close()
+
+	lost.wait(t)
+
+	if n := lost.calls.Load(); n != 1 {
+		t.Fatalf("OnLost called %d times, want 1", n)
+	}
+}
+
 func TestOnLostAtMostOncePerSession(t *testing.T) {
 	deps, _ := testDeps(t)
 	lost := newLossCounter(&deps)

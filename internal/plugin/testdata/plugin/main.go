@@ -255,10 +255,15 @@ type input struct {
 	runs *atomic.Int64
 }
 
-// browsingInput is an input that also browses.
+// browsingInput is an input that also browses; the node "leaf" has nothing
+// below it.
 type browsingInput struct{ input }
 
 func (browsingInput) Browse(_ context.Context, _, node string, depth int) ([]sdk.Node, error) {
+	if node == "leaf" {
+		return nil, nil
+	}
+
 	return []sdk.Node{{Address: fmt.Sprintf("%s/%d", node, depth), Name: "n1", Type: "int32", Access: "read"}}, nil
 }
 

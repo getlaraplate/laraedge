@@ -2,6 +2,8 @@ package transform_test
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"math"
 	"strings"
 	"testing"
@@ -248,5 +250,50 @@ func TestReadSamplesRefusesALineBeyondTheLimit(t *testing.T) {
 	_, err := transform.ReadSamples(strings.NewReader(long), kinds)
 	if err == nil || !strings.Contains(err.Error(), "line 1") {
 		t.Fatalf("err = %v, want a refusal naming line 1", err)
+	}
+}
+
+// blankLines yields blank lines of 1 KiB until it has produced limit bytes,
+// without holding them.
+type blankLines struct{ left int }
+
+func (b *blankLines) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		return 0, io.EOF
+	}
+
+	n := min(len(p), b.left, 1024)
+	for i := range n {
+		p[i] = ' '
+	}
+
+	p[n-1] = '\n'
+	b.left -= n
+
+	return n, nil
+}
+
+func TestReadSamplesRefusesAFileBeyondTheTotalLimit(t *testing.T) {
+	_, err := transform.ReadSamples(&blankLines{left: transform.MaxSampleFile + 1}, kinds)
+	var line int
+	if err == nil {
+		t.Fatal("ReadSamples accepted a file beyond the limit")
+	}
+
+	if _, scanErr := fmt.Sscanf(err.Error(), "line %d: file is too large", &line); scanErr != nil || line < 1 || line > transform.MaxSampleFile/1024+1 {
+		t.Fatalf("err = %q, want %q naming a line", err, "line N: file is too large")
+	}
+
+	if samples, err := transform.ReadSamples(&blankLines{left: transform.MaxSampleFile}, kinds); err != nil || len(samples) != 0 {
+		t.Errorf("a file of exactly the limit: %v, %v, want none and no error", samples, err)
+	}
+}
+
+func TestReadSamplesMatchesKeysWithoutRegardToCase(t *testing.T) {
+	line := `{"Device":"press-07","SIGNAL":"force","ts":"2026-10-19T08:00:01.250Z","Value":1.5,"quality":"good"}` + "\n"
+
+	got, err := transform.ReadSamples(strings.NewReader(line), kinds)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("ReadSamples = %v, %v, want one sample: docs/USAGE.md promises keys match without regard to case", got, err)
 	}
 }

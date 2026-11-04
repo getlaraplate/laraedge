@@ -30,8 +30,10 @@ const browseTimeout = 2 * time.Minute
 // per node, indented two spaces per level, as
 // "<NodeId>  <BrowseName>  <NodeClass>[  <DataType>  <access>]", the last
 // two for a variable (access r, w, rw or -; "?" for an unreadable
-// attribute). It connects like probe (the trust check included) and reads no
-// value.
+// attribute), and "  (not browsed: <status>)" after a node whose children
+// the server refused to list; a start node without children prints
+// browseNothingBelow. It connects like probe (the trust check included) and
+// reads no value.
 func runBrowse(args []string, stdout, stderr io.Writer) int {
 	const prefix = "laraplate-edge browse: "
 
@@ -92,12 +94,19 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), browseTimeout)
 	defer cancel()
 
+	printed := 0
+
 	truncated, err := in.Browse(ctx, start, *depth, func(e opcua.BrowseEntry) {
+		printed++
 		fmt.Fprintln(stdout, browseLine(e))
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s%v\n", prefix, err)
 		return exitFailure
+	}
+
+	if printed == 0 {
+		fmt.Fprintln(stdout, browseNothingBelow)
 	}
 
 	if truncated {
@@ -106,6 +115,11 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 
 	return exitOK
 }
+
+// browseNothingBelow is what browse prints, for OPC UA and for a plugin, for a
+// start node without children (a variable, an empty folder), so an empty
+// answer is not taken for a failure.
+const browseNothingBelow = "(no node below the start node)"
 
 // errPluginNoBrowse is what browse says of a plugin whose manifest does not
 // declare browse.
@@ -170,16 +184,24 @@ func browsePlugin(doc config.Document, boot bootstrap.File, cfg config.Input, no
 		fmt.Fprintf(stdout, "%s  %s  %s  %s\n", n.Address, n.Name, cmp.Or(n.Type, "?"), cmp.Or(n.Access, "?"))
 	}
 
+	if len(nodes) == 0 {
+		fmt.Fprintln(stdout, browseNothingBelow)
+	}
+
 	return exitOK
 }
 
 // browseLine is the printed line of e: the data type and access columns
 // appear for a variable whose attributes were read, "?" standing for the
-// one that was unreadable.
+// one that was unreadable; a node whose children the server refused ends
+// with "(not browsed: <status>)".
 func browseLine(e opcua.BrowseEntry) string {
 	line := strings.Repeat("  ", e.Depth) + e.NodeID + "  " + e.Name + "  " + e.Class
 	if e.DataType != "" || e.Access != "" {
 		line += "  " + cmp.Or(e.DataType, "?") + "  " + cmp.Or(e.Access, "?")
+	}
+	if e.Status != "" {
+		line += "  (not browsed: " + e.Status + ")"
 	}
 
 	return line

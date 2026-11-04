@@ -170,6 +170,10 @@ when it still holds unsent records; delete it by hand once it is no longer neede
   `{url}/api/v1/insert/mes/machine-agent-config-reports`. A report that cannot be delivered is kept in
   `data_dir` and sent again at every poll, also after a restart, until the backend records it. A
   rejected or rolled back version is reported once and not attempted again; publish a new version.
+  A backend that keeps answering such a version (also one older than the applied one, refused once
+  as `rejected`) instead of `304` is downloaded less often: the agent logs one warning and doubles
+  the poll interval at each such answer, up to 30 minutes (a `poll_seconds` above 30 minutes is kept
+  as it is), and goes back to `poll_seconds` at the first other answer (a `304`, a new version).
 
 ## Trying transforms: probe and config test
 
@@ -260,7 +264,8 @@ and `quality`, all required (no other key is accepted; key names are matched wit
 - `ts` is RFC 3339; it is written in UTC with milliseconds, and read with any offset or precision.
 - `value` has the kind the point's `type` gives (CONFIGURATION.md, "Kinds and the type check"): `true`
   or `false`, an integral number for an integer point, a finite number for a float point, a JSON string.
-- `quality` is `good`, `uncertain` or `bad`. Blank lines are skipped; a line holds at most 1 MiB.
+- `quality` is `good`, `uncertain` or `bad`. Blank lines are skipped; a line holds at most 1 MiB and a file at most 64 MiB, blank lines
+  included (a larger one is refused with its line number).
 - The device and signal must be a point of the document. The first bad line stops the command with
   `<file>: line N: <reason>`, never quoting the line.
 
@@ -335,20 +340,24 @@ nsu=urn:vendor:press;s=Press07  Press07  Object
   and, for a variable, the name of its data type and its access level, `<NodeId>  <BrowseName>  <NodeClass>[
   <DataType>  <access>]`. The access level tells what the server allows on the value: `r` (read), `w`
   (write), `rw`, or `-` for neither; a point needs `r`. An attribute the server does not answer prints as `?`.
-  The start node itself is not printed.
+  The start node itself is not printed; a start node without children (a variable, an empty folder) prints
+  `(no node below the start node)`.
 - `--depth` is the number of levels printed below the start node, 1 (its children only) to 10, 2 by default.
 - A NodeId whose namespace is not 0 is printed in the `nsu=<uri>;...` form when the server's
   `NamespaceArray` names the namespace, in the `ns=<n>;...` form otherwise: paste the line's NodeId as the
   point's `address`. The `nsu=` form survives the server renumbering its namespaces.
 - A node reached twice is printed once. A node the server refuses to browse (a Bad status, such as
-  `BadUserAccessDenied`) is printed without what is below it, and the walk goes on; refused at the start
-  node, `browse` fails. The walk stops after 1000 nodes with `... stopped after 1000 nodes`
+  `BadUserAccessDenied`) is printed without what is below it, its line ending with that status, as in
+  `nsu=urn:vendor:press;s=Recipes  Recipes  Object  (not browsed: BadUserAccessDenied)` (the hexadecimal
+  code for a status the agent does not name), and the walk goes on; refused at the start node, `browse`
+  fails. The walk stops after 1000 nodes with `... stopped after 1000 nodes`
   on stdout: narrow it with `--node` and `--depth`.
 - No value is read. Like `probe`, it opens a session of its own.
 - A plugin input is browsed the same way, through the plugin, and only when the plugin's `plugin.json`
   declares `browse`; otherwise the command exits 1 with `the plugin of this input does not support
   browse`. The plugin chooses the node ids; `--node` takes one it printed, and `--depth` (1 to 10,
-  default 2) counts the levels below the start node as for OPC UA.
+  default 2) counts the levels below the start node as for OPC UA. A node with nothing below it prints
+  `(no node below the start node)`, as for OPC UA.
 
 ## Running plugins
 
@@ -455,7 +464,10 @@ Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
 With `status_token` set, every path but `/healthz` needs `Authorization: Bearer <token>`. The endpoint
 is plain HTTP: on a non-loopback address the bearer crosses the network in clear, so bind a monitoring
 network you trust (TLS on the endpoint is a later plan). If the status listener fails while the agent
-runs, the error is logged and the agent keeps running without it.
+runs, the error is logged and the agent keeps running without it. The server bounds a slow client: 5 s to
+send the request headers, 10 s for the whole request, 10 s to write an answer. `uptime_seconds` counts from
+the start of the agent process, not from the start of the status endpoint. The scheme of the
+`Authorization` header is matched without regard to case (`bearer` and `Bearer` both work).
 
 ### Metrics
 
@@ -465,8 +477,8 @@ Every name starts with `laraplate_edge_`.
 |---|---|---|---|
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
-| `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down |
-| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind`: `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
+| `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down; only inputs that run and keep a connection: the series of an input that failed or was removed ends (a stale series to Prometheus), so alert on `input_up == 0` for a failed input |
+| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
 | `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |
@@ -482,9 +494,10 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_output_state` | gauge | `output`, `state` | 1 for the current state among `sending`, `backoff`, `suspended_auth`, `failed` |
 | `laraplate_edge_clock_offset_seconds` | gauge | `output` | backend clock minus agent clock, from the `Date` header of the last response; not for `plugin:<id>` or failed outputs |
 | `laraplate_edge_last_error_timestamp_seconds` | gauge | `output` | Unix time of the output's last error, 0 when none; the text is in `/status` |
+| `laraplate_edge_output_settle_failures_total` | counter | `output` | failed attempts to settle a batch: to acknowledge a delivered batch in the buffer, or to save the loss marker or the split of a batch the destination refused (`422`, `413`). The batch stays in flight and is resent after a backoff, so a counter that keeps growing means the output is stuck on that batch; the text is in `/status` `last_error`. Restarts from 0 when the output restarts |
 
 The plugin series exist only for plugins the applied document uses, the processor series only for its
-processors. The connection and read error series exist only for inputs that report their health (`modbus` and `opcua`, not `simulated`). The buffer series and the drop counters exist only for outputs that run (a `failed` output has no open
+processors. The connection and read error series exist only for inputs that report their health (`modbus` and `opcua`, not `simulated`). The buffer series, the drop counters and the settle failure counter exist only for outputs that run (a `failed` output has no open
 buffer). Counters restart from 0 when the agent restarts.
 
 ## Logs
@@ -501,8 +514,13 @@ service manager to collect and rotate. `--log-level` takes `debug`, `info` (defa
 - On a disk that refuses every write the buffer logs its first failed write and its first dropped
   record of each queue in full, then at most one summary a minute (`write and drop failures repeated
   since the last report`, with `suppressed` and a count per `<queue>.<kind>`); after a quiet minute the
-  next failure is logged in full again. The router still logs each record the buffer refuses at
-  `WARN` ("router: cannot buffer a record", with the output, device and signal).
+  next failure is logged in full again. The router logs a record the buffer refuses at `WARN`
+  ("router: cannot buffer a record", with the output, device and signal) the first time in an
+  episode, then at most one summary a minute ("router: records refused by a buffer repeated since the
+  last report", with `suppressed` and a count per `<output>.<kind>`, kind being `dropped`, `too_large`,
+  `not_durable`, `closed` or `failed`; a new kind in the same episode is logged in full). The summary is
+  logged once the minute has passed even if the refusals stopped, within one to two minutes of the first
+  one. Each refused record still reaches the buffer, whose `laraplate_edge_dropped_samples_total` counts it.
 - A transform runtime error is logged at `WARN` the first time for each device, signal and step of an
   episode ("transform: runtime error, the sample is sent bad", with `input`, `device`, `signal`, `step`,
   `transform` and `error`, never the value); later ones are only counted, in at most one summary a
@@ -576,13 +594,14 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | the same warning with another thumbprint, for a server that worked | the server was reinstalled, or its certificate renewed or replaced | check that this is expected (a different thumbprint can also be another machine at that address), then `opcua trust` again. The old file stays in `trusted/`: delete it to withdraw that trust. |
 | an `opcua` input `connected` false, `read_errors` `connection` or `timeout` growing, no warning | the endpoint is not reachable (host, port, firewall), the server offers no endpoint with the configured `security_policy` and `security_mode`, it does not offer the user token `auth` needs, it refuses the agent's certificate, or it refuses the session | `probe` prints the status code or the reason; `--log-level debug` logs each failed attempt. Compare the policy and mode with the server's endpoints, and add `data_dir/opcua/pki/own/cert.der` to the server's trusted client certificates. The agent retries with backoff up to 1 minute. |
 | an `opcua` input cannot connect, a session limit reached on the server | the server allows few sessions. The agent keeps one per input, `probe` and `browse` open another while they run, and a session lost without being closed stays on the server until its timeout (the agent asks for 60 s). | stop the extra clients, wait for the old session to expire, or raise the server's limit. The agent reconnects on its own. |
+| the document is `rolled_back` (or `browse`, `probe` exit) with `opcua pki: <path> has mode 0640, want 0600 or narrower (chmod 600 it)` | on Linux or another Unix system, the agent's key `data_dir/opcua/pki/own/key.pem` is readable by its group or by others: another user may have read it | `chmod 600` the file named, and fix what widened it (a copy, a backup restore, an `umask`). If other users may have read it, delete `own/` instead: a new pair is created at the next start, and the server must trust the new `own/cert.der`. |
 | `WARN` "input ...: OPC UA connection is unprotected (security_policy None)" at every start | the input uses `security_policy: None`: values travel in the clear and can be altered, and nothing authenticates the server | intended only on a network you control. Otherwise set `Basic256Sha256` (the default) and trust the server's certificate with `opcua trust`. |
 | an `opcua` point always `bad` with the zero of its type, `read_errors` `exception` growing | the server answers a Bad status for the node, usually `BadNodeIdUnknown`: the NodeId is wrong, or its namespace index changed (a server reinstalled or reconfigured). A subscribed point is `bad` once at each connect; a polled point at each poll. | `probe` shows which points are `bad`. Find the node with `browse` and use the `nsu=` form of the address, which does not depend on the index. |
 | an `opcua` point `bad` right after each connect, `exception` +1 per connect, with a `deadband` of `N%` | the server refuses a percent deadband for a variable without an `EURange` | give the variable an `EURange` on the server, or use an absolute deadband (a number). The refused item is created again only at the next connect. |
 | `read_errors` `decode` growing for an `opcua` point | the value does not convert to the point's `type`: a float to an integer type, a number too large for the type, an array or a structure, a string that is not UTF-8 | set the `type` the node holds (`browse` shows its data type); the conversion rules are in CONFIGURATION.md, "Conversion". |
 | an `opcua` input `connected` true, its devices alive, but the values are stale or `bad` | the liveness is the server's: while the server answers, the devices are alive even if the machine behind it is off. A Bad status gives `bad` samples, `read_errors` `exception` grows; an unchanged value gives no sample at all with a subscription. | look at the machine and at the server's own status of the nodes. The devices are reported dead only when the server stops answering for `death_tolerance`. |
 | the agent stops with a Go panic whose trace is in the OPC UA library | the library panicked in one of its own goroutines (malformed data from a server): this cannot be caught | the service manager restarts the agent (`Restart=` under systemd). Report it with the trace; `--log-level debug` logs the library's lines with `source=gopcua`. |
-| the document is `rolled_back` with `cannot open the serial port` | the `rtu` input could not open the port: wrong `device` path, or the user has no permission (on Windows also a port another process already has open) | check the path (`ls -l /dev/ttyUSB0`, adapters change number when replugged: prefer `/dev/serial/by-id/...`), and that the agent's user belongs to the group that owns the port (`dialout` on most Linux distributions). On Linux a second open of the port succeeds, so never run `probe` on an `rtu` input while the agent runs: both would read the same port and corrupt each other's frames. |
+| the document is `rolled_back` with `cannot open the serial port: it does not exist`, `cannot open the serial port: permission denied` or plain `cannot open the serial port` | the `rtu` input could not open the port: `does not exist` is a wrong `device` path, `permission denied` is a user without access to it, and the plain text is any other failure (on Windows also a port another process already has open) | check the path (`ls -l /dev/ttyUSB0`, adapters change number when replugged: prefer `/dev/serial/by-id/...`), and that the agent's user belongs to the group that owns the port (`dialout` on most Linux distributions). On Linux a second open of the port succeeds, so never run `probe` on an `rtu` input while the agent runs: both would read the same port and corrupt each other's frames. |
 | a document is `rejected` with `plugins.N.sha256: does not match the plugin binary` (or `manifest_sha256 ... plugin.json`) | the file at `path`, or its `plugin.json`, is not the one the entry pins: a rebuilt or replaced plugin, or a hash copied from another build | run `laraplate-edge plugin hash <dir>` on the files you mean to deploy and put the two values in the entry. Nothing changed: the previous document keeps running. If the binary on disk changes under a running plugin, its next restart stops on the same check (restart reason `hash`) and the plugin stays down, `last_error` `the plugin files on disk do not match their hashes`, until the files match again or a new document pins the new ones. While the binary on disk differs from the pinned hash, every new document that keeps that plugin entry is rejected, even one that changes only something else, until the entry's hashes are updated with `plugin hash`. |
 | a document is `rejected` with `plugins.N.path: plugins are disabled: set plugins_dir in the bootstrap` | the agent uses the `laraplate` provider and the bootstrap has no `plugins_dir`, so no plugin may run | set `plugins_dir` in the bootstrap to the directory that holds the plugins and restart the agent (the key is read at start). |
 | a document is `rejected` with `plugins.N.path: must be inside plugins_dir` | the binary at `path`, after symlinks are resolved, is outside `plugins_dir` (a `..`, an absolute path elsewhere, or a link pointing out) | install the plugin under `plugins_dir` and use a path inside it; with the `laraplate` provider a relative `path` resolves against `plugins_dir`. `plugins.N.path: plugins_dir cannot be resolved` means the directory itself is missing or unreadable. |
@@ -604,7 +623,9 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | the apply refused naming the error (first apply), or a plugin `down` with `last_error` (restart after it was up): `... socket path too long: N bytes, the platform allows at most 107 ...` | the plugin's socket under an explicit `run_dir` (`run_dir/plugins/<id>/`) does not fit the Unix limit, because `run_dir` is deep. Without `run_dir` the agent falls back on its own to a short directory under the temporary one. | use a shorter absolute `run_dir` (for example `/run/laraplate-edge`) and restart the agent (at the first apply, apply again; a plugin that was up and restarts is retried with backoff) |
 | the apply refused naming the error (first apply), or a plugin `down` with `last_error` (restart after it was up): `plugin socket directory <path> is too long for a Unix socket ...: set a short absolute run_dir in the bootstrap` | there is no `run_dir`, `data_dir` is too deep for the socket limit, and so is the fallback under both the system temporary directory and `/tmp` | set a short absolute `run_dir` (for example `/run/laraplate-edge`) and restart the agent (at the first apply, apply again; a plugin that was up and restarts is retried with backoff) |
 | the apply refused naming the error (first apply), or a plugin `down` with `last_error` (restart after it was up): `plugin socket directory <temp>/laraplate-edge-<hash> is a symbolic link` (or `has mode ..., want 0700`, `is not owned by the agent's user`, `is not a directory`) | `data_dir` is too deep for the socket limit, so the agent uses its fallback directory under the system temporary directory (or `/tmp` when that one is too deep), and that path already exists without being a directory private to the agent's user: another user or a stale copy holds it | remove that path if nothing of yours uses it, or set a short absolute `run_dir` (a plugin that was up and restarts: the agent retries the start with backoff, after the fix; at the first apply, fix and apply again) |
+| `WARN` "provider: the backend answered again the configuration version last attempted and not applied, instead of 304; polling less often until it changes" with `version`, `outcome` and `applied_version` | the backend's active configuration for this agent is the version the agent last attempted and rejected or rolled back, for example one older than the one it runs (the backend ignores `?version=`) | publish a new version, newer than `applied_version`. Meanwhile the agent keeps running the applied one and polls less often, doubling the interval up to 30 minutes (or `poll_seconds`, when it is longer); it picks up a new version at its next poll. |
 | `/readyz` `503` "input ... is failed" | an input could not start again during a rollback | see its `last_error`; it is retried only when a new document is applied |
+| `WARN` "supervisor: an abandoned start of the input has not returned; starting the input again anyway" | an input's start did not finish within the start timeout (30 seconds), and the next start of the same id (a rollback restoring it, or a later document) waited one more start timeout for the abandoned start to return and close its connection; it did not | the driver's start hangs: report it with the log. The input is started anyway, and later starts of it no longer wait for that start (`still_running` counts the starts left running); a driver holding an exclusive resource (a serial port) may then fail to open it: after a rollback the input is then `failed` until a new document is applied, and a new document is rolled back |
 | start fails with `data_dir ... has format N, newer than this agent supports` | the data directory was written by a newer agent | run the newer agent; an older one never rewrites a newer layout |
 | `ERROR` "buffer: corrupt record inside a segment, dropped the rest of the segment" (or "... inside an evicted segment ..."), `corrupt_records` grows | a record of the output buffer failed its checksum or could not be read back: a disk fault, bit rot, a file changed by hand. It is found at start or while the agent runs. | nothing for the agent: it drops the rest of that segment (at most 16 MiB of that queue), counts it and keeps sending; the log line names the queue, the segment and the offset, never a value. The gap has no loss marker (the protocol has no reason for it), so the backend does not see it: check the disk (kernel log, SMART, file system). |
 | `WARN` "a device death was dropped; the backend will not see it" | a `death` was lost with a full buffer or a refused batch; a `birth` or `death` is not a sample, so no loss marker counts it | nothing: the next `death` or `birth` of the device sets its state again. Look at the drop that caused it. |

@@ -3,6 +3,7 @@ package modbus
 import (
 	"net"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -59,16 +60,19 @@ func TestCloseDuringADialToABlackHole(t *testing.T) {
 		Points: []config.Point{pollPoint("speed", "hr:0", "int16", time.Second)},
 	}))
 	opening := make(chan struct{}, 1)
+	returned := make(chan struct{})
+	var once sync.Once
 	h.in.newClient = func(c Connection) (client, error) {
 		lib, err := newLibraryClient(c)
 		if err != nil {
 			return nil, err
 		}
-		return signalOpen{lib, opening}, nil
+		return signalOpen{client: lib, opening: opening, returned: returned, once: &once}, nil
 	}
 	if err := h.in.Start(t.Context(), h.emit); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(h.close)
 	select {
 	case <-opening:
 	case <-time.After(guard):
@@ -85,18 +89,30 @@ func TestCloseDuringADialToABlackHole(t *testing.T) {
 		t.Errorf("Close took %v during a dial, want under %v", took, bound)
 	}
 	h.closed.Store(true)
+	// The dial must still be running when Close returns, or the test proves
+	// nothing about a Close that does not wait for it.
+	select {
+	case <-returned:
+		t.Fatal("the dial had already ended when Close returned: nothing was proved")
+	default:
+	}
 	if h.in.Health().Connected {
 		t.Error("connected after Close")
 	}
 }
 
-// signalOpen is a client that reports when its Open starts.
+// signalOpen is a client that reports when its Open starts and closes
+// returned when it ends.
 type signalOpen struct {
 	client
-	opening chan<- struct{}
+	opening  chan<- struct{}
+	returned chan struct{}
+	once     *sync.Once
 }
 
 func (s signalOpen) Open() error {
+	defer s.once.Do(func() { close(s.returned) })
+
 	select {
 	case s.opening <- struct{}{}:
 	default:
