@@ -1,4 +1,4 @@
-// This file holds the builder methods for inputs, outputs and processors, their secret and processor rules, and the transform chain.
+// This file holds the builder methods for inputs, outputs and processors, their secret and processor rules, the transform chain and the priority.
 
 package config
 

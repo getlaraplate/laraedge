@@ -954,6 +954,49 @@ func TestHTTPSettleFailuresCountEveryFailedAttempt(t *testing.T) {
 	}
 }
 
+// ackFault fails Ack while fail is set.
+type ackFault struct {
+	output.Buffer
+	fail atomic.Bool
+}
+
+func (a *ackFault) Ack(p model.Priority, upTo buffer.Position) error {
+	if a.fail.Load() {
+		return errors.New("faulty: ack refused")
+	}
+
+	return a.Buffer.Ack(p, upTo)
+}
+
+// A delivered batch whose Confirm fails stays in flight and is resent, the
+// same class as a failed Drop or Shrink, so it is counted too.
+func TestHTTPSettleFailuresCountAFailedConfirm(t *testing.T) {
+	f := newFixture(t, 2)
+	var af *ackFault
+	f.h.wrap = func(b *buffer.Buffer) output.Buffer {
+		af = &ackFault{Buffer: b}
+		af.fail.Store(true)
+
+		return af
+	}
+	f.h.open()
+	f.start(bulk(0), bulk(1))
+
+	first := f.be.next(t)
+	waitTimers(t, f.h.clk, 1)
+	if got := f.out.SettleFailures(); got != 1 {
+		t.Fatalf("SettleFailures() = %d after a failed confirm, want 1", got)
+	}
+
+	af.fail.Store(false)
+	f.expectWait(500*time.Millisecond, output.Backoff)
+	sameRequest(t, f.be.next(t), first)
+	f.waitSettled()
+	if got := f.out.SettleFailures(); got != 1 {
+		t.Fatalf("SettleFailures() = %d after the confirm succeeded, want 1", got)
+	}
+}
+
 // closeRecorder is a transport that records CloseIdleConnections.
 type closeRecorder struct {
 	http.RoundTripper

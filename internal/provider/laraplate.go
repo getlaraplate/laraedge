@@ -29,8 +29,9 @@ import (
 )
 
 // MaxStalePollInterval caps the poll interval while the backend keeps
-// answering a document already attempted, such as one older than the applied
-// one, instead of 304 (C44). A configured poll interval above it is kept.
+// answering the version last attempted and not applied (rejected, such as
+// one older than the applied one, or rolled back) instead of 304 (C44). A
+// configured poll interval above it is kept.
 const MaxStalePollInterval = 30 * time.Minute
 
 // Backend limits of a configuration report (MachineAgentConfigService).
@@ -100,11 +101,12 @@ type LaraplateConfig struct {
 // after a restart, until the backend records it (2xx) or refuses it (422).
 // An apply cut short by the shutdown is not an attempt and records nothing.
 //
-// A backend that answers a document already attempted (one older than the
-// applied version, or the version it was asked about) instead of 304 is
-// misbehaving: the document is not applied again, the provider warns once and
-// the poll interval doubles at each such answer, up to MaxStalePollInterval;
-// any other answer brings the configured interval back.
+// A backend that answers again the version last attempted and not applied
+// (rejected, such as one older than the applied version, or rolled back)
+// instead of 304 is misbehaving: the document is not applied again, the
+// provider warns once and the poll interval doubles at each such answer, up
+// to MaxStalePollInterval; any other answer brings the configured interval
+// back.
 type Laraplate struct {
 	configURL string
 	reportURL string
@@ -319,7 +321,7 @@ func (l *Laraplate) handle(ctx context.Context, token string, body []byte, stale
 		if stale == answer.Version {
 			l.log.Debug("provider: configuration version already attempted", "version", answer.Version, "outcome", l.lastAttempt.Outcome)
 		} else {
-			l.log.Warn("provider: the backend keeps answering a configuration version already attempted, or older than the applied one, instead of 304; polling less often until it changes",
+			l.log.Warn("provider: the backend answered again the configuration version last attempted and not applied, instead of 304; polling less often until it changes",
 				"version", answer.Version, "outcome", l.lastAttempt.Outcome, "applied_version", l.applier.AppliedVersion(), "max_interval", MaxStalePollInterval.String())
 		}
 

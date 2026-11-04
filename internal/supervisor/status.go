@@ -118,8 +118,9 @@ type OutputStatus struct {
 	// happened.
 	LastError   string
 	LastErrorAt time.Time
-	// SettleFailures counts the failed attempts to drop or split a batch
-	// the destination refused, since the output started; zero when failed.
+	// SettleFailures counts the failed attempts to settle a batch (confirm a
+	// delivered one, drop or split a refused one), since the output
+	// started; zero when failed.
 	SettleFailures uint64
 }
 

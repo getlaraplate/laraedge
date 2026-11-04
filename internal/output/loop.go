@@ -151,7 +151,7 @@ type Loop struct {
 	reload        chan struct{}
 	reloadPending atomic.Bool
 
-	// settleFailures counts the failed Drop and Shrink attempts.
+	// settleFailures counts the failed Confirm, Drop and Shrink attempts.
 	settleFailures atomic.Uint64
 
 	// wake is the Sender's Waker channel, nil when it is not a Waker.
@@ -285,6 +285,7 @@ func (l *Loop) settle(ctx context.Context, b *Batch, out Outcome) {
 // confirm settles b as delivered.
 func (l *Loop) confirm(ctx context.Context, b *Batch, status int) {
 	if err := l.batcher.Confirm(b); err != nil {
+		l.settleFailures.Add(1)
 		l.log.Error("output: cannot settle a delivered batch; it will be resent", "output", l.id, "seq", b.Seq, "error", err)
 		l.recordError("confirm: " + err.Error())
 		l.backOff(ctx, 0)
@@ -456,10 +457,10 @@ func (l *Loop) LastConfirmation() time.Time {
 	return l.lastConfirm
 }
 
-// SettleFailures returns how many times settling a refused batch failed: a
-// Drop or a Shrink that could not be applied, each attempt counted. The
-// batch stays in flight and is resent after a backoff; the text is in
-// LastError.
+// SettleFailures returns how many times settling a batch failed: a Confirm
+// of a delivered batch, or a Drop or a Shrink of a refused one, that could
+// not be applied, each attempt counted. The batch stays in flight and is
+// resent after a backoff; the text is in LastError.
 func (l *Loop) SettleFailures() uint64 { return l.settleFailures.Load() }
 
 // LastError returns the last error, a short text without secrets, and when

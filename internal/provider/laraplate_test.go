@@ -408,7 +408,7 @@ func TestLaraplateBacksOffOnAnOlderActiveVersion(t *testing.T) {
 	for _, wait := range []time.Duration{poll, 2 * poll, 4 * poll, 8 * poll, 16 * poll, provider.MaxStalePollInterval, provider.MaxStalePollInterval} {
 		f.expectWait(wait)
 	}
-	if got := strings.Count(f.logs.String(), "older than the applied one"); got != 1 {
+	if got := strings.Count(f.logs.String(), "answered again the configuration version last attempted and not applied"); got != 1 {
 		t.Fatalf("%d warnings for the older active version, want 1; logs:\n%s", got, f.logs.String())
 	}
 	if n := a.count(); n != 2 {

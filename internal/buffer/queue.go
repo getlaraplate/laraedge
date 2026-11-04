@@ -441,7 +441,8 @@ func (q *queue) readOnce(from Position, limit int) ([]Entry, error) {
 
 // count returns the number of records in [from, to); to must be a record
 // boundary or lie outside every segment (a gap, such as the region a cut of a
-// corrupt frame just freed: it holds no record). A corrupt frame on the way
+// corrupt frame just freed: it holds no record). The old end of a cut
+// segment is the base of the next one, a boundary. A corrupt frame on the way
 // is cut as in read.
 func (q *queue) count(from, to Position) (uint64, error) {
 	for {
@@ -461,7 +462,7 @@ func (q *queue) count(from, to Position) (uint64, error) {
 func (q *queue) countOnce(from, to Position) (uint64, error) {
 	var n uint64
 	reached := from
-	_, err := q.walk(from, func(pos Position, frame []byte) bool {
+	stop, err := q.walk(from, func(pos Position, frame []byte) bool {
 		if pos >= to {
 			return false
 		}
@@ -475,7 +476,10 @@ func (q *queue) countOnce(from, to Position) (uint64, error) {
 		return 0, err
 	}
 
-	if reached != to && q.segmentAt(to) != nil {
+	// stop is the start of the first frame at or after to: stop == to makes
+	// to a frame boundary even when the frames before it were cut, as at the
+	// old end of a segment cut by a corrupt frame (the next segment's base).
+	if reached != to && stop != to && q.segmentAt(to) != nil {
 		return 0, fmt.Errorf("position %d is not a record boundary", uint64(to))
 	}
 

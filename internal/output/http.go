@@ -271,7 +271,7 @@ func (h *HTTP) LastConfirmation() time.Time {
 	return h.loop.LastConfirmation()
 }
 
-// SettleFailures returns how many times settling a refused batch failed
+// SettleFailures returns how many times settling a batch failed
 // (Loop.SettleFailures).
 func (h *HTTP) SettleFailures() uint64 {
 	return h.loop.SettleFailures()

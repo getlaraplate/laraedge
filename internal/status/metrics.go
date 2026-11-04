@@ -180,7 +180,7 @@ func writeMetrics(w *expositionWriter, st supervisor.Status, now time.Time) {
 		w.sample("last_error_timestamp_seconds", unixSeconds(out.LastErrorAt), "output", out.ID)
 	}
 
-	w.family("output_settle_failures_total", "counter", "Failed attempts to drop or split a batch the destination refused (the loss marker or the split could not be saved), since the output started; the batch stays in flight and is resent after a backoff, and the text is in /status last_error.")
+	w.family("output_settle_failures_total", "counter", "Failed attempts to settle a batch (to acknowledge a delivered batch in the buffer, or to save the loss marker or the split of a batch the destination refused), since the output started; the batch stays in flight and is resent after a backoff, and the text is in /status last_error.")
 	for _, out := range running {
 		w.sample("output_settle_failures_total", float64(out.SettleFailures), "output", out.ID)
 	}
