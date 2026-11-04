@@ -404,10 +404,14 @@ func TestMaxWaitCountsFromTheFirstAppend(t *testing.T) {
 	res := h.nextAsync(context.Background())
 	waitTimers(t, h.clk, 1)
 	h.clk.Advance(200*time.Millisecond - time.Nanosecond)
+	if n := h.clk.PendingTimers(); n != 1 {
+		t.Fatalf("PendingTimers() = %d 1 ns before max_wait, want the batcher's timer still pending", n)
+	}
+
 	select {
 	case r := <-res:
 		t.Fatalf("Next() returned before max_wait: %v, %v", r.batch, r.err)
-	default:
+	case <-time.After(20 * time.Millisecond):
 	}
 
 	h.clk.Advance(time.Nanosecond)

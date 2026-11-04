@@ -237,6 +237,10 @@ func defaultTransport() *http.Transport {
 // one-record 413; every other answer and every local failure keeps it in
 // flight to be resent identical after a backoff or a suspension.
 func (h *HTTP) Run(ctx context.Context) error {
+	// The client's transport is this output's own, not shared with another
+	// output: NewClient builds one per output when HTTPConfig.Client is nil,
+	// and only tests pass a client. Closing its idle connections touches no
+	// other output.
 	defer h.sender.client.CloseIdleConnections()
 
 	return h.loop.Run(ctx)

@@ -714,10 +714,16 @@ func (b *Buffer) clearUnsealedLocked() {
 }
 
 // UnsealedAge returns how long the oldest record not yet sealed has waited
-// since its Append, measured on the buffer's clock, or longer: a seal that
-// leaves records behind keeps the time of the oldest one before it, and the
-// records found at Open count from Open. It is zero when no record waits.
-// The batcher subtracts it from MaxWait.
+// since its Append, measured on the buffer's clock. A seal that leaves
+// records behind keeps the time of the oldest one before it, and the records
+// found at Open count from Open. It is zero when no record waits. The
+// batcher subtracts it from MaxWait.
+//
+// It is exact in neither direction, and the error is latency only, never
+// data: after a Shrink or a Drop lowers the sealed mark, records that already
+// waited are unsealed again with the time cleared, so they can wait a full
+// MaxWait once more; after an eviction or a runtime cut the kept time can be
+// older than any record left, and the next batch may seal at once.
 func (b *Buffer) UnsealedAge() time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
