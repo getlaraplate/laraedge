@@ -150,6 +150,9 @@ type Loop struct {
 	reload        chan struct{}
 	reloadPending atomic.Bool
 
+	// settleFailures counts the failed Drop and Shrink attempts.
+	settleFailures atomic.Uint64
+
 	// wake is the Sender's Waker channel, nil when it is not a Waker.
 	wake <-chan struct{}
 
@@ -317,6 +320,7 @@ func (l *Loop) split(ctx context.Context, b *Batch, reason string) {
 
 	n := b.Len() / 2
 	if _, err := l.batcher.Shrink(b, n); err != nil {
+		l.settleFailures.Add(1)
 		l.log.Error("output: cannot split the refused batch; it will be resent", "output", l.id, "seq", b.Seq, "error", err)
 		l.recordError("split: " + err.Error())
 		l.backOff(ctx, 0)
@@ -332,6 +336,7 @@ func (l *Loop) split(ctx context.Context, b *Batch, reason string) {
 // what was done.
 func (l *Loop) drop(ctx context.Context, b *Batch, reason, done string) {
 	if err := l.batcher.Drop(b, model.LossRejectedInvalid); err != nil {
+		l.settleFailures.Add(1)
 		l.log.Error("output: cannot drop the refused batch; it will be resent", "output", l.id, "seq", b.Seq, "error", err)
 		l.recordError("drop: " + err.Error())
 		l.backOff(ctx, 0)
@@ -447,6 +452,12 @@ func (l *Loop) LastConfirmation() time.Time {
 
 	return l.lastConfirm
 }
+
+// SettleFailures returns how many times settling a refused batch failed: a
+// Drop or a Shrink that could not be applied, each attempt counted. The
+// batch stays in flight and is resent after a backoff; the text is in
+// LastError.
+func (l *Loop) SettleFailures() uint64 { return l.settleFailures.Load() }
 
 // LastError returns the last error, a short text without secrets, and when
 // it happened; empty before any.

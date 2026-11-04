@@ -482,9 +482,10 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_output_state` | gauge | `output`, `state` | 1 for the current state among `sending`, `backoff`, `suspended_auth`, `failed` |
 | `laraplate_edge_clock_offset_seconds` | gauge | `output` | backend clock minus agent clock, from the `Date` header of the last response; not for `plugin:<id>` or failed outputs |
 | `laraplate_edge_last_error_timestamp_seconds` | gauge | `output` | Unix time of the output's last error, 0 when none; the text is in `/status` |
+| `laraplate_edge_output_settle_failures_total` | counter | `output` | failed attempts to drop or split a batch the destination refused (`422`, `413`): the loss marker or the split could not be saved. The batch stays in flight and is resent after a backoff, so a counter that keeps growing means the output is stuck on that batch; the text is in `/status` `last_error`. Restarts from 0 when the output restarts |
 
 The plugin series exist only for plugins the applied document uses, the processor series only for its
-processors. The connection and read error series exist only for inputs that report their health (`modbus` and `opcua`, not `simulated`). The buffer series and the drop counters exist only for outputs that run (a `failed` output has no open
+processors. The connection and read error series exist only for inputs that report their health (`modbus` and `opcua`, not `simulated`). The buffer series, the drop counters and the settle failure counter exist only for outputs that run (a `failed` output has no open
 buffer). Counters restart from 0 when the agent restarts.
 
 ## Logs

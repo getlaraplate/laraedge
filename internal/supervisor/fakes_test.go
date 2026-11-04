@@ -315,6 +315,10 @@ type backend struct {
 	unique     map[string][]string
 	uniqueSeqs map[string][]uint64
 	seen       map[string]map[string]bool // per output, accepted message_ids
+	// sentAs holds, per output and message_id, the body and source_seq of
+	// its first acceptance: a resend must be identical (violations).
+	sentAs     map[string]map[string]sentMessage
+	violations []string
 	seqs       map[string][]uint64
 	auth       map[string][]string
 	changed    chan struct{}
@@ -330,6 +334,7 @@ func newBackend(t *testing.T) *backend {
 		unique:     map[string][]string{},
 		uniqueSeqs: map[string][]uint64{},
 		seen:       map[string]map[string]bool{},
+		sentAs:     map[string]map[string]sentMessage{},
 		seqs:       map[string][]uint64{},
 		auth:       map[string][]string{},
 		changed:    make(chan struct{}, 1),
@@ -338,8 +343,22 @@ func newBackend(t *testing.T) *backend {
 	be.srv.Config.ErrorLog = log.New(io.Discard, "", 0)
 	be.srv.Start()
 	t.Cleanup(be.srv.Close)
+	t.Cleanup(func() {
+		be.mu.Lock()
+		defer be.mu.Unlock()
+
+		for _, v := range be.violations {
+			t.Error("fake backend: " + v)
+		}
+	})
 
 	return be
+}
+
+// sentMessage is what the backend keeps of an accepted message_id.
+type sentMessage struct {
+	body string
+	seq  uint64
 }
 
 // refuse makes output out answer statuses first.
@@ -381,7 +400,16 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 		status, be.script[out] = s[0], s[1:]
 	}
 	be.auth[out] = append(be.auth[out], r.Header.Get("Authorization"))
-	if status == http.StatusAccepted {
+	accepted, answer := status == http.StatusAccepted, `{"status":"accepted"}`
+	if accepted && be.seen[out][env.MessageID] {
+		// A resend of an accepted message: the real backend answers 200
+		// duplicate, and the agent must send it identical.
+		status, answer = http.StatusOK, `{"status":"duplicate","duplicate":true}`
+		if first := be.sentAs[out][env.MessageID]; first.body != string(body) || first.seq != env.SourceSeq {
+			be.violations = append(be.violations, fmt.Sprintf("output %s resent message %s with another body or source_seq (%d, then %d)", out, env.MessageID, first.seq, env.SourceSeq))
+		}
+	}
+	if accepted {
 		be.seqs[out] = append(be.seqs[out], env.SourceSeq)
 		var items, detail []string
 		for _, d := range env.Devices {
@@ -411,6 +439,10 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if !be.seen[out][env.MessageID] {
 			be.seen[out][env.MessageID] = true
+			if be.sentAs[out] == nil {
+				be.sentAs[out] = map[string]sentMessage{}
+			}
+			be.sentAs[out][env.MessageID] = sentMessage{body: string(body), seq: env.SourceSeq}
 			be.unique[out] = append(be.unique[out], items...)
 			be.uniqueSeqs[out] = append(be.uniqueSeqs[out], env.SourceSeq)
 		}
@@ -424,7 +456,7 @@ func (be *backend) serve(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = io.WriteString(w, `{"status":"accepted"}`)
+	_, _ = io.WriteString(w, answer)
 }
 
 func (be *backend) got(out string) []string {

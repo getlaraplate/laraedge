@@ -322,6 +322,7 @@ type outputLoop interface {
 	State() output.State
 	LastConfirmation() time.Time
 	LastError() (string, time.Time)
+	SettleFailures() uint64
 	ReloadCredentials()
 }
 

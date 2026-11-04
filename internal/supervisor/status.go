@@ -118,6 +118,9 @@ type OutputStatus struct {
 	// happened.
 	LastError   string
 	LastErrorAt time.Time
+	// SettleFailures counts the failed attempts to drop or split a batch
+	// the destination refused, since the output started; zero when failed.
+	SettleFailures uint64
 }
 
 // Status returns the current state of the inputs, outputs, plugins and
@@ -160,6 +163,7 @@ func (s *Supervisor) Status() Status {
 			LastConfirmation: ro.out.LastConfirmation(),
 			LastError:        lastErr,
 			LastErrorAt:      lastErrAt,
+			SettleFailures:   ro.out.SettleFailures(),
 		}
 		if co, ok := ro.out.(clockOffsetter); ok {
 			out.ClockOffset = co.ClockOffset()

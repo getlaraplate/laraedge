@@ -236,6 +236,7 @@ func TestMetrics(t *testing.T) {
 		"laraplate_edge_output_state":                        "gauge",
 		"laraplate_edge_clock_offset_seconds":                "gauge",
 		"laraplate_edge_last_error_timestamp_seconds":        "gauge",
+		"laraplate_edge_output_settle_failures_total":        "counter",
 	}
 	for name, typ := range types {
 		f := families[name]
@@ -292,6 +293,7 @@ func TestMetrics(t *testing.T) {
 			`{output="main"}`:  float64(epoch.Add(-10 * time.Second).Unix()),
 			`{output="spare"}`: 0,
 		},
+		"laraplate_edge_output_settle_failures_total": {`{output="main"}`: 4},
 	}
 	for name, series := range want {
 		f := families[name]

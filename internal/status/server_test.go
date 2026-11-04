@@ -90,6 +90,7 @@ func sampleStatus() supervisor.Status {
 				LastConfirmation: epoch.Add(-time.Minute),
 				LastError:        "HTTP 503",
 				LastErrorAt:      epoch.Add(-10 * time.Second),
+				SettleFailures:   4,
 			},
 			{ID: "spare", Type: "laraplate-http", State: supervisor.StateFailed, LastError: "open buffer: permission denied"},
 		},

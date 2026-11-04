@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/getlaraplate/laraedge/internal/buffer"
 	"github.com/getlaraplate/laraedge/internal/clock"
@@ -841,12 +842,26 @@ func (m *markFault) MarkSealed(p model.Priority, upTo buffer.Position) error {
 // Drop and Shrink failing (markers or marks not durable) keep the batch in
 // flight, back off and handle the resent batch's answer again.
 func TestHTTPDropAndShrinkErrorsKeepTheBatch(t *testing.T) {
+	failingDrop := func(h *harness) func() {
+		var fb *faultyBuffer
+		h.wrap = func(b *buffer.Buffer) output.Buffer {
+			fb = &faultyBuffer{Buffer: b, addLoss: faultFailing}
+
+			return fb
+		}
+
+		return func() { fb.addLoss = faultNone }
+	}
+
 	for _, tc := range []struct {
 		name  string
 		reply reply
+		// one sends a one-record batch instead of two records.
+		one bool
 		// arm makes the next Drop or Shrink fail and returns the cure.
 		arm func(h *harness) func()
 	}{
+		{name: "drop on a one-record 413", reply: reply{status: http.StatusRequestEntityTooLarge}, one: true, arm: failingDrop},
 		{name: "drop on 422", reply: reply{status: http.StatusUnprocessableEntity, body: `{"message":"x","errors":{}}`}, arm: func(h *harness) func() {
 			var fb *faultyBuffer
 			h.wrap = func(b *buffer.Buffer) output.Buffer {
@@ -873,12 +888,20 @@ func TestHTTPDropAndShrinkErrorsKeepTheBatch(t *testing.T) {
 			f := newFixture(t, 2, tc.reply, tc.reply)
 			cure := tc.arm(f.h)
 			f.h.open()
-			f.start(bulk(0), bulk(1))
+			records := []model.Record{bulk(0), bulk(1)}
+			if tc.one {
+				records = records[:1]
+			}
+			f.start(records...)
 
 			first := f.be.next(t)
 			waitTimers(t, f.h.clk, 1)
 			if got := f.out.State(); got != output.Backoff {
 				t.Fatalf("State() = %s after a failed settlement, want backoff", got)
+			}
+
+			if got := f.out.SettleFailures(); got != 1 {
+				t.Fatalf("SettleFailures() = %d after one failed settlement, want 1", got)
 			}
 
 			if b, _, err := output.NewInflight(f.h.dir).Load(); err != nil || b == nil || b.MessageID != first.messageID {
@@ -889,7 +912,96 @@ func TestHTTPDropAndShrinkErrorsKeepTheBatch(t *testing.T) {
 			f.expectWait(500*time.Millisecond, output.Backoff)
 			sameRequest(t, f.be.next(t), first)
 			f.waitSettled()
+			if got := f.out.SettleFailures(); got != 1 {
+				t.Fatalf("SettleFailures() = %d after the settlement succeeded, want 1", got)
+			}
 		})
+	}
+}
+
+// A Drop that keeps failing counts every failed attempt.
+func TestHTTPSettleFailuresCountEveryFailedAttempt(t *testing.T) {
+	refused := reply{status: http.StatusUnprocessableEntity, body: `{"message":"x","errors":{}}`}
+	f := newFixture(t, 2, refused, refused, refused)
+	var fb *faultyBuffer
+	f.h.wrap = func(b *buffer.Buffer) output.Buffer {
+		fb = &faultyBuffer{Buffer: b, addLoss: faultFailing}
+
+		return fb
+	}
+	f.h.open()
+	f.start(bulk(0), bulk(1))
+
+	f.be.next(t)
+	waitTimers(t, f.h.clk, 1)
+	if got := f.out.SettleFailures(); got != 1 {
+		t.Fatalf("SettleFailures() = %d after the first failed drop, want 1", got)
+	}
+
+	f.expectWait(500*time.Millisecond, output.Backoff)
+	f.be.next(t)
+	waitTimers(t, f.h.clk, 1)
+	if got := f.out.SettleFailures(); got != 2 {
+		t.Fatalf("SettleFailures() = %d after the second failed drop, want 2", got)
+	}
+
+	fb.addLoss = faultNone
+	f.expectWait(time.Second, output.Backoff)
+	f.be.next(t)
+	f.waitSettled()
+	if got := f.out.SettleFailures(); got != 2 {
+		t.Fatalf("SettleFailures() = %d after the drop succeeded, want 2", got)
+	}
+}
+
+// closeRecorder is a transport that records CloseIdleConnections.
+type closeRecorder struct {
+	http.RoundTripper
+	closed atomic.Int32
+}
+
+func (c *closeRecorder) CloseIdleConnections() { c.closed.Add(1) }
+
+func TestHTTPRunClosesIdleConnectionsWhenItReturns(t *testing.T) {
+	f := newFixture(t, 1)
+	rec := &closeRecorder{RoundTripper: f.be.srv.Client().Transport}
+	f.client = &http.Client{Transport: rec}
+	f.start(bulk(0))
+	f.waitDelivered()
+	if n := rec.closed.Load(); n != 0 {
+		t.Fatalf("CloseIdleConnections called %d times while Run sends, want 0", n)
+	}
+
+	f.run.stop(t)
+	if n := rec.closed.Load(); n != 1 {
+		t.Fatalf("CloseIdleConnections called %d times after Run returned, want 1", n)
+	}
+}
+
+// foreignTransport is a RoundTripper that is not an *http.Transport.
+type foreignTransport struct{}
+
+func (foreignTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("foreign transport")
+}
+
+func TestNewClientWithAForeignDefaultTransport(t *testing.T) {
+	saved := http.DefaultTransport
+	http.DefaultTransport = foreignTransport{}
+	t.Cleanup(func() { http.DefaultTransport = saved })
+
+	c, err := output.NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient(nil) = %v", err)
+	}
+
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport %T, want a fresh *http.Transport", c.Transport)
+	}
+
+	if tr.Proxy == nil || tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 || tr.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("transport proxy set %v, TLS %+v; want the proxy from the environment and TLS 1.2 or later, verified", tr.Proxy != nil, tr.TLSClientConfig)
 	}
 }
 
@@ -932,17 +1044,22 @@ func TestHTTPNeverLogsTheToken(t *testing.T) {
 
 			f.run.stop(t)
 
-			secret := tc.token
-			if i := strings.Index(secret, "SECRET"); i >= 0 {
-				secret = secret[i:]
+			// The whole token, and each part of it around a control
+			// character, which a log could write escaped.
+			parts := append([]string{tc.token}, strings.FieldsFunc(tc.token, unicode.IsControl)...)
+			msg, _ := f.out.LastError()
+			if msg == "" {
+				t.Error("LastError() is empty, want a message")
 			}
 
-			if strings.Contains(f.logs.String(), secret) {
-				t.Errorf("the token appears in the logs:\n%s", f.logs)
-			}
+			for _, secret := range parts {
+				if strings.Contains(f.logs.String(), secret) {
+					t.Errorf("%q of the token appears in the logs:\n%s", secret, f.logs)
+				}
 
-			if msg, _ := f.out.LastError(); msg == "" || strings.Contains(msg, secret) {
-				t.Errorf("LastError() = %q, want a message without the token", msg)
+				if strings.Contains(msg, secret) {
+					t.Errorf("LastError() = %q, want a message without %q", msg, secret)
+				}
 			}
 		})
 	}
