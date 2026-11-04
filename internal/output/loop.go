@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/backoff"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
@@ -157,7 +158,7 @@ type Loop struct {
 	wake <-chan struct{}
 
 	// Owned by the Run goroutine.
-	backoff    backoff
+	backoff    backoff.Exponential
 	recovering bool
 
 	mu          sync.Mutex
@@ -184,7 +185,6 @@ func NewLoop(cfg LoopConfig) *Loop {
 		log:         cfg.Logger,
 		onReconnect: cfg.OnReconnect,
 		reload:      make(chan struct{}, 1),
-		backoff:     backoff{rand: cfg.Rand},
 		state:       Sending,
 	}
 
@@ -204,9 +204,12 @@ func NewLoop(cfg LoopConfig) *Loop {
 		l.onReconnect = func() {}
 	}
 
-	if l.backoff.rand == nil {
-		l.backoff.rand = rand.Float64
+	draw := cfg.Rand
+	if draw == nil {
+		draw = rand.Float64
 	}
+
+	l.backoff = newBackoff(draw)
 
 	return l
 }
@@ -296,7 +299,7 @@ func (l *Loop) confirm(ctx context.Context, b *Batch, status int) {
 
 	l.log.Debug("output: batch delivered", attrs...)
 
-	l.backoff.reset()
+	l.backoff.Reset()
 	if l.recovering {
 		l.recovering = false
 		l.onReconnect()
@@ -354,7 +357,7 @@ func (l *Loop) drop(ctx context.Context, b *Batch, reason, done string) {
 
 // backOff waits the next backoff step, at least retryAfter (capped).
 func (l *Loop) backOff(ctx context.Context, retryAfter time.Duration) {
-	wait := max(l.backoff.next(), min(retryAfter, backoffMax))
+	wait := max(l.backoff.Next(), min(retryAfter, backoffMax))
 
 	l.setState(Backoff)
 	l.recovering = true

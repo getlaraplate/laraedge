@@ -1,11 +1,12 @@
 package output
 
 import (
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/getlaraplate/laraedge/internal/backoff"
 )
 
 const (
@@ -15,42 +16,11 @@ const (
 	backoffMax = 5 * time.Minute
 )
 
-// backoff is the exponential backoff with jitter of one output: the step
-// doubles from backoffMin to backoffMax after every temporary error and the
-// wait is drawn in [step/2, step]. It is owned by one goroutine.
-type backoff struct {
-	attempt int
-	rand    func() float64
-}
-
-// next returns the wait before the next attempt and raises the step.
-func (b *backoff) next() time.Duration {
-	step := backoffMin
-	for i := 0; i < b.attempt && step < backoffMax; i++ {
-		step *= 2
-	}
-
-	step = min(step, backoffMax)
-	if step < backoffMax {
-		b.attempt++
-	}
-
-	r := b.rand()
-	switch {
-	case r < 0 || math.IsNaN(r):
-		r = 0
-	case r > 1:
-		r = 1
-	}
-
-	half := step / 2
-
-	return half + time.Duration(r*float64(step-half))
-}
-
-// reset starts the backoff again from backoffMin, after a confirmation.
-func (b *backoff) reset() {
-	b.attempt = 0
+// newBackoff returns the exponential backoff with jitter of one output: the
+// step doubles from backoffMin to backoffMax after every temporary error and
+// the wait is drawn in [step/2, step]. It is owned by the Run goroutine.
+func newBackoff(rand func() float64) backoff.Exponential {
+	return backoff.New(backoffMin, backoffMax, rand)
 }
 
 // retryAfter parses a Retry-After header, delay seconds or an HTTP date,
