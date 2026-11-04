@@ -434,3 +434,163 @@ func TestTrustStore(t *testing.T) {
 		}
 	})
 }
+
+func TestEnsureOwnCertificateRefusesAKeyWiderThan0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no POSIX file modes on Windows")
+	}
+
+	dataDir := t.TempDir()
+	if _, _, err := EnsureOwnCertificate(dataDir, "agent-42", pkiNow); err != nil {
+		t.Fatal(err)
+	}
+
+	keyPath := filepath.Join(ownDir(dataDir), "key.pem")
+	before := readFile(t, keyPath)
+
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o700, 0o666} {
+		t.Run(mode.String(), func(t *testing.T) {
+			if err := os.Chmod(keyPath, mode); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := EnsureOwnCertificate(dataDir, "agent-42", pkiNow)
+			if err == nil {
+				t.Fatal("expected an error for a key readable beyond its owner")
+			}
+
+			if !strings.Contains(err.Error(), keyPath) || !strings.Contains(err.Error(), "0600") {
+				t.Errorf("error = %q, want it to name %s and the wanted mode 0600", err, keyPath)
+			}
+
+			if string(readFile(t, keyPath)) != string(before) {
+				t.Error("key.pem was rewritten")
+			}
+		})
+	}
+
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		if err := os.Chmod(keyPath, mode); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, _, err := EnsureOwnCertificate(dataDir, "agent-42", pkiNow); err != nil {
+			t.Errorf("mode %v: %v", mode, err)
+		}
+	}
+}
+
+func TestTrustedComparesTheStoredFileWithItsName(t *testing.T) {
+	store := TrustStore{Dir: PKIDir(t.TempDir())}
+
+	a := selfSigned(t, "server-a")
+	b := selfSigned(t, "server-b")
+
+	path := filepath.Join(store.Dir, "trusted", Thumbprint(a)+".der")
+	writeFile(t, path, b)
+
+	if store.Trusted(Thumbprint(a)) {
+		t.Fatal("a file named after a but holding b is trusted for a")
+	}
+
+	if string(readFile(t, path)) != string(b) {
+		t.Error("the mismatching file was changed or removed")
+	}
+
+	writeFile(t, path, []byte("not a certificate"))
+
+	if store.Trusted(Thumbprint(a)) {
+		t.Fatal("a file that is not a certificate is trusted")
+	}
+
+	writeFile(t, path, a)
+
+	if !store.Trusted(Thumbprint(a)) {
+		t.Fatal("the matching file is not trusted")
+	}
+}
+
+func TestSweepStaleOwnRemovesOnlyOldTemporaryOwnDirectories(t *testing.T) {
+	dataDir := t.TempDir()
+	pki := PKIDir(dataDir)
+	now := time.Now().Add(48 * time.Hour)
+
+	mkdir := func(name string) string {
+		t.Helper()
+
+		dir := filepath.Join(pki, name)
+		writeFile(t, filepath.Join(dir, "key.pem"), []byte("KEY"))
+
+		return dir
+	}
+
+	stale := mkdir("own-123456.tmp")
+	staleEmpty := filepath.Join(pki, "own-42.tmp")
+	if err := os.MkdirAll(staleEmpty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := mkdir("own-777.tmp")
+	if err := os.Chtimes(fresh, now, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	kept := []string{
+		mkdir("own"),
+		mkdir("own-abc.tmp"),
+		mkdir("xown-1.tmp"),
+		mkdir("own-1.tmp.bak"),
+		mkdir(filepath.Join("trusted", "own-9.tmp")),
+		fresh,
+	}
+
+	aFile := filepath.Join(pki, "own-55.tmp")
+	writeFile(t, aFile, []byte("a file, not a directory"))
+
+	kept = append(kept, aFile)
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	writeFile(t, filepath.Join(outside, "key.pem"), []byte("OUTSIDE"))
+
+	link := filepath.Join(pki, "own-66.tmp")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+
+	removed, err := SweepStaleOwn(dataDir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// In name order: own-123456.tmp sorts before own-42.tmp.
+	if len(removed) != 2 || removed[0] != stale || removed[1] != staleEmpty {
+		t.Errorf("removed = %v, want [%s %s]", removed, stale, staleEmpty)
+	}
+
+	for _, dir := range []string{stale, staleEmpty} {
+		if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s still exists (%v)", dir, err)
+		}
+	}
+
+	for _, path := range kept {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("%s was removed: %v", path, err)
+		}
+	}
+
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink was removed or replaced: %v", err)
+	}
+
+	if string(readFile(t, filepath.Join(outside, "key.pem"))) != "OUTSIDE" {
+		t.Error("a file outside the PKI directory was touched")
+	}
+}
+
+func TestSweepStaleOwnWithoutAPKIDirectory(t *testing.T) {
+	removed, err := SweepStaleOwn(t.TempDir(), time.Now())
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("SweepStaleOwn = %v, %v, want nothing", removed, err)
+	}
+}

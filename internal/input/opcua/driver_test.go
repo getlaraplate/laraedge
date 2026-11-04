@@ -434,6 +434,58 @@ func TestStartFailsWithAnUnwritableDataDir(t *testing.T) {
 	}
 }
 
+func TestStartRemovesAStaleTemporaryOwnDirectoryAndLogsIt(t *testing.T) {
+	loadFixtures(t)
+
+	dataDir := t.TempDir()
+	seedOwnCertificate(t, dataDir)
+
+	stale := filepath.Join(PKIDir(dataDir), "own-31337.tmp")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, ownKeyFile), []byte("KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * ownTmpStaleAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &syncBuffer{}
+	cfg := opcuaInput(noneConn("opc.tcp://127.0.0.1:1"), time.Second, device("press-07", polled("count", "i=2258", "int32", time.Second)))
+	in, err := New(cfg, clock.NewFake(driverEpoch), Options{DataDir: dataDir, AgentID: "test-agent", Logger: logging.New(logs, slog.LevelDebug)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Start(t.Context(), func(model.Record) {}); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("%s still exists (%v)", stale, err)
+	}
+
+	const msg = "opcua pki: removed a temporary own certificate directory left by an interrupted run"
+
+	var got int
+
+	for _, rec := range logs.records(t) {
+		if rec["msg"] == msg {
+			got++
+			if rec["level"] != "WARN" || rec["input"] != "in1" || rec["dir"] != stale {
+				t.Errorf("record = %v, want WARN with input in1 and dir %s", rec, stale)
+			}
+		}
+	}
+	if got != 1 {
+		t.Fatalf("%d records %q, want 1", got, msg)
+	}
+}
+
 func TestNoneWarnsAtEveryStart(t *testing.T) {
 	loadFixtures(t)
 

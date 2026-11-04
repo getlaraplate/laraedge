@@ -327,12 +327,29 @@ func (in *Input) ownCertificate() (ownKeyPair, error) {
 		return ownKeyPair{}, errNoDataDir
 	}
 
+	in.sweepStaleOwn()
+
 	cert, key, err := EnsureOwnCertificate(in.opts.DataDir, in.opts.AgentID, in.clk.Now())
 	if err != nil {
 		return ownKeyPair{}, err
 	}
 
 	return ownKeyPair{cert: cert, key: key}, nil
+}
+
+// sweepStaleOwn removes, with a WARN each, the temporary own directories a
+// crash left in the PKI directory (SweepStaleOwn). A failure to remove one is
+// logged and does not stop the input: the pair in own/ is still usable. It
+// compares with time.Now, not the input's clock: file times are wall-clock.
+func (in *Input) sweepStaleOwn() {
+	removed, err := SweepStaleOwn(in.opts.DataDir, time.Now())
+	for _, dir := range removed {
+		in.log.Warn("opcua pki: removed a temporary own certificate directory left by an interrupted run", "input", in.cfg.ID, "dir", dir)
+	}
+
+	if err != nil {
+		in.log.Warn("opcua pki: a temporary own certificate directory left by an interrupted run cannot be removed", "input", in.cfg.ID, "error", err)
+	}
 }
 
 func (in *Input) timings() timings {

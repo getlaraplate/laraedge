@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 
 	"github.com/gopcua/opcua/uapolicy"
@@ -32,8 +33,13 @@ const (
 	ownRSABits    = 2048
 	ownValidity   = 10 // years
 	ownClockSkew  = time.Hour
-	ownAppURIBase = "urn:laraplate-edge:"
-	certSuffix    = ".der"
+	ownTmpPattern = "own-*.tmp"
+	// ownTmpStaleAge is the age after which a temporary own directory is a
+	// leftover: a younger one may be a generation still running in another
+	// input or process (`opcua trust`), which a sweep must not break.
+	ownTmpStaleAge = time.Hour
+	ownAppURIBase  = "urn:laraplate-edge:"
+	certSuffix     = ".der"
 )
 
 // Errors of the own/ directory are fixed texts: they never carry file content.
@@ -51,6 +57,9 @@ var (
 var (
 	thumbprintRE     = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	thumbprintFileRE = regexp.MustCompile(`^[0-9a-f]{40}\.der$`)
+	// ownTmpRE is the name os.MkdirTemp gives ownTmpPattern: a decimal number
+	// between the prefix and the suffix.
+	ownTmpRE = regexp.MustCompile(`^own-[0-9]+\.tmp$`)
 )
 
 // PKIDir is the directory holding own/, trusted/ and rejected/ for dataDir.
@@ -91,7 +100,7 @@ func EnsureOwnCertificate(dataDir, agentID string, now time.Time) ([]byte, *rsa.
 		return nil, nil, err
 	}
 
-	tmp, err := os.MkdirTemp(pki, "own-*.tmp")
+	tmp, err := os.MkdirTemp(pki, ownTmpPattern)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opcua pki: create temporary directory: %w", err)
 	}
@@ -109,10 +118,6 @@ func EnsureOwnCertificate(dataDir, agentID string, now time.Time) ([]byte, *rsa.
 	}
 
 	if err := atomicfile.Write(tmp, ownKeyFile, keyPEM); err != nil {
-		return nil, nil, err
-	}
-
-	if err := atomicfile.SyncDir(tmp); err != nil {
 		return nil, nil, err
 	}
 
@@ -134,6 +139,55 @@ func EnsureOwnCertificate(dataDir, agentID string, now time.Time) ([]byte, *rsa.
 	}
 
 	return certDER, key, nil
+}
+
+// SweepStaleOwn removes the temporary own directories (own-<n>.tmp) that
+// EnsureOwnCertificate leaves in the PKI directory of dataDir when the process
+// dies between creating one and renaming it to own/: they can hold a private
+// key. It removes only what EnsureOwnCertificate creates: a direct entry of
+// the PKI directory with that exact name, that is a directory and not a
+// symlink (never followed), last modified at least ownTmpStaleAge before now.
+// now is wall-clock time, as file times are. It returns the removed paths in
+// name order; a missing PKI directory is nothing to do.
+func SweepStaleOwn(dataDir string, now time.Time) ([]string, error) {
+	pki := PKIDir(dataDir)
+
+	entries, err := os.ReadDir(pki)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("opcua pki: list %s: %w", pki, err)
+	}
+
+	var (
+		removed []string
+		errs    []error
+	)
+
+	for _, e := range entries {
+		if !ownTmpRE.MatchString(e.Name()) || !e.IsDir() {
+			continue
+		}
+
+		path := filepath.Join(pki, e.Name())
+
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || now.Sub(info.ModTime()) < ownTmpStaleAge {
+			continue
+		}
+
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, fmt.Errorf("opcua pki: remove %s: %w", path, err))
+
+			continue
+		}
+
+		removed = append(removed, path)
+	}
+
+	return removed, errors.Join(errs...)
 }
 
 // generateOwn builds a new certificate and key; the PEM is the PKCS#8 encoding
@@ -199,11 +253,16 @@ func loadOwn(own string) ([]byte, *rsa.PrivateKey, error) {
 		return nil, nil, fmt.Errorf("opcua pki: inspect own certificate directory: %w", err)
 	}
 
+	keyPath := filepath.Join(own, ownKeyFile)
 	certDER, certErr := os.ReadFile(filepath.Join(own, ownCertFile))
-	keyPEM, keyErr := os.ReadFile(filepath.Join(own, ownKeyFile))
+	keyPEM, keyErr := os.ReadFile(keyPath)
 
 	if errors.Is(certErr, os.ErrNotExist) || errors.Is(keyErr, os.ErrNotExist) {
 		return nil, nil, errOwnIncomplete
+	}
+
+	if err := checkKeyMode(keyPath, runtime.GOOS); err != nil {
+		return nil, nil, err
 	}
 
 	if certErr != nil || keyErr != nil {
@@ -237,6 +296,27 @@ func loadOwn(own string) ([]byte, *rsa.PrivateKey, error) {
 	return certDER, key, nil
 }
 
+// checkKeyMode refuses, on a system with POSIX file modes, a key file whose
+// mode grants anything beyond read and write to its owner (EnsureOwnCertificate
+// writes it 0600): another user may have read the key. The error names the path
+// and the mode, never the content; the operator fixes the mode or removes own/.
+func checkKeyMode(path, goos string) error {
+	if goos == "windows" {
+		return nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return errors.New("opcua pki: read own certificate files failed")
+	}
+
+	if mode := info.Mode().Perm(); mode&^0o600 != 0 {
+		return fmt.Errorf("opcua pki: %s has mode %04o, want 0600 or narrower (chmod 600 it)", path, mode)
+	}
+
+	return nil
+}
+
 // CertInfo describes a certificate of the trust store.
 type CertInfo struct {
 	Thumbprint string
@@ -253,15 +333,25 @@ type TrustStore struct {
 }
 
 // Trusted reports whether a certificate with this thumbprint (40 lowercase
-// hex characters) is in trusted/. Anything else is not trusted.
+// hex characters) is in trusted/: a regular file of that name whose content
+// has that thumbprint. A file whose content does not match its name is not
+// trusted and is left in place (List reports it). Anything else is not
+// trusted.
 func (s TrustStore) Trusted(thumb string) bool {
 	if !thumbprintRE.MatchString(thumb) {
 		return false
 	}
 
-	info, err := os.Stat(filepath.Join(s.Dir, "trusted", thumb+certSuffix))
+	path := filepath.Join(s.Dir, "trusted", thumb+certSuffix)
 
-	return err == nil && info.Mode().IsRegular()
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+
+	der, err := os.ReadFile(path)
+
+	return err == nil && Thumbprint(der) == thumb
 }
 
 // Trust stores the leaf certificate of der in trusted/ and returns its
