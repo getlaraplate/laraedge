@@ -3,6 +3,7 @@ package clock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -107,14 +108,9 @@ func TestFakeZeroDurationTimerFiresOnNextAdvance(t *testing.T) {
 func TestFakeSleepReturnsWhenAdvanced(t *testing.T) {
 	f := NewFake(epoch)
 	errc := make(chan error, 1)
-	started := make(chan struct{})
 
-	go func() {
-		close(started)
-		errc <- f.Sleep(context.Background(), time.Minute)
-	}()
-	<-started
-	waitForTimers(t, f, 1)
+	go func() { errc <- f.Sleep(context.Background(), time.Minute) }()
+	f.BlockUntil(t, 1)
 
 	f.Advance(time.Minute)
 	if err := <-errc; err != nil {
@@ -128,7 +124,7 @@ func TestFakeSleepReturnsOnCancel(t *testing.T) {
 	errc := make(chan error, 1)
 
 	go func() { errc <- f.Sleep(ctx, time.Hour) }()
-	waitForTimers(t, f, 1)
+	f.BlockUntil(t, 1)
 
 	cancel()
 	if err := <-errc; !errors.Is(err, context.Canceled) {
@@ -162,7 +158,7 @@ func TestFakeConcurrentUse(t *testing.T) {
 		}()
 	}
 
-	waitForTimers(t, f, 20)
+	f.BlockUntil(t, 20)
 	f.Advance(time.Second)
 	wg.Wait()
 }
@@ -191,15 +187,105 @@ func TestRealClock(t *testing.T) {
 	}
 }
 
-// waitForTimers blocks until the fake has n pending timers, so a goroutine
-// registering a timer is ordered before the test advances time.
-func waitForTimers(t *testing.T, f *Fake, n int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for f.PendingTimers() != n {
-		if time.Now().After(deadline) {
-			t.Fatalf("PendingTimers() = %d, want %d", f.PendingTimers(), n)
+// recorder stands in for testing.TB so a test can observe BlockUntil failing.
+type recorder struct {
+	failed bool
+	msg    string
+}
+
+func (r *recorder) Helper() {}
+
+func (r *recorder) Fatalf(format string, args ...any) {
+	r.failed = true
+	r.msg = fmt.Sprintf(format, args...)
+}
+
+func TestBlockUntilReturnsWhenTimersArePending(t *testing.T) {
+	f := NewFake(epoch)
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		f.NewTimer(time.Second)
+		time.Sleep(20 * time.Millisecond)
+		f.NewTimer(time.Minute)
+	}()
+
+	f.BlockUntil(t, 2)
+	if n := f.PendingTimers(); n != 2 {
+		t.Fatalf("PendingTimers() = %d, want 2", n)
+	}
+}
+
+func TestBlockUntilCountsLiveTimers(t *testing.T) {
+	f := NewFake(epoch)
+	stopped := f.NewTimer(time.Minute)
+	f.NewTimer(time.Second)
+	f.NewTimer(time.Hour)
+	stopped.Stop()
+	f.Advance(time.Second)
+
+	f.BlockUntil(t, 1)
+
+	old := blockUntilBound
+	blockUntilBound = 50 * time.Millisecond
+	defer func() { blockUntilBound = old }()
+
+	rec := &recorder{}
+	f.BlockUntil(rec, 2)
+	if !rec.failed {
+		t.Fatal("BlockUntil(2) did not fail with a single live timer")
+	}
+}
+
+func TestBlockUntilWakesOnStopAndAdvance(t *testing.T) {
+	f := NewFake(epoch)
+	f.NewTimer(time.Second)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.BlockUntil(t, 1)
+	}()
+	<-done
+
+	// A waiter for 2 is woken by the NewTimer that completes it.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		f.NewTimer(time.Second)
+	}()
+	f.BlockUntil(t, 2)
+}
+
+func TestAdvanceNegativeDoesNotMoveBack(t *testing.T) {
+	f := NewFake(epoch)
+	timer := f.NewTimer(time.Second)
+
+	f.Advance(-time.Second)
+
+	if !f.Now().Equal(epoch) {
+		t.Fatalf("Now() = %v after negative Advance, want %v", f.Now(), epoch)
+	}
+	if fired(t, timer) {
+		t.Fatal("negative Advance fired a timer")
+	}
+}
+
+func TestAdvanceFiresInDeadlineOrder(t *testing.T) {
+	f := NewFake(epoch)
+	three := f.NewTimer(3 * time.Second)
+	one := f.NewTimer(1 * time.Second)
+	two := f.NewTimer(2 * time.Second)
+
+	f.Advance(5 * time.Second)
+
+	// Channels are buffered, so receive by deadline order of delivery:
+	// each timer's own value must equal its deadline.
+	for _, c := range []struct {
+		timer Timer
+		after time.Duration
+	}{{one, time.Second}, {two, 2 * time.Second}, {three, 3 * time.Second}} {
+		if got, want := <-c.timer.C(), epoch.Add(c.after); !got.Equal(want) {
+			t.Fatalf("timer delivered %v, want %v", got, want)
 		}
-		time.Sleep(time.Millisecond)
 	}
 }

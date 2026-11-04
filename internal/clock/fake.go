@@ -13,11 +13,17 @@ type Fake struct {
 	mu     sync.Mutex
 	now    time.Time
 	timers []*fakeTimer
+	// changed is closed and replaced on every NewTimer, Stop and Advance, so
+	// BlockUntil wakes on each change without polling.
+	changed chan struct{}
 }
+
+// blockUntilBound is how long BlockUntil waits before failing the test.
+var blockUntilBound = 10 * time.Second
 
 // NewFake returns a Fake clock reading start.
 func NewFake(start time.Time) *Fake {
-	return &Fake{now: start}
+	return &Fake{now: start, changed: make(chan struct{})}
 }
 
 // Now returns the fake time.
@@ -40,6 +46,7 @@ func (f *Fake) NewTimer(d time.Duration) Timer {
 		ch:       make(chan time.Time, 1),
 	}
 	f.timers = append(f.timers, timer)
+	f.signal()
 
 	return timer
 }
@@ -66,9 +73,16 @@ func (f *Fake) Sleep(ctx context.Context, d time.Duration) error {
 // is reached, in deadline order. Each timer is delivered its own deadline.
 // Timers registered by other goroutines while Advance runs are considered on
 // the next call.
+//
+// A negative d is treated as 0: the clock never moves back.
 func (f *Fake) Advance(d time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	defer f.signal()
+
+	if d < 0 {
+		d = 0
+	}
 
 	target := f.now.Add(d)
 
@@ -103,6 +117,43 @@ func (f *Fake) PendingTimers() int {
 	return len(f.timers)
 }
 
+// BlockUntil waits until at least n timers are pending (created, neither fired
+// nor stopped), or fails t after the bound. It wakes on every NewTimer, Stop
+// and Advance. It takes a small interface instead of testing.TB so this
+// package does not import testing into the agent binary.
+func (f *Fake) BlockUntil(t interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}, n int) {
+	t.Helper()
+
+	bound := time.NewTimer(blockUntilBound)
+	defer bound.Stop()
+
+	for {
+		f.mu.Lock()
+		pending, changed := len(f.timers), f.changed
+		f.mu.Unlock()
+
+		if pending >= n {
+			return
+		}
+
+		select {
+		case <-changed:
+		case <-bound.C:
+			t.Fatalf("PendingTimers() = %d, want at least %d", pending, n)
+			return
+		}
+	}
+}
+
+// signal wakes every BlockUntil waiter. The caller holds f.mu.
+func (f *Fake) signal() {
+	close(f.changed)
+	f.changed = make(chan struct{})
+}
+
 type fakeTimer struct {
 	clock    *Fake
 	deadline time.Time
@@ -118,6 +169,7 @@ func (t *fakeTimer) Stop() bool {
 	for i, pending := range t.clock.timers {
 		if pending == t {
 			t.clock.timers = append(t.clock.timers[:i], t.clock.timers[i+1:]...)
+			t.clock.signal()
 			return true
 		}
 	}
