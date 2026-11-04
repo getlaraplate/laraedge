@@ -594,3 +594,23 @@ func TestSweepStaleOwnWithoutAPKIDirectory(t *testing.T) {
 		t.Fatalf("SweepStaleOwn = %v, %v, want nothing", removed, err)
 	}
 }
+
+// Windows has no POSIX modes: the key is never refused for its mode there.
+func TestCheckKeyModeIsUnixOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "key.pem")
+	writeFile(t, path, []byte("KEY"))
+
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := checkKeyMode(path, "windows"); err != nil {
+		t.Errorf("windows: %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		if err := checkKeyMode(path, "linux"); err == nil {
+			t.Error("linux: a 0644 key is accepted")
+		}
+	}
+}
