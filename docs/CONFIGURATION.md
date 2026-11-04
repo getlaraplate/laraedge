@@ -656,7 +656,7 @@ written atomically (directory mode `0700`, file `0600`) on every count:
 | `route.include` | no | `["*"]` | patterns matched against `device/signal` (Go `path.Match`: `*`, `?`, `[...]`). `*` alone matches everything; a pattern without `/` means `<pattern>/*`. A device's `birth` and `death` go to every output routing at least one of its signals, and the `birth` lists only those. |
 | `batch.max_samples` | no | `1000` | records per batch, 1 to 5000 (the backend default of `mes.machine.max_samples`) |
 | `batch.max_body` | no | `1024KiB` | bytes per request body, at most `1024KiB` (`mes.machine.max_body_kb`) |
-| `batch.max_wait` | no | `2s` | how long a batch waits to fill, from its first record |
+| `batch.max_wait` | no | `2s` | how long a batch waits to fill, from the moment its first record entered the buffer |
 | `buffer.max_size` | no | `1GiB` | bytes both queues of the output may use on disk, at least `32MiB` (two segments of 16 MiB) |
 | `buffer.min_free_percent` | no | `5` | share of the disk kept free, above 0 and at most 50 |
 | `buffer.fsync_interval` | no | `200ms` | group sync period of written records |

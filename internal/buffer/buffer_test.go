@@ -1798,3 +1798,43 @@ func TestPinnedSegmentSizeIsValidated(t *testing.T) {
 		})
 	}
 }
+
+func TestUnsealedAgeRunsFromTheOldestAppendNotSealed(t *testing.T) {
+	clk := clock.NewFake(epoch)
+	dir := t.TempDir()
+	opts := testOptions(t, clk)
+	b := openBuffer(t, dir, opts, hooks{})
+	assertAge := func(want time.Duration) {
+		t.Helper()
+		if got := b.UnsealedAge(); got != want {
+			t.Fatalf("UnsealedAge() = %v, want %v", got, want)
+		}
+	}
+
+	assertAge(0)
+	mustAppend(t, b, bulk(0))
+	clk.Advance(time.Second)
+	mustAppend(t, b, bulk(1))
+	clk.Advance(time.Second)
+	assertAge(2 * time.Second)
+
+	entries := readAll(t, b, model.Bulk)
+	if err := b.MarkSealed(model.Bulk, entries[0].Next); err != nil {
+		t.Fatal(err)
+	}
+	assertAge(2 * time.Second) // bulk(1) is left: it waited at least that long
+
+	if err := b.MarkSealed(model.Bulk, entries[1].Next); err != nil {
+		t.Fatal(err)
+	}
+	assertAge(0)
+
+	mustAppend(t, b, crit(0))
+	clk.Advance(time.Second)
+	assertAge(time.Second)
+
+	mustClose(t, b)
+	b = openBuffer(t, dir, opts, hooks{})
+	clk.Advance(time.Second)
+	assertAge(time.Second) // the records found at Open count from Open
+}

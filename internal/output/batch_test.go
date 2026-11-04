@@ -388,6 +388,39 @@ func TestNextWaitsMaxWaitForMoreRecords(t *testing.T) {
 	}
 }
 
+// TestMaxWaitCountsFromTheFirstAppend: max_wait runs from the append of the
+// first record waiting, not from the Next call that finds it.
+func TestMaxWaitCountsFromTheFirstAppend(t *testing.T) {
+	h := newHarness(t, output.BatchLimits{MaxSamples: 10, MaxBody: 1 << 20, MaxWait: time.Second}).open()
+	bufClk, ok := h.opts.Clock.(*clock.Fake)
+	if !ok {
+		t.Fatal("test setup: the buffer clock is not a fake")
+	}
+
+	h.append(bulk(0))
+	bufClk.Advance(800 * time.Millisecond)
+	h.clk.Advance(800 * time.Millisecond)
+
+	res := h.nextAsync(context.Background())
+	waitTimers(t, h.clk, 1)
+	h.clk.Advance(200*time.Millisecond - time.Nanosecond)
+	select {
+	case r := <-res:
+		t.Fatalf("Next() returned before max_wait: %v, %v", r.batch, r.err)
+	default:
+	}
+
+	h.clk.Advance(time.Nanosecond)
+	select {
+	case r := <-res:
+		if r.err != nil || r.batch.Len() != 1 {
+			t.Fatalf("Next() = %v, %v; want one record", r.batch, r.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Next() did not seal at max_wait after the append")
+	}
+}
+
 func TestNextSealsAtOnceWhenMaxSamplesArrive(t *testing.T) {
 	h := newHarness(t, output.BatchLimits{MaxSamples: 3, MaxBody: 1 << 20, MaxWait: time.Hour}).open()
 

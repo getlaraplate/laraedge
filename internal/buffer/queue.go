@@ -207,6 +207,10 @@ func (q *queue) head() Position { return max(q.ack, q.segments[0].base) }
 // active segment rotates first.
 func (q *queue) tail() Position { return q.active().end() }
 
+// hasUnsealed reports whether the queue holds a record beyond both its
+// confirmed position and its sealed mark.
+func (q *queue) hasUnsealed() bool { return max(q.sealed, q.head()) < q.tail() }
+
 // bytes returns the size of the queue on disk, confirmed records included.
 func (q *queue) bytes() int64 {
 	var n int64

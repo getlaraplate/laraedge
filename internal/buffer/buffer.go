@@ -156,6 +156,10 @@ type Buffer struct {
 	dropped     map[string]uint64
 	failures    *failureLog
 
+	// unsealedSince is the clock time of the Append of the oldest record not
+	// yet sealed, or earlier: zero when no record waits (UnsealedAge).
+	unsealedSince time.Time
+
 	diskChecked   bool
 	diskCheckedAt time.Time
 	diskLow       bool
@@ -240,6 +244,9 @@ func open(dir string, opts Options, h hooks) (*Buffer, error) {
 	}
 
 	b.critical, b.bulk = critical, bulk
+	if critical.unacked+bulk.unacked > 0 {
+		b.unsealedSince = opts.Clock.Now()
+	}
 
 	go b.syncLoop()
 
@@ -357,6 +364,10 @@ func (b *Buffer) Append(r model.Record) error {
 		b.dropRecord(q.priority, r, "floor_breached", "free disk floor breached by other data", nil)
 
 		return fmt.Errorf("buffer: append to the %s queue: %w", q.priority, errors.Join(ErrDropped, err))
+	}
+
+	if b.unsealedSince.IsZero() {
+		b.unsealedSince = b.opts.Clock.Now()
 	}
 
 	select {
@@ -659,6 +670,7 @@ func (b *Buffer) Ack(p model.Priority, upTo Position) error {
 	q.unacked -= min(n, q.unacked)
 	q.oldestValid = false
 	q.deleteWhere(func(s *segment) bool { return s.end() <= q.ack })
+	b.clearUnsealedLocked()
 
 	return nil
 }
@@ -681,8 +693,34 @@ func (b *Buffer) MarkSealed(p model.Priority, upTo Position) error {
 	}
 
 	q.sealed = upTo
+	b.clearUnsealedLocked()
 
 	return nil
+}
+
+// clearUnsealedLocked forgets the unsealed time once neither queue holds a
+// record beyond its sealed mark. A seal that leaves records behind keeps the
+// time of the oldest append: the records left waited at least that long.
+func (b *Buffer) clearUnsealedLocked() {
+	if !b.critical.hasUnsealed() && !b.bulk.hasUnsealed() {
+		b.unsealedSince = time.Time{}
+	}
+}
+
+// UnsealedAge returns how long the oldest record not yet sealed has waited
+// since its Append, measured on the buffer's clock, or longer: a seal that
+// leaves records behind keeps the time of the oldest one before it, and the
+// records found at Open count from Open. It is zero when no record waits.
+// The batcher subtracts it from MaxWait.
+func (b *Buffer) UnsealedAge() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.unsealedSince.IsZero() {
+		return 0
+	}
+
+	return max(b.opts.Clock.Now().Sub(b.unsealedSince), 0)
 }
 
 // AddLoss records a loss marker (rejected_invalid from outputs; buffer_full
