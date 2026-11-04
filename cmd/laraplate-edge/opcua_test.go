@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -480,6 +481,18 @@ func TestBrowseFromANodeIndentsByDepthAndNamesDataTypesAndAccess(t *testing.T) {
 	}
 }
 
+// A start node without children (a variable, an empty folder) prints one
+// note instead of nothing, so an empty answer is not taken for a failure.
+func TestBrowseOfALeafSaysThereIsNothingBelow(t *testing.T) {
+	env := newOPCUAEnv(t, opcuatest.Options{})
+	env.trustServer(t)
+
+	got := browseLines(t, env, "--node", "nsu="+testNS+";s=temp")
+	if want := []string{"(no node below the start node)"}; !slices.Equal(got, want) {
+		t.Fatalf("browse of a leaf = %q, want %q", got, want)
+	}
+}
+
 func TestBrowseLineMarksAnUnreadableAttribute(t *testing.T) {
 	tests := []struct {
 		entry opcua.BrowseEntry
@@ -537,6 +550,7 @@ func TestBrowseFailures(t *testing.T) {
 		code int
 	}{
 		{"depth 0", []string{"--depth", "0"}, exitUsage},
+		{"depth negative", []string{"--depth", "-1"}, exitUsage},
 		{"depth 11", []string{"--depth", "11"}, exitUsage},
 		{"a bad node id", []string{"--node", "Line1"}, exitUsage},
 		{"an unknown namespace", []string{"--node", "nsu=urn:nope;s=x"}, exitFailure},

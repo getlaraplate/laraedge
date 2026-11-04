@@ -340,7 +340,8 @@ nsu=urn:vendor:press;s=Press07  Press07  Object
   and, for a variable, the name of its data type and its access level, `<NodeId>  <BrowseName>  <NodeClass>[
   <DataType>  <access>]`. The access level tells what the server allows on the value: `r` (read), `w`
   (write), `rw`, or `-` for neither; a point needs `r`. An attribute the server does not answer prints as `?`.
-  The start node itself is not printed.
+  The start node itself is not printed; a start node without children (a variable, an empty folder) prints
+  `(no node below the start node)`.
 - `--depth` is the number of levels printed below the start node, 1 (its children only) to 10, 2 by default.
 - A NodeId whose namespace is not 0 is printed in the `nsu=<uri>;...` form when the server's
   `NamespaceArray` names the namespace, in the `ns=<n>;...` form otherwise: paste the line's NodeId as the
