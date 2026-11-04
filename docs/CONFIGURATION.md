@@ -340,9 +340,11 @@ characters. Only the leaf certificate is stored and compared.
   only once the clock is an hour past that time. Each removed directory gets one `WARN` naming it: `opcua
   pki: removed a temporary own certificate directory left by an interrupted run`; inputs that start
   together report it once, because each first claims the directory by renaming it to
-  `own-<number>.tmp.sweep-<hex>` and only the one whose rename succeeds removes it (a claimed name a crash
-  leaves behind is removed the same way). Only plain directories of those exact names directly under
-  `pki/` are removed, never a symlink, junction or mount point, nor what it points to.
+  `own-<number>.tmp.sweep-<claim time>-<random>` and only the one whose rename succeeds removes it. A
+  claimed name a crash leaves behind is removed the same way an hour after the claim. A directory replaced
+  by something else while it was being claimed is left in place, with a `WARN` naming it (`... changed
+  while it was claimed; left in place`). Only plain directories of those exact names directly under `pki/`
+  are removed, never a symlink, junction or mount point, nor what it points to.
 - **The server's certificate is trusted explicitly.** With a policy other than `None`, at every connect the
   agent discovers the server's endpoints, takes the one for the policy and mode, computes the thumbprint of
   its certificate and goes on only when `trusted/<thumbprint>.der` exists and holds a certificate with that

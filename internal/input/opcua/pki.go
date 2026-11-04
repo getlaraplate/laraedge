@@ -10,12 +10,15 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
+	"strconv"
 	"time"
 
 	"github.com/gopcua/opcua/uapolicy"
@@ -60,8 +63,8 @@ var (
 	// ownTmpRE is the name os.MkdirTemp gives ownTmpPattern (a decimal number
 	// between the prefix and the suffix), or that name claimed by a sweep
 	// (ownTmpClaim) that may have crashed before removing it: group 1 is the
-	// unclaimed name.
-	ownTmpRE = regexp.MustCompile(`^(own-[0-9]+\.tmp)(?:\.sweep-[0-9a-f]+)?$`)
+	// unclaimed name, group 2 the claim time (Unix seconds, 16 hex digits).
+	ownTmpRE = regexp.MustCompile(`^(own-[0-9]+\.tmp)(?:\.sweep-([0-9a-f]{16})-[0-9a-f]{16})?$`)
 )
 
 // PKIDir is the directory holding own/, trusted/ and rejected/ for dataDir.
@@ -144,7 +147,7 @@ func EnsureOwnCertificate(dataDir, agentID string, now time.Time) ([]byte, *rsa.
 }
 
 // ownTmpClaim is the infix of a directory a sweep claimed:
-// own-<n>.tmp.sweep-<hex>.
+// own-<n>.tmp.sweep-<claim time>-<random>, both 16 hex digits.
 const ownTmpClaim = ".sweep-"
 
 // SweepStaleOwn removes the temporary own directories (own-<n>.tmp) that
@@ -161,12 +164,24 @@ const ownTmpClaim = ".sweep-"
 // Sweeps may run together (inputs starting at once, the agent and a command).
 // Each directory is first claimed by renaming it, in the same directory, to
 // own-<n>.tmp.sweep-<random hex>: the rename is atomic, so one sweep wins and
-// removes it; a sweep whose rename finds the name gone skips it. A sweep that
-// dies between its claim and the removal leaves a claimed name, which the next
-// sweep handles with the same checks (a rename keeps the directory's time). It
-// returns, in name order, the listed paths of the directories this call
-// removed. A missing PKI directory is nothing to do.
+// removes it; a sweep whose rename finds the name gone, or is refused it (on
+// Windows another sweep may still hold a handle inside), skips it. The claimed
+// path must still be the directory looked at (a plain directory, os.SameFile):
+// one swapped in meanwhile is refused and left in place. It is removed with
+// os.RemoveAll on the claimed path, which unlinks a top-level symlink without
+// following it and never follows one below. A sweep that dies between its
+// claim and the removal leaves a claimed name, which the next sweep handles
+// with the same checks (a rename keeps the directory's time) once the claim,
+// whose time the name carries, is ownTmpStaleAge old. It returns, in
+// name order and by their own-<n>.tmp name, the directories this call claimed
+// and removed. A missing PKI directory is nothing to do.
 func SweepStaleOwn(dataDir string, now time.Time) ([]string, error) {
+	return sweepStaleOwnWith(dataDir, now, os.Rename)
+}
+
+// sweepStaleOwnWith is SweepStaleOwn with the rename of the claim; tests
+// replace it to change the directory between the claim and the removal.
+func sweepStaleOwnWith(dataDir string, now time.Time, rename func(oldPath, newPath string) error) ([]string, error) {
 	pki := PKIDir(dataDir)
 
 	entries, err := os.ReadDir(pki)
@@ -191,12 +206,16 @@ func SweepStaleOwn(dataDir string, now time.Time) ([]string, error) {
 
 		path := filepath.Join(pki, e.Name())
 
+		if match[2] != "" && !claimIsStale(match[2], now) {
+			continue
+		}
+
 		info, err := os.Lstat(path)
 		if err != nil || !isPlainDir(info.Mode()) || now.Sub(info.ModTime()) < ownTmpStaleAge {
 			continue
 		}
 
-		claimed, ok, err := claimOwnTmp(pki, path, match[1])
+		claimed, ok, err := claimOwnTmp(pki, path, match[1], now, rename)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("opcua pki: claim %s: %w", path, err))
 
@@ -207,34 +226,55 @@ func SweepStaleOwn(dataDir string, now time.Time) ([]string, error) {
 			continue
 		}
 
-		gone, err := removeOwnTmp(claimed)
-		if err != nil {
+		claimedInfo, err := os.Lstat(claimed)
+		if err != nil || !isPlainDir(claimedInfo.Mode()) || !os.SameFile(info, claimedInfo) {
+			errs = append(errs, fmt.Errorf("opcua pki: %s changed while it was claimed; left in place", claimed))
+
+			continue
+		}
+
+		if err := os.RemoveAll(claimed); err != nil {
 			errs = append(errs, fmt.Errorf("opcua pki: remove %s: %w", claimed, err))
 
 			continue
 		}
 
-		if gone {
-			removed = append(removed, path)
-		}
+		removed = append(removed, filepath.Join(pki, match[1]))
 	}
+
+	slices.Sort(removed)
 
 	return removed, errors.Join(errs...)
 }
 
-// claimOwnTmp renames path to <pki>/<base>.sweep-<random hex> and returns the
-// new path; ok is false, with no error, when path is gone (another sweep
-// claimed it first).
-func claimOwnTmp(pki, path, base string) (claimed string, ok bool, err error) {
+// claimIsStale reports whether the claim time of a claimed name (16 hex
+// digits of Unix seconds) is at least ownTmpStaleAge before now: a younger
+// claim belongs to a sweep that may still be removing it, and re-claiming it
+// would let both report it.
+func claimIsStale(claimedAt string, now time.Time) bool {
+	seconds, err := strconv.ParseUint(claimedAt, 16, 64)
+	if err != nil || seconds > math.MaxInt64 {
+		return false
+	}
+
+	return now.Sub(time.Unix(int64(seconds), 0)) >= ownTmpStaleAge
+}
+
+// claimOwnTmp renames path with rename to
+// <pki>/<base>.sweep-<now in Unix seconds>-<random>, both 16 hex digits, and
+// returns the new path; ok is false, with no error, when path is gone or the
+// rename is refused for permission (another sweep claimed it first, or on
+// Windows still holds a handle inside it).
+func claimOwnTmp(pki, path, base string, now time.Time, rename func(oldPath, newPath string) error) (claimed string, ok bool, err error) {
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return "", false, err
 	}
 
-	claimed = filepath.Join(pki, base+ownTmpClaim+hex.EncodeToString(suffix[:]))
+	claimed = filepath.Join(pki, fmt.Sprintf("%s%s%016x-%s", base, ownTmpClaim, uint64(max(now.Unix(), 0)), hex.EncodeToString(suffix[:])))
 
-	if err := os.Rename(path, claimed); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if err := rename(path, claimed); err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
 			return "", false, nil
 		}
 
@@ -249,36 +289,6 @@ func claimOwnTmp(pki, path, base string) (claimed string, ok bool, err error) {
 // ModeDir with ModeIrregular).
 func isPlainDir(mode os.FileMode) bool {
 	return mode.Type() == os.ModeDir
-}
-
-// removeOwnTmp removes dir with its content and reports whether this call
-// removed dir itself; false when it was already gone (claimed again by another
-// sweep meanwhile).
-func removeOwnTmp(dir string) (bool, error) {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-
-	if err != nil {
-		return false, err
-	}
-
-	for _, e := range entries {
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
-			return false, err
-		}
-	}
-
-	if err := os.Remove(dir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-
-		return false, err
-	}
-
-	return true, nil
 }
 
 // generateOwn builds a new certificate and key; the PEM is the PKCS#8 encoding
