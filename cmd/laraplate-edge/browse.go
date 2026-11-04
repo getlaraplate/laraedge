@@ -30,7 +30,8 @@ const browseTimeout = 2 * time.Minute
 // per node, indented two spaces per level, as
 // "<NodeId>  <BrowseName>  <NodeClass>[  <DataType>  <access>]", the last
 // two for a variable (access r, w, rw or -; "?" for an unreadable
-// attribute). It connects like probe (the trust check included) and reads no
+// attribute), and "  (not browsed: <status>)" after a node whose children
+// the server refused to list. It connects like probe (the trust check included) and reads no
 // value.
 func runBrowse(args []string, stdout, stderr io.Writer) int {
 	const prefix = "laraplate-edge browse: "
@@ -175,11 +176,15 @@ func browsePlugin(doc config.Document, boot bootstrap.File, cfg config.Input, no
 
 // browseLine is the printed line of e: the data type and access columns
 // appear for a variable whose attributes were read, "?" standing for the
-// one that was unreadable.
+// one that was unreadable; a node whose children the server refused ends
+// with "(not browsed: <status>)".
 func browseLine(e opcua.BrowseEntry) string {
 	line := strings.Repeat("  ", e.Depth) + e.NodeID + "  " + e.Name + "  " + e.Class
 	if e.DataType != "" || e.Access != "" {
 		line += "  " + cmp.Or(e.DataType, "?") + "  " + cmp.Or(e.Access, "?")
+	}
+	if e.Status != "" {
+		line += "  (not browsed: " + e.Status + ")"
 	}
 
 	return line

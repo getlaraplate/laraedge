@@ -50,6 +50,11 @@ type BrowseEntry struct {
 	// (CurrentRead), "w" (CurrentWrite), "rw", or "-" for neither; empty for
 	// other nodes and when unreadable.
 	Access string
+	// Status is the status the server answered when asked for the node's
+	// children (BadUserAccessDenied, or the hexadecimal code of a status the
+	// library does not name); empty when the node was browsed or not asked.
+	// Such a node is printed and not expanded, and the walk goes on.
+	Status string
 }
 
 // Browse connects like Probe (own certificate, trust check included: an
@@ -121,19 +126,23 @@ type candidate struct {
 }
 
 // visit prints the children of node, found at level, and recurses into
-// them. It returns when the walk is done or the node cap was reached. A
-// node below the start node that the server refuses to browse stays
-// unexpanded; any other error ends the walk.
+// them. It returns when the walk is done or the node cap was reached. The
+// start node (level 0) refused by the server is an error; a node below it
+// that the server refuses to browse is printed with that status and not
+// expanded (children). Any other error ends the walk.
 func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 	refs, err := w.s.Browse(ctx, node)
 	if err != nil {
-		if level > 0 && errors.Is(err, errBrowse) {
-			return nil
-		}
-
 		return err
 	}
 
+	return w.children(ctx, refs, level)
+}
+
+// children prints refs, found at level, and recurses into each one the depth
+// allows. A child is browsed before it is printed, so its line can carry the
+// status of a refusal.
+func (w *walker) children(ctx context.Context, refs []*ua.ReferenceDescription, level int) error {
 	remaining := BrowseMaxNodes - w.count
 	cands := make([]*candidate, 0, min(len(refs), remaining+1))
 	seen := map[string]bool{}
@@ -173,10 +182,31 @@ func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 
 		w.printed[c.key] = true
 		w.count++
-		w.emit(w.entry(c, level))
 
-		if level+1 < w.depth && !c.foreign {
-			if err := w.visit(ctx, c.ref.NodeID.NodeID, level+1); err != nil {
+		var (
+			grandchildren []*ua.ReferenceDescription
+			status        string
+		)
+
+		expand := level+1 < w.depth && !c.foreign
+		if expand {
+			var err error
+
+			grandchildren, err = w.s.Browse(ctx, c.ref.NodeID.NodeID)
+			switch {
+			case errors.Is(err, errBrowse):
+				status, expand = browseStatus(err), false
+			case err != nil:
+				return err
+			}
+		}
+
+		e := w.entry(c, level)
+		e.Status = status
+		w.emit(e)
+
+		if expand {
+			if err := w.children(ctx, grandchildren, level+1); err != nil {
 				return err
 			}
 
@@ -187,6 +217,22 @@ func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 	}
 
 	return nil
+}
+
+// browseStatus names the status of a refused browse: the library's name
+// without its Status prefix, or the hexadecimal code of a status it does not
+// name.
+func browseStatus(err error) string {
+	var code ua.StatusCode
+	if !errors.As(err, &code) {
+		return "Bad"
+	}
+
+	if d, ok := ua.StatusCodes[code]; ok && d.Name != "" {
+		return strings.TrimPrefix(d.Name, "Status")
+	}
+
+	return fmt.Sprintf("0x%08X", uint32(code))
 }
 
 // readAttributes sets the data type and the access level of the variables

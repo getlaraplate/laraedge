@@ -489,6 +489,8 @@ func TestBrowseLineMarksAnUnreadableAttribute(t *testing.T) {
 		{opcua.BrowseEntry{Depth: 1, NodeID: "ns=1;s=a", Name: "a", Class: "Variable", DataType: "Double", Access: "-"}, "  ns=1;s=a  a  Variable  Double  -"},
 		{opcua.BrowseEntry{NodeID: "ns=1;s=a", Name: "a", Class: "Variable", DataType: "Double"}, "ns=1;s=a  a  Variable  Double  ?"},
 		{opcua.BrowseEntry{NodeID: "ns=1;s=a", Name: "a", Class: "Variable", Access: "rw"}, "ns=1;s=a  a  Variable  ?  rw"},
+		{opcua.BrowseEntry{NodeID: "ns=1;s=f", Name: "f", Class: "Object", Status: "BadUserAccessDenied"}, "ns=1;s=f  f  Object  (not browsed: BadUserAccessDenied)"},
+		{opcua.BrowseEntry{NodeID: "ns=1;s=a", Name: "a", Class: "Variable", DataType: "Double", Access: "r", Status: "0x80FE0000"}, "ns=1;s=a  a  Variable  Double  r  (not browsed: 0x80FE0000)"},
 	}
 
 	for _, tt := range tests {

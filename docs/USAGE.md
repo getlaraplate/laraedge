@@ -346,8 +346,10 @@ nsu=urn:vendor:press;s=Press07  Press07  Object
   `NamespaceArray` names the namespace, in the `ns=<n>;...` form otherwise: paste the line's NodeId as the
   point's `address`. The `nsu=` form survives the server renumbering its namespaces.
 - A node reached twice is printed once. A node the server refuses to browse (a Bad status, such as
-  `BadUserAccessDenied`) is printed without what is below it, and the walk goes on; refused at the start
-  node, `browse` fails. The walk stops after 1000 nodes with `... stopped after 1000 nodes`
+  `BadUserAccessDenied`) is printed without what is below it, its line ending with that status, as in
+  `nsu=urn:vendor:press;s=Recipes  Recipes  Object  (not browsed: BadUserAccessDenied)` (the hexadecimal
+  code for a status the agent does not name), and the walk goes on; refused at the start node, `browse`
+  fails. The walk stops after 1000 nodes with `... stopped after 1000 nodes`
   on stdout: narrow it with `--node` and `--depth`.
 - No value is read. Like `probe`, it opens a session of its own.
 - A plugin input is browsed the same way, through the plugin, and only when the plugin's `plugin.json`

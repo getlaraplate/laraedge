@@ -73,7 +73,7 @@ func walkAll(t *testing.T, s session, start *ua.NodeID, depth int) (lines []stri
 	t.Helper()
 
 	w := &walker{s: s, namespaces: s.Namespaces(), depth: depth, printed: map[string]bool{}, emit: func(e BrowseEntry) {
-		lines = append(lines, strings.TrimRight(fmt.Sprintf("%d:%s %s %s %s %s", e.Depth, e.NodeID, e.Name, e.Class, e.DataType, e.Access), " "))
+		lines = append(lines, strings.TrimRight(fmt.Sprintf("%d:%s %s %s %s %s %s", e.Depth, e.NodeID, e.Name, e.Class, e.DataType, e.Access, e.Status), " "))
 	}}
 
 	if err := w.visit(context.Background(), start, 0); err != nil {
@@ -149,8 +149,8 @@ func TestWalkPrintsByDepthWithNamespaceURIsDataTypesAndAccess(t *testing.T) {
 }
 
 // A node below the start node that the server refuses to browse is printed
-// and not expanded; the walk goes on with its siblings. Refused at the start
-// node, the walk is an error.
+// with the status of the refusal and not expanded; the walk goes on with its
+// siblings. Refused at the start node, the walk is an error.
 func TestWalkSkipsANodeTheServerRefusesToBrowse(t *testing.T) {
 	root := ua.NewNumericNodeID(0, id.ObjectsFolder)
 	locked := ua.NewStringNodeID(1, "locked")
@@ -167,7 +167,7 @@ func TestWalkSkipsANodeTheServerRefusesToBrowse(t *testing.T) {
 	}
 
 	got, _ := walkAll(t, s, root, 3)
-	want := []string{"0:nsu=urn:x;s=locked locked Object", "0:nsu=urn:x;s=open open Object", "1:nsu=urn:x;s=inside inside Object"}
+	want := []string{"0:nsu=urn:x;s=locked locked Object   BadUserAccessDenied", "0:nsu=urn:x;s=open open Object", "1:nsu=urn:x;s=inside inside Object"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("walk = %q, want %q", got, want)
 	}
@@ -440,5 +440,21 @@ func TestSessionVariableAttributesChunkAtTheServerLimit(t *testing.T) {
 
 	if !slices.Equal(f.attributeReads, []int{32, 32, 32, 32, 12}) {
 		t.Fatalf("attribute reads = %v, want [32 32 32 32 12] and none for no ids", f.attributeReads)
+	}
+}
+
+func TestBrowseStatusNamesTheRefusal(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadNodeIDUnknown), "BadNodeIDUnknown"},
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusCode(0x80FE0000)), "0x80FE0000"},
+		{fmt.Errorf("opcua browse: %w", errBrowse), "Bad"},
+	}
+	for _, tt := range tests {
+		if got := browseStatus(tt.err); got != tt.want {
+			t.Errorf("browseStatus(%v) = %q, want %q", tt.err, got, tt.want)
+		}
 	}
 }
