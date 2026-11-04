@@ -116,8 +116,9 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// browseNothingBelow is what browse prints for a start node without children
-// (a variable, an empty folder), so an empty answer is not taken for a failure.
+// browseNothingBelow is what browse prints, for OPC UA and for a plugin, for a
+// start node without children (a variable, an empty folder), so an empty
+// answer is not taken for a failure.
 const browseNothingBelow = "(no node below the start node)"
 
 // errPluginNoBrowse is what browse says of a plugin whose manifest does not
@@ -181,6 +182,10 @@ func browsePlugin(doc config.Document, boot bootstrap.File, cfg config.Input, no
 
 	for _, n := range nodes {
 		fmt.Fprintf(stdout, "%s  %s  %s  %s\n", n.Address, n.Name, cmp.Or(n.Type, "?"), cmp.Or(n.Access, "?"))
+	}
+
+	if len(nodes) == 0 {
+		fmt.Fprintln(stdout, browseNothingBelow)
 	}
 
 	return exitOK

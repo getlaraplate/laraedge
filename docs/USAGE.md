@@ -356,7 +356,8 @@ nsu=urn:vendor:press;s=Press07  Press07  Object
 - A plugin input is browsed the same way, through the plugin, and only when the plugin's `plugin.json`
   declares `browse`; otherwise the command exits 1 with `the plugin of this input does not support
   browse`. The plugin chooses the node ids; `--node` takes one it printed, and `--depth` (1 to 10,
-  default 2) counts the levels below the start node as for OPC UA.
+  default 2) counts the levels below the start node as for OPC UA. A node with nothing below it prints
+  `(no node below the start node)`, as for OPC UA.
 
 ## Running plugins
 
