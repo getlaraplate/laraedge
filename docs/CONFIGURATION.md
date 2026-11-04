@@ -334,19 +334,22 @@ characters. Only the leaf certificate is stored and compared.
   the start of the input fails with `opcua pki: <path> has mode 0640, want 0600 or narrower (chmod 600
   it)`: another user may have read the key, so either `chmod 600` it or delete `own/` for a new pair.
 - **Leftovers of an interrupted run.** The pair is written into a temporary `own-<number>.tmp` directory
-  next to `own/` and then renamed. One that a crash left behind (it can hold a key) is removed when an
-  `opcua` input, `browse` or `probe` next starts, once it is more than an hour old (a younger one may be a
-  generation still running), with one `WARN` naming it: `opcua pki: removed a temporary own certificate
-  directory left by an interrupted run`. Only directories of that exact name directly under `pki/` are
-  removed, never a symlink or what it points to.
+  next to `own/` and then renamed. One that a crash left behind (it can hold a key) is removed the first
+  time an `opcua` input, `browse` or `probe` starts in a process (once per `data_dir`: inputs that start
+  together sweep it once), when it is more than an hour old: a younger one may be a generation still
+  running. A directory whose time is in the future (the clock was set back) is removed only at a run that
+  starts an hour after that time. Each removed directory gets one `WARN` naming it: `opcua pki: removed a
+  temporary own certificate directory left by an interrupted run`. Only plain directories of that exact
+  name directly under `pki/` are removed, never a symlink, junction or mount point, nor what it points to.
 - **The server's certificate is trusted explicitly.** With a policy other than `None`, at every connect the
   agent discovers the server's endpoints, takes the one for the policy and mode, computes the thumbprint of
   its certificate and goes on only when `trusted/<thumbprint>.der` exists and holds a certificate with that
   thumbprint (a file whose content does not match its name is not trusted, and is left in place; `opcua
   trust --list` names it). Otherwise the attempt fails (a `connection` error), the certificate is stored in
   `rejected/`, and one `WARN` names the input, the thumbprint and the command to run (`laraplate-edge opcua
-  trust <input>`). That warning comes once per thumbprint per run of the input, not at every retry. There is no certificate chain or revocation check: your decision on the
-  thumbprint is the whole trust. Its expiry is shown by `opcua trust`, not enforced.
+  trust <input>`). That warning comes once per thumbprint per run of the input, not at every retry. There
+  is no certificate chain or revocation check: your decision on the thumbprint is the whole trust. Its
+  expiry is shown by `opcua trust`, not enforced.
 - **A newly trusted certificate is picked up at the next retry, without restarting the agent.** The
   retries follow the reconnection backoff (up to 1 minute). A server that was reinstalled, or whose
   certificate was renewed, presents another thumbprint: it is untrusted again until you trust it. The old

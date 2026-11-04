@@ -614,3 +614,24 @@ func TestCheckKeyModeIsUnixOnly(t *testing.T) {
 		}
 	}
 }
+
+// Only a plain directory is swept: a symlink, and on Windows a junction or a
+// mount point (a directory that is also irregular), is never entered.
+func TestIsPlainDir(t *testing.T) {
+	tests := []struct {
+		mode os.FileMode
+		want bool
+	}{
+		{os.ModeDir | 0o700, true},
+		{os.ModeDir | os.ModeIrregular, false},
+		{os.ModeDir | os.ModeSymlink, false},
+		{os.ModeSymlink, false},
+		{os.ModeIrregular, false},
+		{0o600, false},
+	}
+	for _, tt := range tests {
+		if got := isPlainDir(tt.mode); got != tt.want {
+			t.Errorf("isPlainDir(%v) = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}

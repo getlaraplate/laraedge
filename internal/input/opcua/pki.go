@@ -145,10 +145,13 @@ func EnsureOwnCertificate(dataDir, agentID string, now time.Time) ([]byte, *rsa.
 // EnsureOwnCertificate leaves in the PKI directory of dataDir when the process
 // dies between creating one and renaming it to own/: they can hold a private
 // key. It removes only what EnsureOwnCertificate creates: a direct entry of
-// the PKI directory with that exact name, that is a directory and not a
-// symlink (never followed), last modified at least ownTmpStaleAge before now.
-// now is wall-clock time, as file times are. It returns the removed paths in
-// name order; a missing PKI directory is nothing to do.
+// the PKI directory with that exact name that is a plain directory (isPlainDir:
+// never a symlink, a junction or a mount point, which are not followed), last
+// modified at least ownTmpStaleAge before now. A directory whose time is in
+// the future (the clock was set back) waits until now passes it by that age.
+// now is wall-clock time, as file times are. It returns, in name order, the
+// directories this call removed: one another process removed first is not
+// among them. A missing PKI directory is nothing to do.
 func SweepStaleOwn(dataDir string, now time.Time) ([]string, error) {
 	pki := PKIDir(dataDir)
 
@@ -167,27 +170,67 @@ func SweepStaleOwn(dataDir string, now time.Time) ([]string, error) {
 	)
 
 	for _, e := range entries {
-		if !ownTmpRE.MatchString(e.Name()) || !e.IsDir() {
+		if !ownTmpRE.MatchString(e.Name()) || !isPlainDir(e.Type()) {
 			continue
 		}
 
 		path := filepath.Join(pki, e.Name())
 
 		info, err := os.Lstat(path)
-		if err != nil || !info.IsDir() || now.Sub(info.ModTime()) < ownTmpStaleAge {
+		if err != nil || !isPlainDir(info.Mode()) || now.Sub(info.ModTime()) < ownTmpStaleAge {
 			continue
 		}
 
-		if err := os.RemoveAll(path); err != nil {
+		gone, err := removeOwnTmp(path)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("opcua pki: remove %s: %w", path, err))
 
 			continue
 		}
 
-		removed = append(removed, path)
+		if gone {
+			removed = append(removed, path)
+		}
 	}
 
 	return removed, errors.Join(errs...)
+}
+
+// isPlainDir reports whether mode is a directory and nothing else: not a
+// symlink, and not irregular (on Windows a junction or a mount point reports
+// ModeDir with ModeIrregular).
+func isPlainDir(mode os.FileMode) bool {
+	return mode.Type() == os.ModeDir
+}
+
+// removeOwnTmp removes dir with its content and reports whether this call
+// removed dir itself; false when it was already gone (removed by another
+// process meanwhile).
+func removeOwnTmp(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return false, err
+		}
+	}
+
+	if err := os.Remove(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return true, nil
 }
 
 // generateOwn builds a new certificate and key; the PEM is the PKCS#8 encoding
