@@ -259,13 +259,14 @@ answer.
 needs: a port that cannot be opened fails the start with `cannot open the serial port: it does not exist`
 (wrong path), `cannot open the serial port: permission denied` (no permission) or plain `cannot open the
 serial port` (any other failure; the path is never repeated), so the document is `rolled_back` and the
-previous one keeps running. On Linux the user running the agent usually needs the `dialout` group (or the group that owns
-the device). A port that fails later is opened again in the background, like a lost network connection.
-`config validate` checks the serial fields but cannot open the port; `probe` opens it itself: stop the
-agent before probing an `rtu` input, because both would read the same port and corrupt each other's
-frames (on Windows the second open is refused). For the same reason two inputs must never name the same
-`device`: on Linux both opens succeed and the two inputs corrupt each other's frames. A real serial port
-is not exercised by the automated tests (see "Known limits of this build"); `rtuovertcp` is.
+previous one keeps running. On Linux the user running the agent usually needs the `dialout` group (or
+the group that owns the device). A port that fails later is opened again in the background, like a lost
+network connection. `config validate` checks the serial fields but cannot open the port; `probe` opens
+it itself: stop the agent before probing an `rtu` input, because both would read the same port and
+corrupt each other's frames (on Windows the second open is refused). For the same reason two inputs
+must never name the same `device`: on Linux both opens succeed and the two inputs corrupt each other's
+frames. A real serial port is not exercised by the automated tests (see "Known limits of this build");
+`rtuovertcp` is.
 
 **Health.** `/status` shows, for the input, `connected` (true while the connection to the device is up)
 and `read_errors` (the counts since the input was last started, always the four kinds `timeout`,
