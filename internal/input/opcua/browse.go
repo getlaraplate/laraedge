@@ -219,9 +219,11 @@ func (w *walker) children(ctx context.Context, refs []*ua.ReferenceDescription, 
 	return nil
 }
 
-// browseStatus names the status of a refused browse: the library's name
-// without its Status prefix, or the hexadecimal code of a status it does not
-// name.
+// browseStatus names the status of a refused browse with its OPC UA standard
+// name (BadNodeIdUnknown): the library's name without its Status prefix and
+// with ID spelled Id as the specification spells it (the library writes ID in
+// every name that holds it); the hexadecimal code of a status the library does
+// not name.
 func browseStatus(err error) string {
 	var code ua.StatusCode
 	if !errors.As(err, &code) {
@@ -229,7 +231,7 @@ func browseStatus(err error) string {
 	}
 
 	if d, ok := ua.StatusCodes[code]; ok && d.Name != "" {
-		return strings.TrimPrefix(d.Name, "Status")
+		return strings.ReplaceAll(strings.TrimPrefix(d.Name, "Status"), "ID", "Id")
 	}
 
 	return fmt.Sprintf("0x%08X", uint32(code))

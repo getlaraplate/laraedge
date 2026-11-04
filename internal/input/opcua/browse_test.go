@@ -451,7 +451,11 @@ func TestBrowseStatusNamesTheRefusal(t *testing.T) {
 		err  error
 		want string
 	}{
-		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadNodeIDUnknown), "BadNodeIDUnknown"},
+		// The standard spelling, as the server's documentation and USAGE.md
+		// write it: Id, not the library's ID.
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadNodeIDUnknown), "BadNodeIdUnknown"},
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadViewIDUnknown), "BadViewIdUnknown"},
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadUserAccessDenied), "BadUserAccessDenied"},
 		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusCode(0x80FE0000)), "0x80FE0000"},
 		{fmt.Errorf("opcua browse: %w", errBrowse), "Bad"},
 	}
