@@ -109,6 +109,28 @@ func TestAckAcrossARuntimeCorruptFrame(t *testing.T) {
 	}
 }
 
+// TestAckInsideARegionCutByACorruptFrame: a frame corrupted after the
+// batcher read past it is cut with the rest of its segment when Ack counts
+// the records; an Ack position inside the cut region holds no record any
+// more, so Ack succeeds at once instead of failing once.
+func TestAckInsideARegionCutByACorruptFrame(t *testing.T) {
+	dir := t.TempDir()
+	b := openBuffer(t, dir, testOptions(t, clock.NewFake(epoch)), hooks{})
+	mustAppend(t, b, bulkRange(0, 5)...)
+	entries := readAll(t, b, model.Bulk)
+
+	corruptFrameAt(t, nonEmptySegments(t, filepath.Join(dir, "bulk"))[1], 0)
+	if err := b.Ack(model.Bulk, entries[2].Next); err != nil {
+		t.Fatalf("Ack() inside the cut region = %v, want nil", err)
+	}
+
+	if s := b.Stats(); s.Bulk.Records != 2 || s.CorruptRecords != 1 {
+		t.Fatalf("Stats() = %+v, want 2 bulk records and one corrupt", s)
+	}
+
+	assertRecords(t, b, model.Bulk, bulkRange(4, 5))
+}
+
 // TestEvictionDeletesASegmentWithARuntimeCorruptFrame: eviction treats a
 // segment holding a corrupt frame normally. The marker counts the samples
 // read before the corruption; the rest is counted as corrupt.

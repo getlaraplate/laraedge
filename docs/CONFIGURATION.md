@@ -1005,6 +1005,11 @@ is exact, but its `ts` range can span records that are still in the buffer.
   served on the agent's clock: a device clock far from the agent's shifts them, and a backward step of
   the agent's clock delays a `heartbeat` by the size of the step.
 - `valid_range` compares integers as floats, exactly up to 2^53 in magnitude.
+- After a corrupt record is found while the agent runs, the buffer counts its records again. A segment
+  file it cannot open at that moment (an I/O error, too many open files) keeps its records, which are
+  still sent, but they are left out of the `records` count of `/status` and of the metrics until the
+  next count or restart; with the count at 0 the output seals the next batch only on the next incoming
+  record. The `ERROR` "cannot open a segment to count its records" names the queue and the segment.
 - Every counted edge of an `edge_counter` writes and syncs the input's state file while the input's
   transform processor holds its lock: the other signals of that input wait for the write, tens of
   milliseconds on an SD card. A fast pulse train on a slow disk delays the input's samples accordingly.
