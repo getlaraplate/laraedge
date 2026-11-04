@@ -162,32 +162,36 @@ const ownTmpClaim = ".sweep-"
 //
 // Sweeps may run together (inputs starting at once, the agent and a command).
 // Each directory is first claimed by renaming it, in the same directory, to
-// own-<n>.tmp.sweep-<random hex>: the rename is atomic, so one sweep wins and
-// removes it; a sweep whose rename finds the name gone, or is refused it (on
-// Windows another sweep may still hold a handle inside), skips it. The claimed
-// path must still be the directory looked at (a plain directory, os.SameFile
-// with the identity read before the rename): one swapped in meanwhile is
-// refused and left in place; one already gone was removed by someone else and
-// is skipped. The identity is the file's number on its volume, which a
-// filesystem may give a new file once the old one is deleted (ext4 does at
-// once): a directory deleted and replaced by another plain directory under the
-// claimed name can pass as the same and is removed. That stays inside the PKI
-// directory, at a name only a sweep makes; the type check, not the identity,
-// is what refuses a symlink or a junction. It is removed with
-// os.RemoveAll on the claimed path, which unlinks a top-level symlink without
-// following it and never follows one below. A sweep that dies between its
-// claim and the removal leaves a claimed name, which the next sweep handles
-// with the same checks (a rename keeps the directory's time) once the claim,
-// whose time the name carries, is ownTmpStaleAge old. It returns, in
-// name order and by their own-<n>.tmp name, the directories this call claimed
-// and removed. A missing PKI directory is nothing to do.
+// own-<n>.tmp.sweep-<claim time>-<random hex>; a sweep whose rename finds the
+// name gone, or is refused it (on Windows another sweep may still hold a
+// handle inside), skips it. Outside Windows the rename is atomic on the name,
+// so one sweep wins. On Windows a rename that opened the directory before the
+// claim can still move it to another claim afterwards: settleClaim waits until
+// none is in flight, and the sweep it moved the directory to removes it. The
+// claimed path must then still be the directory looked at (a plain directory,
+// os.SameFile with the identity read before the rename): one swapped in
+// meanwhile is refused and left in place; one already gone was removed by
+// someone else and is skipped. The identity is the file's number on its
+// volume, which a filesystem may give a new file once the old one is deleted
+// (ext4 does at once): a directory deleted and replaced by another plain
+// directory under the claimed name can pass as the same and is removed. That
+// stays inside the PKI directory, at a name only a sweep makes; the type
+// check, not the identity, is what refuses a symlink or a junction. It is
+// removed with os.RemoveAll on the claimed path, which unlinks a top-level
+// symlink without following it and never follows one below. A sweep that
+// dies between its claim and the removal leaves a claimed name, which the
+// next sweep handles with the same checks (a rename keeps the directory's
+// time) once the claim, whose time the name carries, is ownTmpStaleAge old.
+// It returns, in name order and by their own-<n>.tmp name, the directories
+// this call claimed and removed. A missing PKI directory is nothing to do.
 func SweepStaleOwn(dataDir string, now time.Time) ([]string, error) {
-	return sweepStaleOwnWith(dataDir, now, os.Rename)
+	return sweepStaleOwnWith(dataDir, now, os.Rename, settleClaim)
 }
 
-// sweepStaleOwnWith is SweepStaleOwn with the rename of the claim; tests
-// replace it to change the directory between the claim and the removal.
-func sweepStaleOwnWith(dataDir string, now time.Time, rename func(oldPath, newPath string) error) ([]string, error) {
+// sweepStaleOwnWith is SweepStaleOwn with the rename of the claim and the
+// wait for renames in flight (settleClaim); tests replace them to change the
+// directory between the claim and the removal.
+func sweepStaleOwnWith(dataDir string, now time.Time, rename func(oldPath, newPath string) error, settle func(path string) (present bool, err error)) ([]string, error) {
 	pki := PKIDir(dataDir)
 
 	entries, err := os.ReadDir(pki)
@@ -237,6 +241,17 @@ func sweepStaleOwnWith(dataDir string, now time.Time, rename func(oldPath, newPa
 		}
 
 		if !ok {
+			continue
+		}
+
+		present, err := settle(claimed)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("opcua pki: settle %s: %w; left for a later sweep", claimed, err))
+
+			continue
+		}
+
+		if !present {
 			continue
 		}
 

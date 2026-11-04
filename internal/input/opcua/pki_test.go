@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -794,7 +795,7 @@ func TestSweepRefusesADirectorySwappedDuringTheClaim(t *testing.T) {
 				return nil
 			}
 
-			removed, err := sweepStaleOwnWith(dataDir, now, rename)
+			removed, err := sweepStaleOwnWith(dataDir, now, rename, settleClaim)
 			if len(removed) != 0 {
 				t.Errorf("removed = %v, want nothing", removed)
 			}
@@ -823,7 +824,7 @@ func TestSweepSkipsAClaimRefusedForPermission(t *testing.T) {
 		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: os.ErrPermission}
 	}
 
-	removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), refuse)
+	removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), refuse, settleClaim)
 	if err != nil || len(removed) != 0 {
 		t.Fatalf("sweep = %v, %v; want nothing and no error", removed, err)
 	}
@@ -871,8 +872,61 @@ func TestSweepSkipsAClaimThatVanished(t *testing.T) {
 		return os.RemoveAll(newPath)
 	}
 
-	removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), rename)
+	removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), rename, settleClaim)
 	if err != nil || len(removed) != 0 {
 		t.Fatalf("sweep = %v, %v; want nothing and no error", removed, err)
+	}
+}
+
+// On Windows a rename that opened own-<n>.tmp before this sweep claimed it
+// can still move the directory to its own claim. A claim moved away while the
+// sweep waits for such renames belongs to that other sweep: this one neither
+// removes nor reports it, and it is no error. A wait that fails leaves the
+// claim for a later sweep and says so.
+func TestSweepLeavesAClaimToARenameInFlight(t *testing.T) {
+	tests := []struct {
+		name    string
+		settle  func(t *testing.T, claimed string) (bool, error)
+		wantErr string
+	}{
+		{"moved to another claim", func(t *testing.T, claimed string) (bool, error) {
+			other := strings.Replace(claimed, ".sweep-", ".sweep-other-", 1)
+			if err := os.Rename(claimed, other); err != nil {
+				t.Fatal(err)
+			}
+
+			return false, nil
+		}, ""},
+		{"the wait fails", func(*testing.T, string) (bool, error) {
+			return false, errors.New("another handle stays open on it")
+		}, "left for a later sweep"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			pki := PKIDir(dataDir)
+			writeFile(t, filepath.Join(pki, "own-1.tmp", "key.pem"), []byte("KEY"))
+
+			removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), os.Rename, func(claimed string) (bool, error) {
+				return tt.settle(t, claimed)
+			})
+			if len(removed) != 0 {
+				t.Errorf("removed = %v, want nothing", removed)
+			}
+			if tt.wantErr == "" && err != nil {
+				t.Errorf("err = %v, want none", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Errorf("err = %v, want %q", err, tt.wantErr)
+			}
+
+			entries, err := os.ReadDir(pki)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || string(readFile(t, filepath.Join(pki, entries[0].Name(), "key.pem"))) != "KEY" {
+				t.Errorf("PKI directory = %v, want the claimed directory left whole", entries)
+			}
+		})
 	}
 }
