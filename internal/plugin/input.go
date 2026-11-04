@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	pb "github.com/getlaraplate/laraedge-sdk/pluginv1"
 	"google.golang.org/grpc"
@@ -696,7 +697,7 @@ func (in *pluginInput) handle(event *pb.InputEvent, emit func(model.Record), lif
 		s, err := sampleFromWire(e.Sample)
 		if err != nil {
 			in.health.CountError(input.ReadErrorDecode)
-			in.log.Warn("plugin sample dropped", "reason", err.Error())
+			in.log.Warn("plugin sample dropped", "device", e.Sample.GetDevice(), "signal", e.Sample.GetSignal(), "reason", err.Error())
 
 			return
 		}
@@ -744,12 +745,19 @@ func sampleFromWire(wire *pb.Sample) (model.Sample, error) {
 
 	switch v := wire.GetValue().GetKind().(type) {
 	case *pb.Value_DoubleValue:
-		s.Value = model.Value{Kind: model.KindFloat, Float: v.DoubleValue}
+		f, err := model.FloatValue(v.DoubleValue)
+		if err != nil {
+			return model.Sample{}, errors.New("invalid sample")
+		}
+		s.Value = f
 	case *pb.Value_IntValue:
 		s.Value = model.IntValue(v.IntValue)
 	case *pb.Value_BoolValue:
 		s.Value = model.BoolValue(v.BoolValue)
 	case *pb.Value_StringValue:
+		if !utf8.ValidString(v.StringValue) {
+			return model.Sample{}, errors.New("string value is not valid UTF-8")
+		}
 		s.Value = model.StringValue(v.StringValue)
 	default:
 		return model.Sample{}, errors.New("sample without value")

@@ -810,9 +810,9 @@ What the agent does with it:
   of the declared `type`, is routed to the outputs like a machine sample: it keeps the plugin's `ts` and
   quality and takes the declared `priority`. Anything else is refused, never routed, and counted
   (`refused` in `/status`), checked in this order: an invalid sample (a missing or malformed `ts`, an
-  unspecified quality or priority, no value or a float that is not finite, an empty device or signal),
-  then a device it did not declare or an undeclared signal of a declared device, then a declared signal
-  with a value of another kind.
+  unspecified quality or priority, no value, a float that is not finite or a string that is not valid
+  UTF-8, an empty device or signal), then a device it did not declare or an undeclared signal of a
+  declared device, then a declared signal with a value of another kind.
 - **Births and deaths.** The agent, not the plugin, sends the `birth` of the derived devices, within a
   second of the processor's stream to the plugin opening. A derived device is alive while that stream
   is up, whether or not it sends samples. When the stream goes down (the plugin died, restarts, or
