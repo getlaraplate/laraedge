@@ -336,3 +336,21 @@ func TestPointSize(t *testing.T) {
 		t.Fatal("expected an error for an unknown type")
 	}
 }
+
+// TestPointTypeTableDrivesTypesAndSizes (C48): every type of the one table
+// is accepted by CheckPoint and named in the refusal of an unknown type.
+func TestPointTypeTableDrivesTypesAndSizes(t *testing.T) {
+	err := CheckPoint(point("nope", "", config.ReadPoll), Address{Area: AreaHoldingRegister})
+	if err == nil {
+		t.Fatal("expected an error for an unknown type")
+	}
+	for _, typ := range pointTypes {
+		if !strings.Contains(err.Error(), typ.name) {
+			t.Errorf("refusal %q does not name %s", err, typ.name)
+		}
+	}
+	const want = "type: want bool, int16, uint16, int32, uint32, float32, int64, uint64, float64 or string"
+	if err.Error() != want {
+		t.Errorf("refusal = %q, want %q", err, want)
+	}
+}

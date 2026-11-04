@@ -3,8 +3,11 @@ package modbus
 import (
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"slices"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -41,6 +44,75 @@ func waitAccepted(t *testing.T, srv *rtuServer, n int32) {
 	}
 }
 
+// replyLog records, in real time, how long each read request of a unit took
+// to end and how: the evidence a failure of a test that depends on a real
+// time reply timeout needs (C53).
+type replyLog struct {
+	mu      sync.Mutex
+	replies map[uint8][]string
+}
+
+// timedClient records every ReadRegisters of the client it wraps.
+type timedClient struct {
+	client
+	log  *replyLog
+	unit uint8
+}
+
+func (c *timedClient) SetUnitId(id uint8) error {
+	c.unit = id
+
+	return c.client.SetUnitId(id)
+}
+
+func (c *timedClient) ReadRegisters(addr, quantity uint16, regType mbus.RegType) ([]uint16, error) {
+	start := time.Now()
+	regs, err := c.client.ReadRegisters(addr, quantity, regType)
+	took := time.Since(start).Round(100 * time.Microsecond).String()
+	if err != nil {
+		took += " (" + err.Error() + ")"
+	}
+
+	c.log.mu.Lock()
+	defer c.log.mu.Unlock()
+
+	if c.log.replies == nil {
+		c.log.replies = map[uint8][]string{}
+	}
+	c.log.replies[c.unit] = append(c.log.replies[c.unit], took)
+
+	return regs, err
+}
+
+// timed makes the input's clients record their replies in the returned log
+// and, if the test fails, logs the reply times of each unit and the timeout
+// the test used.
+func (l *replyLog) timed(t *testing.T, in *Input, timeout time.Duration) {
+	t.Helper()
+
+	in.newClient = func(c Connection) (client, error) {
+		lib, err := newLibraryClient(c)
+		if err != nil {
+			return nil, err
+		}
+
+		return &timedClient{client: lib, log: l}, nil
+	}
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+
+		l.mu.Lock()
+		defer l.mu.Unlock()
+
+		t.Logf("reply timeout used: %v (real time)", timeout)
+		for _, unit := range slices.Sorted(maps.Keys(l.replies)) {
+			t.Logf("unit %d reply times, in order: %s", unit, strings.Join(l.replies[unit], ", "))
+		}
+	})
+}
+
 // TestSilentUnitDoesNotStarveTheOthers (ruling R13): on one connection, a unit
 // that never answers only times out its own blocks. The other unit keeps
 // being read at its interval and stays alive, the silent one dies after the
@@ -63,6 +135,10 @@ func TestSilentUnitDoesNotStarveTheOthers(t *testing.T) {
 				config.Device{Device: "dead", Points: []config.Point{pollPoint("a", "hr:0@1", "int16", interval)}},
 				config.Device{Device: "alive", Points: []config.Point{pollPoint("b", "hr:5@2", "int16", interval)}},
 			))
+			// Only diagnostics: on a failure the log carries each unit's
+			// reply times against the timeout, the test's one real-time
+			// assumption.
+			new(replyLog).timed(t, h.in, 250*time.Millisecond)
 			h.start()
 
 			var evs []string

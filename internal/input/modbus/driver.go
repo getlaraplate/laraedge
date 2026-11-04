@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"net"
 	"slices"
@@ -128,6 +129,12 @@ func planPoint(device string, p config.Point) (PlannedPoint, error) {
 // connection is opened in the background, so an unreachable device is death
 // after the death tolerance, never a failing Start. The goroutines stop when
 // ctx is done or on Close.
+//
+// The serial open runs under in.mu on purpose (decision, C49): the open is
+// the one local step, so a Close or a second Start cannot interleave with it
+// and see a half-started input. A port whose open hangs holds Close until it
+// returns, but the supervisor bounds Start by the start timeout, abandons it
+// and calls Close from its own goroutine, so nothing else waits on it.
 func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("modbus input %q: start: %w", in.cfg.ID, err)
@@ -149,9 +156,8 @@ func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 		if err != nil {
 			return fmt.Errorf("modbus input %q: start: %w", in.cfg.ID, err)
 		}
-		// The library's error names the device: the text is fixed.
 		if err := c.Open(); err != nil {
-			return fmt.Errorf("modbus input %q: start: cannot open the serial port", in.cfg.ID)
+			return fmt.Errorf("modbus input %q: start: %s", in.cfg.ID, serialOpenText(err))
 		}
 		in.health.SetConnected(true)
 		port = c
@@ -188,6 +194,20 @@ func (in *Input) Close() error {
 	return nil
 }
 
+// serialOpenText is the fixed text of a serial port that cannot be opened,
+// telling a missing path from a refused permission. The library's error is
+// never used: it names the device.
+func serialOpenText(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "cannot open the serial port: it does not exist"
+	case errors.Is(err, fs.ErrPermission):
+		return "cannot open the serial port: permission denied"
+	default:
+		return "cannot open the serial port"
+	}
+}
+
 // Health returns the connection state and the read errors of the input.
 func (in *Input) Health() input.Health {
 	return in.health.Snapshot()
@@ -198,6 +218,9 @@ func (in *Input) Health() input.Health {
 // answered with exceptions 1 to 4 and for a value that does not decode. It
 // starts no loop and emits nothing. A device that cannot be reached, does
 // not answer in time, is busy or sits behind a failing gateway is an error.
+// The probe stops at the first block that fails so (decision, C51; documented
+// in USAGE.md): a busy or unreachable device gives no answer worth printing
+// for the blocks after it, and the operator retries.
 func (in *Input) Probe(ctx context.Context) ([]model.Sample, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("modbus input %q: probe: %w", in.cfg.ID, err)
