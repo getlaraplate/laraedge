@@ -628,6 +628,12 @@ func (b *Buffer) Read(p model.Priority, from Position, limit int) ([]Entry, erro
 // and deletes the segments wholly before it. upTo at or before the current
 // confirmed position or the head is a no-op; beyond the tail, or not at a
 // record boundary, it is an error.
+//
+// Ack re-reads the frames it acknowledges, by design: that read is what
+// detects and counts a frame corrupted at runtime inside the acknowledged
+// range (TestAckAcrossARuntimeCorruptFrame). A cached record count would
+// skip the read and lose the check; the cost is bounded by one batch of
+// frames, usually served from the page cache.
 func (b *Buffer) Ack(p model.Priority, upTo Position) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
