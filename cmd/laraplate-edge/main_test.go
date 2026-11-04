@@ -51,6 +51,18 @@ func TestRun(t *testing.T) {
 			wantStdout: usageText,
 		},
 		{
+			name:       "a word after -- is a positional argument, not a flag",
+			args:       []string{"plugin", "hash", "--", "--no-such-dir"},
+			wantCode:   1,
+			wantStderr: []string{"laraplate-edge plugin hash:", "--no-such-dir"},
+		},
+		{
+			name:       "two positionals around -- get the usage",
+			args:       []string{"plugin", "hash", "d", "--", "--also", "--more"},
+			wantCode:   2,
+			wantStderr: []string{"usage:"},
+		},
+		{
 			name:       "no subcommand prints usage",
 			args:       nil,
 			wantCode:   2,

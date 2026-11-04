@@ -159,3 +159,14 @@ func TestStatusCommandReportsAnOversizedAnswer(t *testing.T) {
 		t.Errorf("stdout = %q, want empty", stdout.String())
 	}
 }
+
+func TestStatusCommandReportsTheHTTPStatusOfAnOversizedErrorBody(t *testing.T) {
+	e := newStatusEndpoint(t, http.StatusInternalServerError, strings.Repeat("x", maxStatusBody+1))
+	var stdout, stderr bytes.Buffer
+
+	code := run([]string{"status", "--listen", e.addr()}, &stdout, &stderr)
+
+	if code != 1 || !strings.Contains(stderr.String(), "HTTP 500") {
+		t.Fatalf("code %d, stderr %q, want exit 1 and HTTP 500", code, stderr.String())
+	}
+}
