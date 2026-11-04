@@ -23,6 +23,7 @@ import (
 	"github.com/gopcua/opcua/ua"
 
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/docrules"
 )
 
 // Security policies of the connection (spec section 6).
@@ -107,7 +108,7 @@ func ParseConnection(raw json.RawMessage) (Connection, error) {
 	}
 	for _, key := range sortedKeys(fields) {
 		if !slices.Contains(connectionFields, key) {
-			return Connection{}, errors.New("connection." + key + ": unknown field")
+			return Connection{}, unknownField("connection.", key)
 		}
 	}
 
@@ -210,7 +211,7 @@ func parseAuth(raw json.RawMessage, conn *Connection) error {
 	}
 	for _, key := range sortedKeys(fields) {
 		if !slices.Contains(authFields, key) {
-			return errors.New("connection.auth." + key + ": unknown field")
+			return unknownField("connection.auth.", key)
 		}
 	}
 	if err := stringField(fields, "connection.auth.user", "user", &conn.User); err != nil {
@@ -245,6 +246,16 @@ func stringField(fields map[string]json.RawMessage, name, key string, dst *strin
 		return errors.New(name + ": must be a string")
 	}
 	return nil
+}
+
+// unknownField refuses an unknown key under prefix. The key is named only when
+// it has the shape of a document key (docrules.IsSafeKey), otherwise it shows
+// as `*`: a secret written as a key must not reach a log.
+func unknownField(prefix, key string) error {
+	if !docrules.IsSafeKey(key) {
+		key = "*"
+	}
+	return errors.New(prefix + key + ": unknown field")
 }
 
 func sortedKeys(m map[string]json.RawMessage) []string {
@@ -351,6 +362,11 @@ const deadbandShape = "deadband: want a non-negative number or N% up to 100"
 // value's range, which the server needs an EURange to apply). kind is the
 // DeadbandType of the OPC UA DataChangeFilter, ua.DeadbandTypeAbsolute or
 // ua.DeadbandTypePercent; the empty string is no deadband, ua.DeadbandTypeNone.
+//
+// An exponent (`1e-07`) is refused on purpose: the configuration writes a
+// numeric deadband in plain decimal (config builder.deadband), and the schema's
+// pattern refuses an exponent in the text form, so only decimal text reaches
+// here and a wider grammar would accept what the schema does not.
 func ParseDeadband(s string) (kind uint32, value float64, err error) {
 	if s == "" {
 		return uint32(ua.DeadbandTypeNone), 0, nil

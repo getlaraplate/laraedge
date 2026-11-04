@@ -104,7 +104,9 @@ Reads coils, discrete inputs, input registers and holding registers from a Modbu
 polling. The driver is read-only: it sends only the four read functions (1, 2, 3, 4), never a write.
 `examples/modbus` is a complete document.
 
-**Connection.** An unknown field is an error here, named with its path (`connection.<key>: unknown field`).
+**Connection.** An unknown field is an error here, named with its path (`connection.<key>: unknown field`;
+a key that is not snake_case, at most 32 characters, shows as `*`, so a secret written as a key is not
+repeated).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -281,7 +283,9 @@ Reads variables of an OPC UA server, by subscription or by polling. The driver i
 complete document; [USAGE.md](USAGE.md#opc-ua-servers) describes the `opcua trust`, `browse` and `probe`
 commands that go with it.
 
-**Connection.** An unknown field in `connection` or in `auth` is an error, named with its path (`connection.<key>: unknown field`).
+**Connection.** An unknown field in `connection` or in `auth` is an error, named with its path
+(`connection.<key>: unknown field`; a key that is not snake_case, at most 32 characters, shows as `*`, so a
+secret written as a key is not repeated).
 
 | Key | Default | Meaning |
 |---|---|---|

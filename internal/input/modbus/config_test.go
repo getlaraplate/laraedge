@@ -109,6 +109,7 @@ func TestParseConnectionRefusals(t *testing.T) {
 		{"rate limit negative", `{"transport":"tcp","host":"h","rate_limit":-3}`, "connection.rate_limit: want a positive integer"},
 		{"rate limit fraction", `{"transport":"tcp","host":"h","rate_limit":2.5}`, "connection.rate_limit: want a positive integer"},
 		{"unknown field", `{"transport":"tcp","host":"h","retries":3}`, "connection.retries: unknown field"},
+		{"unknown field with an unsafe key", `{"transport":"tcp","host":"h","Secret-Key9":1}`, "connection.*: unknown field"},
 		{"two unknown fields report the first by name", `{"transport":"tcp","host":"h","zeta":1,"alpha":2}`, "connection.alpha: unknown field"},
 		{"rtuovertcp refuses device", `{"transport":"rtuovertcp","host":"h","device":"/dev/x"}`, "connection.device: only for rtu"},
 		{"rtuovertcp refuses baud", `{"transport":"rtuovertcp","host":"h","baud":9600}`, "connection.baud: only for rtu"},
