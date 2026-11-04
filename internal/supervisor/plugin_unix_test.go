@@ -7,6 +7,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/getlaraplate/laraedge/internal/plugin/plugintest"
 )
 
 // alive reports whether a process with pid exists (an exited child the
@@ -31,10 +33,10 @@ func TestCloseStopsPluginsWithinTheStopDeadline(t *testing.T) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
+	// A plugin not yet stopped when Close sends Shutdown would answer it and
+	// exit (C64).
 	for _, pid := range pids {
-		if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
-			t.Fatal(err)
-		}
+		plugintest.StopProcess(t, pid)
 	}
 
 	closed := make(chan error, 1)

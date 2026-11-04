@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/getlaraplate/laraedge/internal/plugin"
+	"github.com/getlaraplate/laraedge/internal/plugin/plugintest"
 )
 
 // TestHostRestartsAfterThreeFailedHealthChecks stops the plugin process
@@ -97,16 +98,13 @@ func TestHostStopSequence(t *testing.T) {
 	}
 }
 
-// stopProcess stops process pid with SIGSTOP and waits until it is stopped:
-// kill returns before the process stops, and a plugin still running answers
-// the next health check, which then passes instead of timing out (C61).
+// stopProcess stops process pid and waits until it is stopped
+// (plugintest.StopProcess): a plugin still running answers the next health
+// check, which then passes instead of timing out (C61).
 func (h *harness) stopProcess(pid int) {
 	h.t.Helper()
 
-	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
-		h.t.Fatal(err)
-	}
-	h.waitFor("the plugin process stopped", func() bool { return processStopped(pid) })
+	plugintest.StopProcess(h.t, pid)
 }
 
 // failHealthChecks lets n health checks of a stopped plugin time out, and

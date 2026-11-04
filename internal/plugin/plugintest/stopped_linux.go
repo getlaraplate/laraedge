@@ -1,4 +1,4 @@
-package plugin_test
+package plugintest
 
 import (
 	"os"
@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// processStopped reports whether every thread of process pid is stopped by
+// ProcessStopped reports whether every thread of process pid is stopped by
 // a signal (state T in /proc/<pid>/task/<tid>/stat): kill(SIGSTOP) returns
 // before the threads stop, and a thread still running can answer a request.
-func processStopped(pid int) bool {
+func ProcessStopped(pid int) bool {
 	tasks, err := filepath.Glob(filepath.Join("/proc", strconv.Itoa(pid), "task", "*", "stat"))
 	if err != nil || len(tasks) == 0 {
 		return false
