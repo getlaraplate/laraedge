@@ -162,9 +162,40 @@ func collectSchemaMessages(e *jsonschema.ValidationError, parent path, msgs *[]s
 			add("is invalid")
 		}
 	}
-	for _, cause := range e.Causes {
+	for _, cause := range sortedCauses(e.Causes) {
 		collectSchemaMessages(cause, p, msgs)
 	}
+}
+
+// sortedCauses returns causes with the propertyNames failures ordered by the
+// property name, in the slots those failures already occupy: the library
+// reports them in Go map order, which must not reach the output. Other causes
+// keep their place.
+func sortedCauses(causes []*jsonschema.ValidationError) []*jsonschema.ValidationError {
+	var slots []int
+	for i, c := range causes {
+		if _, ok := c.ErrorKind.(*kind.PropertyNames); ok {
+			slots = append(slots, i)
+		}
+	}
+	if len(slots) < 2 {
+		return causes
+	}
+
+	named := make([]*jsonschema.ValidationError, len(slots))
+	for i, slot := range slots {
+		named[i] = causes[slot]
+	}
+	slices.SortStableFunc(named, func(a, b *jsonschema.ValidationError) int {
+		return strings.Compare(a.ErrorKind.(*kind.PropertyNames).Property, b.ErrorKind.(*kind.PropertyNames).Property)
+	})
+
+	out := slices.Clone(causes)
+	for i, slot := range slots {
+		out[slot] = named[i]
+	}
+
+	return out
 }
 
 // scalarKindMix reports whether every leaf under e is a type error on a

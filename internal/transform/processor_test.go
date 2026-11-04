@@ -1209,3 +1209,55 @@ func TestProcessorHeartbeatAfterABackwardClockStep(t *testing.T) {
 		t.Errorf("heartbeat ts = %s, want %s", got[2].TS, want)
 	}
 }
+
+// TestProcessorHeartbeatNotFiredBeforeABackwardClockStep checks the step on a
+// heartbeat that has not fired since before it: it still fires at its
+// interval from the new time, and a forward clock leaves the deadline alone.
+func TestProcessorHeartbeatNotFiredBeforeABackwardClockStep(t *testing.T) {
+	in := inputOf(point{device: "press1", signal: "state", typ: "int16", steps: []config.Transform{step("heartbeat", `"10s"`)}})
+	clk := &steppedClock{Fake: clock.NewFake(t0)}
+	p := newProcessor(t, in, t.TempDir(), clk, nil)
+	rec := &recorder{}
+	emit := p.Wrap(rec.emit)
+
+	p.Start(t.Context())
+
+	emit(sampleOf("press1", "state", 0, model.IntValue(3)))
+	waitArmed(t, p, t0.Add(10*time.Second))
+
+	clk.back.Store(int64(time.Hour))
+	clk.Advance(10 * time.Second)
+
+	stepped := t0.Add(-time.Hour).Add(20 * time.Second)
+	waitArmed(t, p, stepped)
+
+	clk.Advance(10 * time.Second)
+	waitUntil(t, "the heartbeat after the step", func() bool { return rec.count() >= 2 })
+
+	if got := rec.samples(t); !got[1].TS.Equal(stepped) {
+		t.Errorf("heartbeat ts = %s, want %s", got[1].TS, stepped)
+	}
+}
+
+func TestProcessorErrorSummaryAfterABackwardClockStep(t *testing.T) {
+	in := inputOf(point{device: "press1", signal: "code", typ: "uint16", steps: []config.Transform{step("bcd", "true")}})
+	log := &logSink{}
+	clk := &steppedClock{Fake: clock.NewFake(t0)}
+	p := newProcessor(t, in, t.TempDir(), clk, log.logger())
+	emit := p.Wrap((&recorder{}).emit)
+
+	p.Start(t.Context())
+
+	emit(sampleOf("press1", "code", 0, model.IntValue(0x1A)))
+	emit(sampleOf("press1", "code", 0, model.IntValue(0x1A)))
+	waitArmed(t, p, t0.Add(time.Minute))
+
+	clk.back.Store(int64(time.Hour))
+	clk.Advance(time.Minute)
+
+	stepped := t0.Add(-time.Hour).Add(2 * time.Minute)
+	waitArmed(t, p, stepped)
+
+	clk.Advance(time.Minute)
+	waitUntil(t, "the error summary", func() bool { return len(log.entries(t)) >= 2 })
+}

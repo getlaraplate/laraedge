@@ -1049,3 +1049,21 @@ func TestParseOrdersMessagesNaturally(t *testing.T) {
 		t.Errorf("messages not in natural order: %q", ids)
 	}
 }
+
+// TestParseOrdersUnknownTransformNamesByName checks that several unknown
+// names in one step come out in name order, not in the schema library's map
+// order. Run with -count=200 to see the old behaviour.
+func TestParseOrdersUnknownTransformNamesByName(t *testing.T) {
+	doc := transformChain(t, "[{alpha: 1, beta: 2, gamma: 3, delta: 4}]")
+
+	_, msgs, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loc := "inputs.0.devices.0.points.0.transforms.0: "
+	want := []string{loc + "must have at most 1 keys", loc + "unknown transform alpha", loc + "unknown transform beta", loc + "unknown transform delta", loc + "unknown transform gamma"}
+	if !slices.Equal(msgs, want) {
+		t.Errorf("messages =\n%s\nwant\n%s", strings.Join(msgs, "\n"), strings.Join(want, "\n"))
+	}
+}

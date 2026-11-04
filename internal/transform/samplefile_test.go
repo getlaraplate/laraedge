@@ -2,6 +2,7 @@ package transform_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"math"
 	"strings"
@@ -274,8 +275,13 @@ func (b *blankLines) Read(p []byte) (int, error) {
 
 func TestReadSamplesRefusesAFileBeyondTheTotalLimit(t *testing.T) {
 	_, err := transform.ReadSamples(&blankLines{left: transform.MaxSampleFile + 1}, kinds)
-	if err == nil || !strings.Contains(err.Error(), "file is too large") {
-		t.Fatalf("err = %v, want a refusal for the file size", err)
+	var line int
+	if err == nil {
+		t.Fatal("ReadSamples accepted a file beyond the limit")
+	}
+
+	if _, scanErr := fmt.Sscanf(err.Error(), "line %d: file is too large", &line); scanErr != nil || line < 1 || line > transform.MaxSampleFile/1024+1 {
+		t.Fatalf("err = %q, want %q naming a line", err, "line N: file is too large")
 	}
 
 	if samples, err := transform.ReadSamples(&blankLines{left: transform.MaxSampleFile}, kinds); err != nil || len(samples) != 0 {

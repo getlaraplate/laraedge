@@ -111,6 +111,13 @@ type clockObserver interface {
 	observeNow(now time.Time)
 }
 
+// clockStepObserver is implemented by a step whose deadline was armed from a
+// clock reading (heartbeat, min_interval, debounce): after a backward wall
+// clock step it clamps the deadline to now plus its own period.
+type clockStepObserver interface {
+	clockSteppedBack(now time.Time)
+}
+
 // deviceObserver is implemented by a step that must know its device died
 // (ruling R14): heartbeat stops resending, min_interval releases its held
 // sample, debounce drops its waiting value; deadband and debounce forget their
@@ -202,13 +209,12 @@ func (c *Chain) Fire(now time.Time) ([]model.Sample, []error) {
 	return c.exit(out, &errs), errs
 }
 
-// clockObserved tells every step that observes the clock the time now, without
-// firing anything: the processor uses it to let the steps see a wall clock step
-// back.
-func (c *Chain) clockObserved(now time.Time) {
+// clockSteppedBack tells every step that holds a deadline that the wall clock
+// now reads now, before a reading seen earlier, without firing anything.
+func (c *Chain) clockSteppedBack(now time.Time) {
 	for _, st := range c.stages {
-		if o, ok := st.step.(clockObserver); ok {
-			o.observeNow(now)
+		if o, ok := st.step.(clockStepObserver); ok {
+			o.clockSteppedBack(now)
 		}
 	}
 }

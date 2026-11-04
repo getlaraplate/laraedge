@@ -352,8 +352,10 @@ func (p *Processor) arm() (timer clock.Timer, due, stop bool) {
 func (p *Processor) syncClockLocked(now time.Time) {
 	if now.Before(p.lastNow) {
 		for _, pc := range p.points {
-			pc.chain.clockObserved(now)
+			pc.chain.clockSteppedBack(now)
 		}
+
+		p.errLog.clockSteppedBack(now)
 	}
 
 	p.lastNow = now
@@ -480,6 +482,18 @@ func (l *errorLog) report(now time.Time, key pointKey, err error) {
 
 // deadline is when the episode ends if no error comes, while errors are
 // counted and not yet logged: flush then logs their summary.
+// clockSteppedBack moves the window and the last error back to now, so the
+// summary is due one window after the step, not after the old reading.
+func (l *errorLog) clockSteppedBack(now time.Time) {
+	if l.last.After(now) {
+		l.last = now
+	}
+
+	if l.start.After(now) {
+		l.start = now
+	}
+}
+
 func (l *errorLog) deadline() (time.Time, bool) {
 	if l.suppressed == 0 {
 		return time.Time{}, false
