@@ -87,6 +87,7 @@ func newFixture(t *testing.T, opts ...fixtureOption) *fixture {
 		for ctx.Err() == nil {
 			_ = sup.Status()
 			_ = sup.AppliedVersion()
+			// Hammers the accessors on purpose for the race detector; not a wait.
 			runtime.Gosched()
 		}
 	}()
@@ -245,7 +246,20 @@ func (f *fixture) waitStatus(what string, cond func(Status) bool) {
 		if time.Now().After(deadline) {
 			f.t.Fatalf("status: %s not reached: %+v", what, f.sup.Status())
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// advanceUntil moves the clock one minute at a time, each time once the output
+// waits on a backoff timer, until cond holds. After each step it waits for the
+// output either to satisfy cond or to arm its next timer.
+func (f *fixture) advanceUntil(what string, cond func() bool) {
+	f.t.Helper()
+
+	for !cond() {
+		f.clk.BlockUntil(f.t, 1)
+		f.clk.Advance(time.Minute)
+		waitFor(f.t, what, func() bool { return cond() || f.clk.PendingTimers() > 0 })
 	}
 }
 
@@ -613,14 +627,7 @@ func TestBirthsAgainOnOutputReconnection(t *testing.T) {
 	f.waitStatus("main backing off", outputState("main", "backoff"))
 
 	// Move the clock until the backoff ends and the batch is resent.
-	deadline := time.Now().Add(guard)
-	for len(f.be.got("main")) < 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("main received %q, want the birth resent and the reconnection birth", f.be.got("main"))
-		}
-		f.clk.Advance(time.Minute)
-		runtime.Gosched()
-	}
+	f.advanceUntil("the birth resent and the reconnection birth", func() bool { return len(f.be.got("main")) >= 2 })
 
 	if got := f.be.got("main"); !reflect.DeepEqual(got, []string{birthA1, birthA1}) {
 		t.Fatalf("main received %q, want the birth then the reconnection birth", got)
@@ -741,14 +748,7 @@ func TestRollbackOfAChangedOutputKeepsItsBufferAndSeq(t *testing.T) {
 		t.Fatalf("main runs %s, want the previous configuration", got)
 	}
 
-	deadline := time.Now().Add(guard)
-	for !slices.Contains(f.be.got("main"), "a1/state") {
-		if time.Now().After(deadline) {
-			t.Fatalf("main received %q, want the buffered sample after the rollback", f.be.got("main"))
-		}
-		f.clk.Advance(time.Minute)
-		runtime.Gosched()
-	}
+	f.advanceUntil("the buffered sample after the rollback", func() bool { return slices.Contains(f.be.got("main"), "a1/state") })
 	seqs := f.be.seqsOf("main")
 	for i := 1; i < len(seqs); i++ {
 		if seqs[i] != seqs[i-1]+1 {

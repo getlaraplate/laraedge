@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -203,7 +202,7 @@ func (h *harness) waitFor(what string, cond func() bool) {
 		if time.Now().After(deadline) {
 			h.t.Fatalf("%s: not reached", what)
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -220,13 +219,7 @@ func (h *harness) waitSamples(mark int, signal string, n int) []model.Sample {
 func (h *harness) idle() {
 	h.t.Helper()
 
-	deadline := time.Now().Add(guard)
-	for h.clk.PendingTimers() < idleTimers {
-		if time.Now().After(deadline) {
-			h.t.Fatalf("PendingTimers() = %d, want %d", h.clk.PendingTimers(), idleTimers)
-		}
-		runtime.Gosched()
-	}
+	h.clk.BlockUntil(h.t, idleTimers)
 }
 
 // step advances the clock by d and waits until the input is idle again.

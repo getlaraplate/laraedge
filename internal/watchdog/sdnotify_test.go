@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -237,11 +236,5 @@ func TestASocketThatIsGoneIsLogged(t *testing.T) {
 func waitTimer(t *testing.T, clk *clock.Fake) {
 	t.Helper()
 
-	deadline := time.Now().Add(guard)
-	for clk.PendingTimers() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the watchdog did not arm its timer")
-		}
-		runtime.Gosched()
-	}
+	clk.BlockUntil(t, 1)
 }

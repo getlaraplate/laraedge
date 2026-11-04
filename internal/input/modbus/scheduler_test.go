@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime"
 	"slices"
 	"syscall"
 	"testing"
@@ -27,7 +26,7 @@ var framings = []struct {
 	{"rtuovertcp", false},
 }
 
-// waitAccepted yields until the server accepted n connections; guard bounds
+// waitAccepted polls until the server accepted n connections; guard bounds
 // the wait. The client's Open returns once the handshake is done, possibly
 // before the server's accept loop counted the connection.
 func waitAccepted(t *testing.T, srv *rtuServer, n int32) {
@@ -38,7 +37,7 @@ func waitAccepted(t *testing.T, srv *rtuServer, n int32) {
 		if time.Now().After(deadline) {
 			t.Fatalf("connections accepted = %d, want %d", srv.accepted.Load(), n)
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 

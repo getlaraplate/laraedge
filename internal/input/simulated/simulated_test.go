@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -119,13 +118,7 @@ func inputOf(conn json.RawMessage, devices ...config.Device) config.Input {
 func waitArmed(t *testing.T, clk *clock.Fake) {
 	t.Helper()
 
-	deadline := time.Now().Add(guard)
-	for clk.PendingTimers() != 1 {
-		if time.Now().After(deadline) {
-			t.Fatal("the input did not arm its timer")
-		}
-		runtime.Gosched()
-	}
+	clk.BlockUntil(t, 1)
 }
 
 // drive starts in on a fake clock, advances it by step n times, closes the
@@ -514,7 +507,7 @@ func TestCancellingTheStartContextStopsTheGoroutine(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("the goroutine kept its timer after the context was cancelled")
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 	if err := in.Close(); err != nil {
 		t.Fatal(err)

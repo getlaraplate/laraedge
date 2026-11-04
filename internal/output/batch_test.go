@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -250,18 +249,11 @@ func (h *harness) nextAsync(ctx context.Context) <-chan nextResult {
 	return out
 }
 
-// waitTimers yields until n timers wait on clk: the batcher is then blocked
-// in its select.
+// waitTimers waits until at least n timers wait on clk: the batcher is then
+// blocked in its select.
 func waitTimers(t *testing.T, clk *clock.Fake, n int) {
 	t.Helper()
-
-	for i := 0; clk.PendingTimers() != n; i++ {
-		if i > 50_000_000 {
-			t.Fatalf("PendingTimers() = %d, want %d", clk.PendingTimers(), n)
-		}
-
-		runtime.Gosched()
-	}
+	clk.BlockUntil(t, n)
 }
 
 // bodySamples returns "signal=value" for every sample of the envelope, in
@@ -376,7 +368,7 @@ func TestNextWaitsMaxWaitForMoreRecords(t *testing.T) {
 	h.append(bulk(0))
 	waitTimers(t, h.clk, 1)
 
-	h.clk.Advance(maxWait - time.Millisecond)
+	h.clk.Advance(maxWait - time.Nanosecond)
 	select {
 	case r := <-res:
 		t.Fatalf("Next() returned before max_wait: %v, %v", r.batch, r.err)
@@ -384,7 +376,7 @@ func TestNextWaitsMaxWaitForMoreRecords(t *testing.T) {
 	}
 
 	h.append(bulk(1), crit(0))
-	h.clk.Advance(time.Millisecond)
+	h.clk.Advance(time.Nanosecond)
 
 	r := <-res
 	if r.err != nil {

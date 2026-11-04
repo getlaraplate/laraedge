@@ -254,6 +254,7 @@ func startRun(t *testing.T, out *output.HTTP) *runner {
 			_ = out.ClockOffset()
 			_, _ = out.LastError()
 			_ = out.LastConfirmation()
+			// Hammers the accessors on purpose for the race detector; not a wait.
 			runtime.Gosched()
 		}
 	}()
@@ -285,7 +286,7 @@ func (r *runner) stop(t *testing.T) {
 	})
 }
 
-// waitFor yields until cond holds.
+// waitFor polls until cond holds.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 
@@ -295,7 +296,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 			t.Fatalf("waiting for %s", what)
 		}
 
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 

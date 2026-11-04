@@ -499,7 +499,7 @@ func (f *fixture) waitLogCount(text string, n int) {
 		if time.Now().After(deadline) {
 			f.t.Fatalf("logs: %d lines with %s not reached:\n%s", n, text, f.logs.String())
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 

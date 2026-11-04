@@ -106,7 +106,7 @@ func (r *recorder) count() int {
 	return len(r.records)
 }
 
-// waitUntil yields until cond holds. The wall-clock guard only stops a
+// waitUntil polls until cond holds. The wall-clock guard only stops a
 // broken test; no assertion depends on timing.
 func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Helper()
@@ -117,7 +117,7 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 			t.Fatalf("%s not reached", what)
 		}
 
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -536,14 +536,10 @@ func TestProcessorCloseWaitsForAnEmitInProgress(t *testing.T) {
 	}()
 
 	// The emit stays blocked until release: Close must not return meanwhile.
-	for range 10000 {
-		select {
-		case <-closed:
-			t.Fatal("Close returned while an emit was in progress")
-		default:
-		}
-
-		runtime.Gosched()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while an emit was in progress")
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	close(release)

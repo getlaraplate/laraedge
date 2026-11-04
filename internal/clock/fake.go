@@ -119,8 +119,9 @@ func (f *Fake) PendingTimers() int {
 
 // BlockUntil waits until at least n timers are pending (created, neither fired
 // nor stopped), or fails t after the bound. It wakes on every NewTimer, Stop
-// and Advance. Call it from the test goroutine (Fatalf semantics). It takes a small interface instead of testing.TB so this
-// package does not import testing into the agent binary.
+// and Advance. Call it from the test goroutine (Fatalf semantics). It takes a
+// small interface instead of testing.TB so this package does not import
+// testing into the agent binary.
 func (f *Fake) BlockUntil(t interface {
 	Helper()
 	Fatalf(format string, args ...any)

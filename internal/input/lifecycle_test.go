@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -250,7 +249,7 @@ func TestLifecycleRunChecksOnTheClock(t *testing.T) {
 // waitTimers waits until the fake clock holds at least n pending timers.
 func waitTimers(t *testing.T, clk *clock.Fake, n int) {
 	t.Helper()
-	waitFor(t, func() bool { return clk.PendingTimers() >= n })
+	clk.BlockUntil(t, n)
 }
 
 func waitFor(t *testing.T, cond func() bool) {
@@ -261,6 +260,6 @@ func waitFor(t *testing.T, cond func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatal("condition not reached")
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }

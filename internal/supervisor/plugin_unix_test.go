@@ -3,7 +3,6 @@
 package supervisor
 
 import (
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -46,13 +45,7 @@ func TestCloseStopsPluginsWithinTheStopDeadline(t *testing.T) {
 	f.clk.Advance(5 * time.Second)
 
 	f.waitLogCount("sending SIGTERM", 2)
-	deadline := time.Now().Add(guard)
-	for f.clk.PendingTimers() < pending {
-		if time.Now().After(deadline) {
-			t.Fatalf("the kill timers were not armed: %d pending, want %d", f.clk.PendingTimers(), pending)
-		}
-		runtime.Gosched()
-	}
+	f.clk.BlockUntil(t, pending)
 	f.clk.Advance(5 * time.Second)
 
 	select {
