@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,6 +134,49 @@ func TestRunAgentServesTheStatusEndpoint(t *testing.T) {
 	if conn, err := net.Dial("tcp", a.addr); err == nil {
 		conn.Close()
 		t.Fatal("the status endpoint still listens after the agent stopped")
+	}
+}
+
+// firstNowClock answers its first Now at the base time and every later one
+// an hour after it, so that the process start differs from the time the
+// status endpoint starts.
+type firstNowClock struct {
+	*clock.Fake
+	calls atomic.Int64
+	base  time.Time
+}
+
+func (c *firstNowClock) Now() time.Time {
+	if c.calls.Add(1) == 1 {
+		return c.base
+	}
+
+	return c.base.Add(time.Hour)
+}
+
+func TestRunAgentUptimeCountsFromTheProcessStart(t *testing.T) {
+	dir := t.TempDir()
+	be := newIngest(t)
+	bootstrapFile := filepath.Join(dir, "bootstrap.yaml")
+	writeFile(t, bootstrapFile, bootstrapYAML("plant-a-edge-01", quietConfig(t, dir, be.srv.URL), filepath.Join(dir, "data")))
+	base := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
+
+	a := startAgent(t, bootstrapFile, agentDeps{
+		lookupEnv: (&fakeEnv{vars: map[string]string{runEnv: runToken}}).lookup,
+		clock:     &firstNowClock{Fake: clock.NewFake(base), base: base},
+		drivers:   map[string]input.Factory{config.DriverSimulated: quietFactory},
+		logger:    slog.New(slog.DiscardHandler),
+	})
+
+	_, body := httpGet(t, "http://"+a.addr+"/status")
+	var st struct {
+		UptimeSeconds float64 `json:"uptime_seconds"`
+	}
+	if err := json.Unmarshal([]byte(body), &st); err != nil {
+		t.Fatalf("GET /status = %s: %v", body, err)
+	}
+	if st.UptimeSeconds != 3600 {
+		t.Fatalf("uptime = %v s, want 3600 counted from the start of runAgent", st.UptimeSeconds)
 	}
 }
 

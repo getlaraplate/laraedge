@@ -7,10 +7,12 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +37,7 @@ const (
 type sampleValues struct {
 	mu      sync.Mutex
 	floats  map[string]bool
+	ints    map[string]bool
 	strs    map[string]bool
 	samples int
 }
@@ -53,17 +56,56 @@ func (v *sampleValues) add(rec model.Record) {
 	case model.KindFloat:
 		v.floats[strconv.FormatFloat(val.Float, 'f', -1, 64)] = true
 		v.floats[strconv.FormatFloat(val.Float, 'g', -1, 64)] = true
+	case model.KindInt:
+		// Only an integer of three digits or more can stand for a value: a
+		// small one appears in ordinary log lines (versions, statuses,
+		// counts), so its absence proves nothing.
+		if str := strconv.FormatInt(val.Int, 10); len(str) >= minIntDigits {
+			v.ints[str] = true
+		}
 	case model.KindString:
 		v.strs[val.Str] = true
 	}
 }
 
-func (v *sampleValues) counts() (samples, floats, strs int) {
+// minIntDigits is the shortest integer sample value the log scan looks for.
+const minIntDigits = 3
+
+func (v *sampleValues) counts() (samples, floats, ints, strs int) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	return v.samples, len(v.floats), len(v.strs)
+	return v.samples, len(v.floats), len(v.ints), len(v.strs)
 }
+
+// intForms returns the recorded integer values.
+func (v *sampleValues) intForms() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	return slices.Collect(maps.Keys(v.ints))
+}
+
+// holdsNumber reports whether line holds the integer form as a number of its
+// own, not as the digits of a longer one.
+func holdsNumber(line, form string) bool {
+	for i := 0; ; {
+		at := strings.Index(line[i:], form)
+		if at < 0 {
+			return false
+		}
+		at += i
+		end := at + len(form)
+		before := at == 0 || !isNumberByte(line[at-1])
+		after := end == len(line) || !isNumberByte(line[end])
+		if before && after {
+			return true
+		}
+		i = at + 1
+	}
+}
+
+func isNumberByte(b byte) bool { return b >= '0' && b <= '9' || b == '.' }
 
 // forms returns every recorded string form.
 func (v *sampleValues) forms() []string {
@@ -167,10 +209,10 @@ const scanScenario = `
 // agent runs the simulated input against a backend that refuses the token
 // (401), then refuses a batch (422), then accepts; every log line, at every
 // level, is scanned for the token, and every line at info and above for the
-// sample values the input emitted. Integer counters are left out of the
-// value scan: small integers appear in ordinary log lines (versions,
-// statuses, counts), so their absence proves nothing; the float and string
-// values travel the same code paths.
+// sample values the input emitted. Integers are not scanned as substrings;
+// those of at least minIntDigits digits are scanned as whole
+// numbers, because small ones appear in ordinary log lines (versions,
+// statuses, counts) and their absence would prove nothing.
 func TestLogsHoldNoTokenAndNoSampleValue(t *testing.T) {
 	dir := t.TempDir()
 	be := newScriptedIngest(t)
@@ -203,7 +245,7 @@ outputs:
 	bootstrapFile := filepath.Join(dir, "bootstrap.yaml")
 	writeFile(t, bootstrapFile, bootstrapYAML("plant-a-edge-01", configFile, filepath.Join(dir, "data")))
 
-	values := &sampleValues{floats: map[string]bool{}, strs: map[string]bool{}}
+	values := &sampleValues{floats: map[string]bool{}, ints: map[string]bool{}, strs: map[string]bool{}}
 	realSimulated := simulated.Factory(dir)
 	recording := func(cfg config.Input, clk clock.Clock) (input.Input, error) {
 		in, err := realSimulated(cfg, clk)
@@ -229,12 +271,12 @@ outputs:
 	// simulator replays.
 	deadline := time.Now().Add(guard)
 	for {
-		samples, floats, strs := values.counts()
-		if be.requests() >= 6 && samples >= 50 && floats >= 20 && strs >= 2 {
+		samples, floats, ints, strs := values.counts()
+		if be.requests() >= 6 && samples >= 50 && floats >= 20 && ints >= 5 && strs >= 2 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("not enough traffic: %d requests, %d samples, %d float and %d string values", be.requests(), samples, floats, strs)
+			t.Fatalf("not enough traffic: %d requests, %d samples, %d float, %d integer and %d string values", be.requests(), samples, floats, ints, strs)
 		}
 		clk.Advance(5 * time.Second)
 		runtime.Gosched()
@@ -248,6 +290,7 @@ outputs:
 	}
 
 	forms := values.forms()
+	ints := values.intForms()
 	sc := bufio.NewScanner(strings.NewReader(logs.String()))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	lines := 0
@@ -272,8 +315,34 @@ outputs:
 				t.Errorf("a %s log line holds the sample value %s: %s", rec.Level, form, line)
 			}
 		}
+		for _, form := range ints {
+			if holdsNumber(line, form) {
+				t.Errorf("a %s log line holds the integer sample value %s: %s", rec.Level, form, line)
+			}
+		}
 	}
 	if lines == 0 {
 		t.Fatal("no log line captured")
+	}
+}
+
+func TestHoldsNumberMatchesWholeNumbersOnly(t *testing.T) {
+	for _, tt := range []struct {
+		line string
+		want bool
+	}{
+		{`{"value":182}`, true},
+		{`value=182`, true},
+		{`182`, true},
+		{`{"samples":1182}`, false},
+		{`{"samples":1821}`, false},
+		{`{"offset":0.182}`, false},
+		{`{"offset":182.5}`, false},
+		{`{"a":1821,"b":182}`, true},
+		{`no digits`, false},
+	} {
+		if got := holdsNumber(tt.line, "182"); got != tt.want {
+			t.Errorf("holdsNumber(%q, 182) = %v, want %v", tt.line, got, tt.want)
+		}
 	}
 }

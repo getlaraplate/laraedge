@@ -26,6 +26,7 @@ import (
 
 	"github.com/getlaraplate/laraedge/internal/atomicfile"
 	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/lograte"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
@@ -39,6 +40,10 @@ const (
 
 // MaxSegmentSize bounds Options.SegmentSize and a pinned queue segment size.
 const MaxSegmentSize int64 = 1 << 30
+
+// failureLogWindow is the shortest interval between two summaries of the
+// write and drop path's failures.
+const failureLogWindow = time.Minute
 
 const (
 	diskCheckInterval   = time.Second
@@ -154,7 +159,7 @@ type Buffer struct {
 	lossesDirty bool
 	frozen      int // leading markers handed out by PendingLosses: never changed again
 	dropped     map[string]uint64
-	failures    *failureLog
+	failures    *lograte.Reporter
 
 	// unsealedSince is the clock time of the Append of the oldest record not
 	// yet sealed, or earlier: zero when no record waits (UnsealedAge).
@@ -225,7 +230,7 @@ func open(dir string, opts Options, h hooks) (*Buffer, error) {
 		hooks:    h,
 		losses:   losses,
 		dropped:  map[string]uint64{},
-		failures: newFailureLog(opts.Logger),
+		failures: lograte.New(opts.Logger, failureLogWindow, "buffer: write and drop failures repeated since the last report"),
 		changed:  make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -348,9 +353,9 @@ func (b *Buffer) Append(r model.Record) error {
 
 	err = b.store(q, frame)
 	if err != nil && !errors.Is(err, errFloorBreached) {
-		b.failures.report(b.opts.Clock.Now(), q.priority.String()+".write_retry", slog.LevelWarn, "buffer: write failed, evicting and retrying once", "queue", q.priority.String(), "error", err)
+		b.failures.Report(b.opts.Clock.Now(), q.priority.String()+".write_retry", slog.LevelWarn, "buffer: write failed, evicting and retrying once", "queue", q.priority.String(), "error", err)
 		if _, evictErr := b.evictOne(); evictErr != nil {
-			b.failures.report(b.opts.Clock.Now(), q.priority.String()+".evict_failed", slog.LevelError, "buffer: eviction after a failed write failed", "queue", q.priority.String(), "error", evictErr)
+			b.failures.Report(b.opts.Clock.Now(), q.priority.String()+".evict_failed", slog.LevelError, "buffer: eviction after a failed write failed", "queue", q.priority.String(), "error", evictErr)
 		}
 
 		if err = b.store(q, frame); err != nil && !errors.Is(err, errFloorBreached) {
@@ -409,7 +414,7 @@ func (b *Buffer) dropRecord(p model.Priority, r model.Record, kind, why string, 
 		attrs = append(attrs, "error", cause)
 	}
 
-	b.failures.report(now, p.String()+"."+kind, level, "buffer: record dropped", attrs...)
+	b.failures.Report(now, p.String()+"."+kind, level, "buffer: record dropped", attrs...)
 
 	if r.Event != nil {
 		if r.Event.Kind == model.Death {
@@ -440,7 +445,7 @@ func (b *Buffer) dropRecord(p model.Priority, r model.Record, kind, why string, 
 	}
 
 	if err := b.addLossLocked(model.Loss{Priority: p, FromTS: ts, ToTS: ts, Samples: 1, Reason: model.LossBufferFull}); err != nil {
-		b.failures.report(now, "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "reason", why, "error", err)
+		b.failures.Report(now, "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "reason", why, "error", err)
 	}
 }
 
@@ -978,11 +983,11 @@ func (b *Buffer) syncPass() {
 
 	if b.lossesDirty {
 		if err := b.persistLossesLocked(); err != nil {
-			b.failures.report(b.opts.Clock.Now(), "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "pending", len(b.losses), "error", err)
+			b.failures.Report(b.opts.Clock.Now(), "losses_not_written", slog.LevelError, "buffer: cannot write the loss markers, retrying at the next sync", "pending", len(b.losses), "error", err)
 		}
 	}
 
-	b.failures.flush(b.opts.Clock.Now())
+	b.failures.Flush(b.opts.Clock.Now())
 	b.mu.Unlock()
 
 	if b.hooks.beforeSync != nil {

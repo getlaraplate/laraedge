@@ -3,6 +3,7 @@ package pipeline_test
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -26,6 +27,7 @@ type sink struct {
 	recs   []model.Record
 	losses []model.Loss
 	err    error
+	calls  int
 }
 
 func (s *sink) AddLoss(l model.Loss) error {
@@ -41,6 +43,7 @@ func (s *sink) Append(r model.Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.calls++
 	if s.err != nil {
 		return s.err
 	}
@@ -70,6 +73,19 @@ func (s *sink) got() []string {
 	}
 
 	return out
+}
+
+// timelessJSON is a JSON log handler without the time attribute: a log line
+// is scanned for a sample value, and the digits of a timestamp contain any
+// four-digit value now and then.
+func timelessJSON(w io.Writer) slog.Handler {
+	return slog.NewJSONHandler(w, &slog.HandlerOptions{ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		if len(groups) == 0 && a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+
+		return a
+	}})
 }
 
 func sample(device, signal string) model.Record {
@@ -291,7 +307,7 @@ func TestRouterBirthCarriesTypesUnitsAndClockTime(t *testing.T) {
 
 func TestRouterAppendErrorIsLoggedWithoutValueAndRoutingGoesOn(t *testing.T) {
 	var logs bytes.Buffer
-	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.NewJSONHandler(&logs, nil)))
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(timelessJSON(&logs)))
 	failing := &sink{err: fmt.Errorf("buffer: %w", buffer.ErrDropped)}
 	ok := &sink{}
 	r.SetOutput("a-failing", config.Route{Include: []string{"*"}}, failing)
@@ -310,6 +326,45 @@ func TestRouterAppendErrorIsLoggedWithoutValueAndRoutingGoesOn(t *testing.T) {
 	}
 	if strings.Contains(out, "4242") {
 		t.Errorf("log %q contains the sample value", out)
+	}
+}
+
+func TestRouterLogsARefusingBufferOnceThenOneSummaryPerInterval(t *testing.T) {
+	var logs bytes.Buffer
+	clk := clock.NewFake(start)
+	r := pipeline.NewRouter(clk, slog.New(timelessJSON(&logs)))
+	failing := &sink{err: fmt.Errorf("buffer: %w", buffer.ErrDropped)}
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, failing)
+
+	for range 1000 {
+		r.Emit(sample("press-07", "state"))
+	}
+
+	if failing.calls != 1000 {
+		t.Fatalf("the buffer was offered %d records, want all 1000 (its counters count them)", failing.calls)
+	}
+	if got := strings.Count(logs.String(), "router: cannot buffer a record"); got != 1 {
+		t.Fatalf("%d refusal warnings for 1000 refused records, want 1:\n%s", got, logs.String())
+	}
+	if strings.Contains(logs.String(), "repeated since the last report") {
+		t.Fatalf("a summary before the interval ended:\n%s", logs.String())
+	}
+
+	clk.Advance(time.Minute)
+	r.Emit(sample("press-07", "state"))
+	r.Emit(sample("press-07", "state"))
+
+	out := logs.String()
+	if got := strings.Count(out, "router: records refused by a buffer repeated since the last report"); got != 1 {
+		t.Fatalf("%d summaries after the interval, want 1:\n%s", got, out)
+	}
+	for _, want := range []string{`"suppressed":999`, `"main":999`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q does not contain %s", out, want)
+		}
+	}
+	if got := strings.Count(out, "router: cannot buffer a record"); got != 1 {
+		t.Fatalf("%d full warnings in all, want 1", got)
 	}
 }
 
@@ -361,7 +416,7 @@ func TestRouterHoldsARestartingOutput(t *testing.T) {
 
 func TestRouterHoldOverflowBecomesLossMarkers(t *testing.T) {
 	var logs bytes.Buffer
-	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.NewJSONHandler(&logs, nil)))
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(timelessJSON(&logs)))
 	r.SetInput(config.Input{ID: "press", Devices: []config.Device{{Device: "press-07", Points: []config.Point{{Signal: "state", Type: "string"}}}}})
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
 	r.Hold("main", config.Route{Include: []string{"*"}})
@@ -400,7 +455,7 @@ func TestRouterHoldOverflowBecomesLossMarkers(t *testing.T) {
 
 func TestRouterRemovingAHeldOutputDiscardsItsRecords(t *testing.T) {
 	var logs bytes.Buffer
-	r := pipeline.NewRouter(clock.NewFake(start), slog.New(slog.NewJSONHandler(&logs, nil)))
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(timelessJSON(&logs)))
 	r.SetOutput("main", config.Route{Include: []string{"*"}}, &sink{})
 	r.Hold("main", config.Route{Include: []string{"*"}})
 	r.Emit(sample("press-07", "state"))

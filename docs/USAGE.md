@@ -455,7 +455,10 @@ Read-only HTTP on `status_listen`, `GET` and `HEAD` only.
 With `status_token` set, every path but `/healthz` needs `Authorization: Bearer <token>`. The endpoint
 is plain HTTP: on a non-loopback address the bearer crosses the network in clear, so bind a monitoring
 network you trust (TLS on the endpoint is a later plan). If the status listener fails while the agent
-runs, the error is logged and the agent keeps running without it.
+runs, the error is logged and the agent keeps running without it. The server bounds a slow client: 5 s to
+send the request headers, 10 s for the whole request, 10 s to write an answer. `uptime_seconds` counts from
+the start of the agent process, not from the start of the status endpoint. The scheme of the
+`Authorization` header is matched without regard to case (`bearer` and `Bearer` both work).
 
 ### Metrics
 
@@ -465,8 +468,8 @@ Every name starts with `laraplate_edge_`.
 |---|---|---|---|
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
-| `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down |
-| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind`: `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
+| `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down; only inputs that run and keep a connection: the series of an input that failed or was removed ends (a stale series to Prometheus), so alert on `input_up == 0` for a failed input |
+| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
 | `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |
@@ -502,8 +505,11 @@ service manager to collect and rotate. `--log-level` takes `debug`, `info` (defa
 - On a disk that refuses every write the buffer logs its first failed write and its first dropped
   record of each queue in full, then at most one summary a minute (`write and drop failures repeated
   since the last report`, with `suppressed` and a count per `<queue>.<kind>`); after a quiet minute the
-  next failure is logged in full again. The router still logs each record the buffer refuses at
-  `WARN` ("router: cannot buffer a record", with the output, device and signal).
+  next failure is logged in full again. The router logs a record the buffer refuses at `WARN`
+  ("router: cannot buffer a record", with the output, device and signal) the first time in an
+  episode, then at most one summary a minute ("router: records refused by a buffer repeated since the
+  last report", with `suppressed` and a count per output); each refused record still reaches the buffer,
+  whose `laraplate_edge_dropped_samples_total` counts it.
 - A transform runtime error is logged at `WARN` the first time for each device, signal and step of an
   episode ("transform: runtime error, the sample is sent bad", with `input`, `device`, `signal`, `step`,
   `transform` and `error`, never the value); later ones are only counted, in at most one summary a
