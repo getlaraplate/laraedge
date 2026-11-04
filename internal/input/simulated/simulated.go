@@ -120,9 +120,10 @@ func parseConnection(raw json.RawMessage) (connection, error) {
 // Factory returns the factory of simulated inputs. baseDir is the directory
 // a relative scenario_file is resolved against, the configuration file's
 // directory; empty, a relative scenario_file is refused. The factory reads
-// the seed from the connection. It reads the scenario file when it can; a
-// file it cannot read makes Start fail instead, since a local resource error
-// is Start's to report.
+// the seed from the connection. It reads the scenario file when it can and
+// refuses one that is invalid or larger than 1 MiB, naming its path; a file
+// it cannot open or read makes Start fail instead, since a local resource
+// error is Start's to report.
 func Factory(baseDir string) input.Factory {
 	return func(cfg config.Input, clk clock.Clock) (input.Input, error) {
 		conn, err := parseConnection(cfg.Connection)
@@ -246,7 +247,13 @@ func (in *Input) loadScenario() (Scenario, error) {
 	}
 
 	data, err := readLimited(path)
-	if err != nil {
+	var tooLarge *tooLargeError
+	switch {
+	case errors.As(err, &tooLarge):
+		// The file is there and readable: its size is the configuration's
+		// problem, refused at the configuration check (C46).
+		return Scenario{}, fmt.Errorf("simulated input %q: connection.scenario_file: %w", in.cfg.ID, err)
+	case err != nil:
 		return Scenario{}, &localError{fmt.Errorf("simulated input %q: connection.scenario_file: %w", in.cfg.ID, err)}
 	}
 	sc, err := ParseScenario(data)
@@ -257,7 +264,13 @@ func (in *Input) loadScenario() (Scenario, error) {
 	return sc, nil
 }
 
-// readLimited reads a file of at most maxScenarioSize bytes.
+// tooLargeError is a scenario file larger than maxScenarioSize.
+type tooLargeError struct{ path string }
+
+func (e *tooLargeError) Error() string { return e.path + " is larger than 1 MiB" }
+
+// readLimited reads a file of at most maxScenarioSize bytes; a larger one is
+// a *tooLargeError.
 func readLimited(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -270,7 +283,7 @@ func readLimited(path string) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > maxScenarioSize {
-		return nil, fmt.Errorf("%s is larger than 1 MiB", path)
+		return nil, &tooLargeError{path: path}
 	}
 
 	return data, nil
@@ -317,8 +330,8 @@ func (in *Input) sinks(sc *Scenario) (map[string]map[string][]sink, error) {
 
 // Start starts the simulation: the initial state and the counters at 0 are
 // emitted at once, then the scenario advances by one tick each time the clock
-// passes one. It fails only on a scenario it cannot read or use. The goroutine stops when ctx is
-// done or on Close.
+// passes one. It fails only on a scenario it cannot read or use. The
+// goroutine stops when ctx is done or on Close.
 func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("simulated input %q: start: %w", in.cfg.ID, err)
@@ -401,7 +414,7 @@ func (in *Input) Probe(ctx context.Context) ([]model.Sample, error) {
 // until ctx is done. The steps are timestamped with their scheduled instant,
 // so a late timer changes when a step runs, never what it emits.
 func (in *Input) run(ctx context.Context, emit func(model.Record), start time.Time) {
-	in.emitAll(emit, in.initialSamples(start))
+	in.emitAll(ctx, emit, in.initialSamples(start))
 
 	next := start.Add(in.tick)
 	for {
@@ -422,7 +435,7 @@ func (in *Input) run(ctx context.Context, emit func(model.Record), start time.Ti
 			if ctx.Err() != nil {
 				return
 			}
-			in.emitAll(emit, in.stepSamples(next))
+			in.emitAll(ctx, emit, in.stepSamples(next))
 			next = next.Add(in.tick)
 		}
 	}
@@ -452,9 +465,13 @@ func (in *Input) stepSamples(ts time.Time) []model.Sample {
 	return out
 }
 
-// emitAll emits the samples outside the lock: emit may block.
-func (in *Input) emitAll(emit func(model.Record), samples []model.Sample) {
+// emitAll emits the samples outside the lock, since emit may block, and
+// stops at the first sample after ctx is done.
+func (in *Input) emitAll(ctx context.Context, emit func(model.Record), samples []model.Sample) {
 	for _, s := range samples {
+		if ctx.Err() != nil {
+			return
+		}
 		emit(model.SampleRecord(s))
 	}
 }
