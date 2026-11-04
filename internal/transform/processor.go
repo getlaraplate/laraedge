@@ -42,6 +42,8 @@ type Processor struct {
 	points []*pointChain
 	byKey  map[pointKey]*pointChain
 	// downstream is the emit of the last Wrap, used by the deadline goroutine.
+	// A chain holds a deadline only after an Apply, which only Wrap's emit
+	// makes, so it is set whenever fire has something to emit.
 	downstream func(model.Record)
 	errLog     *errorLog
 	started    bool
@@ -51,6 +53,8 @@ type Processor struct {
 	// armed is the deadline the goroutine waits on, when armedOK.
 	armed   time.Time
 	armedOK bool
+	// lastNow is the latest clock reading of the deadline goroutine.
+	lastNow time.Time
 }
 
 type pointKey struct {
@@ -302,6 +306,8 @@ func (p *Processor) arm() (timer clock.Timer, due, stop bool) {
 	default:
 	}
 
+	p.syncClockLocked(p.clk.Now())
+
 	var (
 		earliest time.Time
 		found    bool
@@ -340,6 +346,19 @@ func (p *Processor) arm() (timer clock.Timer, due, stop bool) {
 	return timer, false, false
 }
 
+// syncClockLocked records the clock reading and, when it went back, tells the
+// chains so the deadlines armed from the old reading follow the new one. The
+// caller holds p.mu.
+func (p *Processor) syncClockLocked(now time.Time) {
+	if now.Before(p.lastNow) {
+		for _, pc := range p.points {
+			pc.chain.clockObserved(now)
+		}
+	}
+
+	p.lastNow = now
+}
+
 // fire logs the error summary when it is due, then lets the due chains emit
 // what is due now, in configuration order.
 func (p *Processor) fire() {
@@ -351,6 +370,7 @@ func (p *Processor) fire() {
 	}
 
 	now := p.clk.Now()
+	p.syncClockLocked(now)
 	p.errLog.flush(now)
 
 	for _, pc := range p.points {
@@ -360,10 +380,6 @@ func (p *Processor) fire() {
 
 		out, errs := pc.chain.Fire(now)
 		p.reportLocked(pc.key, errs)
-
-		if p.downstream == nil {
-			continue
-		}
 
 		for _, s := range out {
 			p.downstream(model.SampleRecord(s))

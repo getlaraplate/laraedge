@@ -257,6 +257,7 @@ and `quality`, all required (no other key is accepted; key names are matched wit
 {"device":"press-07","signal":"press_force","ts":"2026-10-19T08:00:01.250Z","value":182.5,"quality":"good"}
 ```
 
+- A line is at most 1 MiB and a file at most 64 MiB (blank lines count); a larger one is refused with its line number.
 - `ts` is RFC 3339; it is written in UTC with milliseconds, and read with any offset or precision.
 - `value` has the kind the point's `type` gives (CONFIGURATION.md, "Kinds and the type check"): `true`
   or `false`, an integral number for an integer point, a finite number for a float point, a JSON string.

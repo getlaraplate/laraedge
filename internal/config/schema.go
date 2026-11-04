@@ -81,8 +81,7 @@ func validateSchema(tree any) ([]string, error) {
 	if len(msgs) == 0 {
 		msgs = append(msgs, path{}.msg("is invalid"))
 	}
-	slices.Sort(msgs)
-	return slices.Compact(msgs), nil
+	return sortMessages(msgs), nil
 }
 
 // collectSchemaMessages renders the leaves of e. parent is the location of

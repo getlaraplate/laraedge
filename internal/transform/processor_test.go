@@ -449,7 +449,10 @@ func TestProcessorFireErrorIsCounted(t *testing.T) {
 }
 
 // TestProcessorEmitsNothingAfterClose is the Review Focus case: a heartbeat
-// or min_interval deadline is due while the input closes.
+// or min_interval deadline is due while the input closes. Whether the
+// deadline goroutine fires before Close takes the lock is left to the
+// scheduler on purpose: the invariant (nothing is emitted once Close has
+// returned) must hold on both orders, and the test asserts only that.
 func TestProcessorEmitsNothingAfterClose(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1161,5 +1164,48 @@ func TestRemoveStaleInputStates(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Errorf("the link's target: %v, want it kept", err)
+	}
+}
+
+// steppedClock is a fake clock whose reading can be set back by a wall clock
+// step; timers keep running on the underlying fake time, as monotonic timers do.
+type steppedClock struct {
+	*clock.Fake
+	back atomic.Int64
+}
+
+func (c *steppedClock) Now() time.Time {
+	return c.Fake.Now().Add(-time.Duration(c.back.Load()))
+}
+
+func TestProcessorHeartbeatAfterABackwardClockStep(t *testing.T) {
+	in := inputOf(point{device: "press1", signal: "state", typ: "int16", steps: []config.Transform{step("heartbeat", `"10s"`)}})
+	clk := &steppedClock{Fake: clock.NewFake(t0)}
+	p := newProcessor(t, in, t.TempDir(), clk, nil)
+	rec := &recorder{}
+	emit := p.Wrap(rec.emit)
+
+	p.Start(t.Context())
+
+	emit(sampleOf("press1", "state", 0, model.IntValue(3)))
+	waitArmed(t, p, t0.Add(10*time.Second))
+
+	clk.Advance(10 * time.Second)
+	waitUntil(t, "the first heartbeat", func() bool { return rec.count() >= 2 })
+	waitArmed(t, p, t0.Add(20*time.Second))
+
+	// The wall clock steps back an hour; the pending timer fires on time.
+	clk.back.Store(int64(time.Hour))
+	clk.Advance(10 * time.Second)
+
+	stepped := t0.Add(20 * time.Second).Add(-time.Hour)
+	waitArmed(t, p, stepped.Add(10*time.Second))
+
+	clk.Advance(10 * time.Second)
+	waitUntil(t, "the heartbeat after the step", func() bool { return rec.count() >= 3 })
+
+	got := rec.samples(t)
+	if want := stepped.Add(10 * time.Second); !got[2].TS.Equal(want) {
+		t.Errorf("heartbeat ts = %s, want %s", got[2].TS, want)
 	}
 }

@@ -202,6 +202,17 @@ func (c *Chain) Fire(now time.Time) ([]model.Sample, []error) {
 	return c.exit(out, &errs), errs
 }
 
+// clockObserved tells every step that observes the clock the time now, without
+// firing anything: the processor uses it to let the steps see a wall clock step
+// back.
+func (c *Chain) clockObserved(now time.Time) {
+	for _, st := range c.stages {
+		if o, ok := st.step.(clockObserver); ok {
+			o.observeNow(now)
+		}
+	}
+}
+
 // deviceDown tells every step, in chain order, that the chain's device died;
 // what a step releases flows through the steps after it before they are
 // told, so a sample min_interval releases re-arms a later heartbeat, which
@@ -498,7 +509,12 @@ func finiteFloat(v any) (float64, bool) {
 	return f, true
 }
 
-// integerIn converts a decoded JSON number to an integer within [lo, hi].
+// integerIn converts a decoded JSON number to an integer within [lo, hi]. A
+// literal with an integer value (3.0, 1e1) is accepted on purpose: the JSON
+// Schema calls it an integer, and the configuration parser already writes it
+// as 3 and 10 in the canonical form Compile receives, so refusing it here
+// would only make Compile disagree with the schema for a direct caller (the
+// agreement is pinned in check_test.go, round with 2.0).
 func integerIn(v any, lo, hi int64) (int64, bool) {
 	n, ok := v.(json.Number)
 	if !ok {

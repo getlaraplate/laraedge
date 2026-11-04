@@ -117,7 +117,8 @@ var countingAttributes = []string{
 	"suppressed", "window_seconds", "attempt", "attempts",
 }
 
-// withoutCountingAttributes returns the JSON line without the countingAttributes.
+// withoutCountingAttributes returns the JSON line without the numeric
+// countingAttributes, and without time and level whatever their type.
 func withoutCountingAttributes(t *testing.T, line string) string {
 	t.Helper()
 
@@ -126,6 +127,8 @@ func withoutCountingAttributes(t *testing.T, line string) string {
 		t.Fatalf("a log line is not a JSON object: %s", line)
 	}
 	for _, key := range countingAttributes {
+		// time is a timestamp string and level a name: neither is a number, yet
+		// both can hold digits that match a sample value.
 		if _, isNumber := fields[key].(float64); isNumber || key == "time" || key == "level" {
 			delete(fields, key)
 		}

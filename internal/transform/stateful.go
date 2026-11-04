@@ -214,10 +214,15 @@ func (h *heartbeat) deviceDown() []model.Sample {
 	return nil
 }
 
+// observeNow records the clock time. A time before the last one seen is a
+// wall clock step back: the deadline, armed from the old reading, would
+// otherwise wait out the step, so it is armed again from the new time.
 func (h *heartbeat) observeNow(now time.Time) {
-	if now.After(h.lastNow) {
-		h.lastNow = now
+	if now.Before(h.lastNow) && h.has {
+		h.deadline = now.Add(h.period)
 	}
+
+	h.lastNow = now
 }
 
 // leave records s as the last sample that left and arms the deadline.

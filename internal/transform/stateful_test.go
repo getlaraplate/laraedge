@@ -793,3 +793,42 @@ func TestDeviceDownFlowsThroughTheChain(t *testing.T) {
 		t.Errorf("Deadline() = %s, %v, want +9s: the next sample re-arms the heartbeat", d.Sub(t0), ok)
 	}
 }
+
+// TestHeartbeatAfterABackwardClockStep checks that a wall clock stepped back
+// does not leave the deadline, or the clock time later samples are measured
+// from, in the future: the heartbeat fires at its interval from the new time.
+func TestHeartbeatAfterABackwardClockStep(t *testing.T) {
+	chain, err := transform.Compile([]config.Transform{step("heartbeat", `"10s"`)}, model.KindInt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in := model.Sample{Device: "press1", Signal: "x", TS: t0, Value: i64(1), Quality: model.Good}
+	chain.Apply(in)
+
+	if _, errs := chain.Fire(t0.Add(10 * time.Second)); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+
+	back := t0.Add(10 * time.Second).Add(-time.Hour)
+	if out, _ := chain.Fire(back); len(out) != 0 {
+		t.Fatalf("Fire() on the step back = %+v, want nothing: the interval has not passed", out)
+	}
+
+	if d, ok := chain.Deadline(); !ok || !d.Equal(back.Add(10*time.Second)) {
+		t.Fatalf("Deadline() = %s, %v, want the interval after the new time", d.Sub(back), ok)
+	}
+
+	got, _ := chain.Fire(back.Add(10 * time.Second))
+	if len(got) != 1 || !got[0].TS.Equal(back.Add(10*time.Second)) {
+		t.Errorf("Fire() at the interval = %+v, want one heartbeat", got)
+	}
+
+	// A sample after the step is measured from its own ts, not the old clock.
+	in.TS = back.Add(15 * time.Second)
+	chain.Apply(in)
+
+	if d, ok := chain.Deadline(); !ok || !d.Equal(in.TS.Add(10*time.Second)) {
+		t.Errorf("Deadline() after a new sample = %s, %v, want 10s after its ts", d.Sub(in.TS), ok)
+	}
+}

@@ -134,6 +134,9 @@ outputs: []
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := transform.CheckDocument(parseDocument(t, tt.doc))
+			if len(tt.want) == 0 && got != nil {
+				t.Errorf("CheckDocument = %q, want nil when every chain compiles", got)
+			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("CheckDocument =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(tt.want, "\n"))
 			}
@@ -194,6 +197,12 @@ func TestSchemaAndCompileAgree(t *testing.T) {
 		{"float64", "round", `0`, true, ""},
 		{"float64", "round", `10`, true, ""},
 		{"float64", "round", `2.0`, true, ""},
+		{"float64", "round", `1e1`, true, ""},
+		{"float64", "round", `1E1`, true, ""},
+		{"float64", "round", `1e-1`, false, ""},
+		{"float64", "round", `1e2`, false, ""},
+		{"float64", "scale", `1e-3`, true, ""},
+		{"float64", "scale", `2.5E2`, true, ""},
 		{"float64", "round", `11`, false, ""},
 		{"float64", "round", `-1`, false, ""},
 		{"float64", "round", `1.5`, false, ""},
