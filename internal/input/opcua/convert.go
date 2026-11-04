@@ -43,19 +43,35 @@ func Quality(sc ua.StatusCode) model.Quality {
 }
 
 // Timestamp returns the time of a data value in UTC: the source timestamp when
-// the data value carries a non-zero one, else the server timestamp likewise,
+// the data value carries a plausible one, else the server timestamp likewise,
 // else now (the agent clock).
+//
+// A timestamp is plausible when it is not zero, not before the Unix epoch and
+// before timestampWrapFloor. The library decodes the DateTime ticks with an
+// unsigned subtraction: a date before 1677 (the OPC UA minimum, one tick,
+// included) and the OPC UA maximum (MaxInt64 ticks) come out from 2185-07-21
+// on, and a date from 1677 to 1969 comes out as it is. Neither is a time a
+// machine read a value at: a server sends them for a clock that was never set.
 func Timestamp(dv *ua.DataValue, now time.Time) time.Time {
 	if dv != nil {
-		if dv.Has(ua.DataValueSourceTimestamp) && !dv.SourceTimestamp.IsZero() {
+		if dv.Has(ua.DataValueSourceTimestamp) && plausibleTimestamp(dv.SourceTimestamp) {
 			return dv.SourceTimestamp.UTC()
 		}
-		if dv.Has(ua.DataValueServerTimestamp) && !dv.ServerTimestamp.IsZero() {
+		if dv.Has(ua.DataValueServerTimestamp) && plausibleTimestamp(dv.ServerTimestamp) {
 			return dv.ServerTimestamp.UTC()
 		}
 	}
 
 	return now.UTC()
+}
+
+// timestampWrapFloor is the earliest time the library's wrapped decoding of
+// an out-of-range DateTime produces (2185-07-21T23:34:33Z), rounded down to
+// the day.
+var timestampWrapFloor = time.Date(2185, 7, 21, 0, 0, 0, 0, time.UTC)
+
+func plausibleTimestamp(t time.Time) bool {
+	return !t.IsZero() && t.Unix() >= 0 && t.Before(timestampWrapFloor)
 }
 
 // Convert turns an OPC UA data value into the value and quality of a sample of

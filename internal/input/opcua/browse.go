@@ -282,21 +282,36 @@ func (w *walker) entry(c *candidate, level int) BrowseEntry {
 	return e
 }
 
-// dataTypeName names the DataType attribute of a variable: the standard name
-// of a namespace 0 type, the NodeId of any other, empty when unreadable.
+// dataTypeName names the DataType attribute of a variable, a NodeId or an
+// ExpandedNodeId: the standard name of a namespace 0 type, the NodeId of any
+// other (in the nsu= form with the URI an ExpandedNodeId carries), empty when
+// unreadable.
 func (w *walker) dataTypeName(dv *ua.DataValue) string {
 	if dv == nil || uint32(dv.Status)>>30 != 0 || dv.Value == nil {
 		return ""
 	}
 
-	nodeID, ok := dv.Value.Value().(*ua.NodeID)
-	if !ok || nodeID == nil {
+	var (
+		nodeID *ua.NodeID
+		uri    string
+	)
+
+	switch v := dv.Value.Value().(type) {
+	case *ua.NodeID:
+		nodeID = v
+	case *ua.ExpandedNodeID:
+		if v != nil {
+			nodeID, uri = v.NodeID, v.NamespaceURI
+		}
+	}
+
+	if nodeID == nil {
 		return ""
 	}
 
 	switch nodeID.Type() {
 	case ua.NodeIDTypeTwoByte, ua.NodeIDTypeFourByte, ua.NodeIDTypeNumeric:
-		if nodeID.Namespace() == 0 {
+		if nodeID.Namespace() == 0 && uri == "" {
 			// id.Name gives the number itself for a NodeId it does not know.
 			if name := id.Name(nodeID.IntID()); name != strconv.FormatUint(uint64(nodeID.IntID()), 10) {
 				return name
@@ -304,7 +319,7 @@ func (w *walker) dataTypeName(dv *ua.DataValue) string {
 		}
 	}
 
-	return formatNodeID(nodeID, "", w.namespaces)
+	return formatNodeID(nodeID, uri, w.namespaces)
 }
 
 // accessText renders an AccessLevel attribute as r, w, rw or -; empty when

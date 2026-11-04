@@ -7,9 +7,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/ua"
+
+	"github.com/getlaraplate/laraedge/internal/clock"
 )
 
 // treeSession is a session over a fixed address space: Browse answers from
@@ -455,6 +458,48 @@ func TestBrowseStatusNamesTheRefusal(t *testing.T) {
 	for _, tt := range tests {
 		if got := browseStatus(tt.err); got != tt.want {
 			t.Errorf("browseStatus(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
+}
+
+// A server may answer the DataType attribute as an ExpandedNodeId: its name is
+// printed as for a NodeId, the namespace URI it carries used for nsu=.
+func TestDataTypeNameOfAnExpandedNodeID(t *testing.T) {
+	w := &walker{namespaces: []string{"http://opcfoundation.org/UA/", "urn:local", "urn:plant"}}
+
+	tests := []struct {
+		name string
+		in   *ua.ExpandedNodeID
+		want string
+	}{
+		{"standard type", ua.NewExpandedNodeID(ua.NewNumericNodeID(0, id.Double), "", 0), "Double"},
+		{"type of a namespace by index", ua.NewExpandedNodeID(ua.NewNumericNodeID(2, 4711), "", 0), "nsu=urn:plant;i=4711"},
+		{"type with its namespace URI", ua.NewExpandedNodeID(ua.NewNumericNodeID(7, 12), "urn:vendor", 0), "nsu=urn:vendor;i=12"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dv := &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(tt.in)}
+			if got := w.dataTypeName(dv); got != tt.want {
+				t.Fatalf("dataTypeName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A depth outside 1 to MaxBrowseDepth, negative included, is refused before
+// anything is opened.
+func TestBrowseRefusesADepthOutOfRange(t *testing.T) {
+	cfg := opcuaInput(noneConn("opc.tcp://127.0.0.1:1"), time.Second, device("press-07", polled("count", "i=2258", "int32", time.Second)))
+
+	in, err := New(cfg, clock.NewFake(driverEpoch), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, depth := range []int{-1, 0, MaxBrowseDepth + 1} {
+		_, err := in.Browse(t.Context(), Node{}, depth, func(BrowseEntry) { t.Error("emit called") })
+		if err == nil || !strings.Contains(err.Error(), "depth must be from 1 to 10") {
+			t.Errorf("depth %d: err = %v", depth, err)
 		}
 	}
 }

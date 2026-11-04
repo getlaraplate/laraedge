@@ -420,7 +420,9 @@ Uncertain is `uncertain` (its value is kept), Bad is `bad`. A Bad status is the 
 failed conversion: the sample is `bad`, carries the zero of the kind, whatever the server sent with it, and
 counts as `exception`, not `decode`. A Good or Uncertain status without a value is `bad` with a `decode` error.
 The sample time is the server's source timestamp when the value carries one, else its server timestamp, else
-the agent clock.
+the agent clock. A timestamp before 1970, or from 2185-07-21 on (what the OPC UA library makes of a date before
+1677 and of the protocol's minimum and maximum dates), counts as absent: a server sends such a time for a clock
+that was never set.
 
 **Reconnection and liveness.** Starting the input opens only local resources (the certificates) and returns;
 the server is connected in the background, so an unreachable or untrusted server is never a failing start:

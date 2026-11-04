@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"io"
 	"log"
 	"math/big"
@@ -20,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"encoding/hex"
 	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/server"
 	"github.com/gopcua/opcua/server/attrs"
@@ -109,7 +109,15 @@ func loadKeys() error {
 }
 
 func certificate(key *rsa.PrivateKey, notBefore, notAfter time.Time) ([]byte, error) {
-	appURI, err := url.Parse("urn:laraplate:opcuatest:server")
+	return ServerCertificate(key, "urn:laraplate:opcuatest:server", notBefore, notAfter)
+}
+
+// ServerCertificate is a self-signed server certificate (DER) for key, with
+// the application URI uri, the IP 127.0.0.1 and the key usages an OPC UA
+// application certificate needs. The package-internal test server of
+// internal/input/opcua builds its certificates with it too.
+func ServerCertificate(key *rsa.PrivateKey, uri string, notBefore, notAfter time.Time) ([]byte, error) {
+	appURI, err := url.Parse(uri)
 	if err != nil {
 		return nil, err
 	}

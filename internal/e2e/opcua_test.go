@@ -237,6 +237,12 @@ func TestOPCUA(t *testing.T) {
 	b.noViolations(t)
 	a.checkOutput(t, false)
 
+	// The agent runs at its default level, info: the rule is that values and
+	// connection settings never appear at info and above, while debug may carry
+	// a library error naming the endpoint. So the scan is at info by design;
+	// the level boundary itself is TestNoValueEndpointOrUserInLogsAboveDebug
+	// in internal/input/opcua, which logs at debug and checks every record
+	// above it.
 	out := a.stdout.String() + a.stderr.String()
 	for _, secret := range []string{srv.URL, strings.TrimPrefix(srv.URL, "opc.tcp://"), opcuaMarker} {
 		if strings.Contains(out, secret) {

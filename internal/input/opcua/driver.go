@@ -651,6 +651,11 @@ func (in *Input) subscribe(ctx context.Context, s session, ids []*ua.NodeID, l *
 // notify emits the sample of one data change; a notification is a
 // successful exchange (O4). A Bad status counts kind exception once per
 // publish message (ruling R8): counted is the last message counted.
+//
+// A notification for a handle the input never gave is dropped and does not
+// count as an exchange: it is not an answer about any point of the input, and
+// a server that sends only such notifications is still checked by the
+// watchdog read, which keeps the devices alive while the server answers.
 func (in *Input) notify(n notification, l *link, counted *uint64) {
 	if int(n.Handle) >= len(in.points) {
 		in.log.Debug("opcua: notification for an unknown handle ignored", "input", in.cfg.ID, "handle", n.Handle)
