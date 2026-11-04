@@ -341,9 +341,10 @@ characters. Only the leaf certificate is stored and compared.
   pki: removed a temporary own certificate directory left by an interrupted run`; inputs that start
   together report it once, because each first claims the directory by renaming it to
   `own-<number>.tmp.sweep-<claim time>-<random>` and only the one whose rename succeeds removes it. A
-  claimed name a crash leaves behind is removed the same way an hour after the claim. A directory replaced
+  claimed name a crash leaves behind is removed the same way an hour after the claim; a claim time that is
+  not a real time (beyond any clock) never counts as an hour old. A directory replaced
   by something else while it was being claimed is left in place, with a `WARN` naming it (`... changed
-  while it was claimed; left in place`). Only plain directories of those exact names directly under `pki/`
+  while it was claimed; left in place`); one already gone once claimed is skipped silently. Only plain directories of those exact names directly under `pki/`
   are removed, never a symlink, junction or mount point, nor what it points to.
 - **The server's certificate is trusted explicitly.** With a policy other than `None`, at every connect the
   agent discovers the server's endpoints, takes the one for the policy and mode, computes the thumbprint of

@@ -10,7 +10,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"net/url"
 	"os"
@@ -166,8 +165,10 @@ const ownTmpClaim = ".sweep-"
 // own-<n>.tmp.sweep-<random hex>: the rename is atomic, so one sweep wins and
 // removes it; a sweep whose rename finds the name gone, or is refused it (on
 // Windows another sweep may still hold a handle inside), skips it. The claimed
-// path must still be the directory looked at (a plain directory, os.SameFile):
-// one swapped in meanwhile is refused and left in place. It is removed with
+// path must still be the directory looked at (a plain directory, os.SameFile
+// with the identity read before the rename): one swapped in meanwhile is
+// refused and left in place; one already gone was removed by someone else and
+// is skipped. It is removed with
 // os.RemoveAll on the claimed path, which unlinks a top-level symlink without
 // following it and never follows one below. A sweep that dies between its
 // claim and the removal leaves a claimed name, which the next sweep handles
@@ -215,6 +216,14 @@ func sweepStaleOwnWith(dataDir string, now time.Time, rename func(oldPath, newPa
 			continue
 		}
 
+		// Load the identity of the directory while it still has this name:
+		// on Windows Lstat leaves the file id unread and os.SameFile reads it
+		// lazily by opening the saved path, which the claim renames away.
+		// On Unix the identity is already in info and this is always true.
+		if !os.SameFile(info, info) {
+			continue
+		}
+
 		claimed, ok, err := claimOwnTmp(pki, path, match[1], now, rename)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("opcua pki: claim %s: %w", path, err))
@@ -227,6 +236,10 @@ func sweepStaleOwnWith(dataDir string, now time.Time, rename func(oldPath, newPa
 		}
 
 		claimedInfo, err := os.Lstat(claimed)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+
 		if err != nil || !isPlainDir(claimedInfo.Mode()) || !os.SameFile(info, claimedInfo) {
 			errs = append(errs, fmt.Errorf("opcua pki: %s changed while it was claimed; left in place", claimed))
 
@@ -250,14 +263,17 @@ func sweepStaleOwnWith(dataDir string, now time.Time, rename func(oldPath, newPa
 // claimIsStale reports whether the claim time of a claimed name (16 hex
 // digits of Unix seconds) is at least ownTmpStaleAge before now: a younger
 // claim belongs to a sweep that may still be removing it, and re-claiming it
-// would let both report it.
+// would let both report it. The comparison stays in seconds, so a claim time
+// beyond any clock is never stale (time.Unix would wrap it into the past).
 func claimIsStale(claimedAt string, now time.Time) bool {
 	seconds, err := strconv.ParseUint(claimedAt, 16, 64)
-	if err != nil || seconds > math.MaxInt64 {
+	if err != nil {
 		return false
 	}
 
-	return now.Sub(time.Unix(int64(seconds), 0)) >= ownTmpStaleAge
+	cutoff := now.Add(-ownTmpStaleAge).Unix()
+
+	return cutoff >= 0 && seconds <= uint64(cutoff)
 }
 
 // claimOwnTmp renames path with rename to

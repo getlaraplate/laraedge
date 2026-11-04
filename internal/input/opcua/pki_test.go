@@ -827,3 +827,48 @@ func TestSweepSkipsAClaimRefusedForPermission(t *testing.T) {
 		t.Fatalf("the directory was removed: %v", err)
 	}
 }
+
+// A claim time beyond any real clock (a malformed or huge value) is never
+// stale, however old the directory: time.Unix would wrap it into the past.
+func TestSweepKeepsAClaimWithAnOutOfRangeTime(t *testing.T) {
+	dataDir := t.TempDir()
+	pki := PKIDir(dataDir)
+
+	var kept []string
+	for _, at := range []string{"7fffffffffffffff", "8000000000000000", "ffffffffffffffff", "7ffffff1886e0900"} {
+		dir := filepath.Join(pki, "own-1.tmp.sweep-"+at+"-0123456789abcdef")
+		writeFile(t, filepath.Join(dir, "key.pem"), []byte("KEY"))
+		kept = append(kept, dir)
+	}
+
+	removed, err := SweepStaleOwn(dataDir, time.Now().Add(48*time.Hour))
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("sweep = %v, %v; want nothing and no error", removed, err)
+	}
+
+	for _, dir := range kept {
+		if _, err := os.Lstat(dir); err != nil {
+			t.Errorf("%s was removed: %v", dir, err)
+		}
+	}
+}
+
+// A claimed directory that is gone before the sweep looks at it again was
+// removed by someone else: it is not reported, and it is no error.
+func TestSweepSkipsAClaimThatVanished(t *testing.T) {
+	dataDir := t.TempDir()
+	writeFile(t, filepath.Join(PKIDir(dataDir), "own-1.tmp", "key.pem"), []byte("KEY"))
+
+	rename := func(oldPath, newPath string) error {
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return err
+		}
+
+		return os.RemoveAll(newPath)
+	}
+
+	removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), rename)
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("sweep = %v, %v; want nothing and no error", removed, err)
+	}
+}
