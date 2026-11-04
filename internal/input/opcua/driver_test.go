@@ -486,65 +486,48 @@ func TestStartRemovesAStaleTemporaryOwnDirectoryAndLogsIt(t *testing.T) {
 	}
 }
 
-// Inputs sharing a data directory sweep it once per process, so two inputs
-// starting together log one WARN per directory removed; a leftover that
-// appears later waits for the next run.
-func TestTheStaleOwnSweepRunsOncePerPKIDirectory(t *testing.T) {
+// Two inputs sharing a data directory that start together sweep it together:
+// the directory is removed and reported once.
+func TestTwoInputsStartingTogetherReportALeftoverOnce(t *testing.T) {
 	loadFixtures(t)
 
 	dataDir := t.TempDir()
 	seedOwnCertificate(t, dataDir)
 
-	stale := func(name string) string {
-		t.Helper()
-
-		dir := filepath.Join(PKIDir(dataDir), name)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		old := time.Now().Add(-2 * ownTmpStaleAge)
-		if err := os.Chtimes(dir, old, old); err != nil {
-			t.Fatal(err)
-		}
-
-		return dir
+	stale := filepath.Join(PKIDir(dataDir), "own-1.tmp")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * ownTmpStaleAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
 	}
 
-	first := stale("own-1.tmp")
 	logs := &syncBuffer{}
 	cfg := opcuaInput(noneConn("opc.tcp://127.0.0.1:1"), time.Second, device("press-07", polled("count", "i=2258", "int32", time.Second)))
 	opts := Options{DataDir: dataDir, AgentID: "test-agent", Logger: logging.New(logs, slog.LevelDebug)}
 
-	start := func() {
-		in, err := New(cfg, clock.NewFake(driverEpoch), opts)
-		if err != nil {
-			t.Error(err)
-
-			return
-		}
-		if err := in.Start(t.Context(), func(model.Record) {}); err != nil {
-			t.Error(err)
-		}
-		if err := in.Close(); err != nil {
-			t.Error(err)
-		}
-	}
-
 	var wg sync.WaitGroup
 	for range 2 {
-		wg.Go(start)
+		wg.Go(func() {
+			in, err := New(cfg, clock.NewFake(driverEpoch), opts)
+			if err != nil {
+				t.Error(err)
+
+				return
+			}
+			if err := in.Start(t.Context(), func(model.Record) {}); err != nil {
+				t.Error(err)
+			}
+			if err := in.Close(); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 	wg.Wait()
 
-	if _, err := os.Lstat(first); !os.IsNotExist(err) {
-		t.Fatalf("%s still exists (%v)", first, err)
-	}
-
-	later := stale("own-2.tmp")
-	start()
-
-	if _, err := os.Lstat(later); err != nil {
-		t.Fatalf("a leftover made after the sweep was removed in the same process: %v", err)
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("%s still exists (%v)", stale, err)
 	}
 
 	var got int

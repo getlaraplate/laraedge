@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
-	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -338,34 +337,21 @@ func (in *Input) ownCertificate() (ownKeyPair, error) {
 	return ownKeyPair{cert: cert, key: key}, nil
 }
 
-// sweptPKI holds one *sync.Once per PKI directory, keyed by its cleaned
-// absolute path: the inputs of one process that share a data directory sweep
-// it once, at the first start, so two inputs starting together do not both
-// sweep it and log its leftovers twice.
-var sweptPKI sync.Map
-
 // sweepStaleOwn removes, with a WARN each, the temporary own directories a
-// crash left in the PKI directory (SweepStaleOwn), once per PKI directory per
-// process. A failure to remove one is logged and does not stop the input: the
-// pair in own/ is still usable. It compares with time.Now, not the input's
-// clock: file times are wall-clock.
+// crash left in the PKI directory (SweepStaleOwn), at every start. Inputs
+// starting together may sweep together: each directory is claimed by one of
+// them, which alone reports it. A failure to remove one is logged and does not
+// stop the input: the pair in own/ is still usable. It compares with time.Now,
+// not the input's clock: file times are wall-clock.
 func (in *Input) sweepStaleOwn() {
-	key, err := filepath.Abs(PKIDir(in.opts.DataDir))
-	if err != nil {
-		key = filepath.Clean(PKIDir(in.opts.DataDir))
+	removed, err := SweepStaleOwn(in.opts.DataDir, time.Now())
+	for _, dir := range removed {
+		in.log.Warn("opcua pki: removed a temporary own certificate directory left by an interrupted run", "input", in.cfg.ID, "dir", dir)
 	}
 
-	once, _ := sweptPKI.LoadOrStore(key, &sync.Once{})
-	once.(*sync.Once).Do(func() {
-		removed, err := SweepStaleOwn(in.opts.DataDir, time.Now())
-		for _, dir := range removed {
-			in.log.Warn("opcua pki: removed a temporary own certificate directory left by an interrupted run", "input", in.cfg.ID, "dir", dir)
-		}
-
-		if err != nil {
-			in.log.Warn("opcua pki: a temporary own certificate directory left by an interrupted run cannot be removed", "input", in.cfg.ID, "error", err)
-		}
-	})
+	if err != nil {
+		in.log.Warn("opcua pki: a temporary own certificate directory left by an interrupted run cannot be removed", "input", in.cfg.ID, "error", err)
+	}
 }
 
 func (in *Input) timings() timings {

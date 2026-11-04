@@ -334,13 +334,15 @@ characters. Only the leaf certificate is stored and compared.
   the start of the input fails with `opcua pki: <path> has mode 0640, want 0600 or narrower (chmod 600
   it)`: another user may have read the key, so either `chmod 600` it or delete `own/` for a new pair.
 - **Leftovers of an interrupted run.** The pair is written into a temporary `own-<number>.tmp` directory
-  next to `own/` and then renamed. One that a crash left behind (it can hold a key) is removed the first
-  time an `opcua` input, `browse` or `probe` starts in a process (once per `data_dir`: inputs that start
-  together sweep it once), when it is more than an hour old: a younger one may be a generation still
-  running. A directory whose time is in the future (the clock was set back) is removed only at a run that
-  starts an hour after that time. Each removed directory gets one `WARN` naming it: `opcua pki: removed a
-  temporary own certificate directory left by an interrupted run`. Only plain directories of that exact
-  name directly under `pki/` are removed, never a symlink, junction or mount point, nor what it points to.
+  next to `own/` and then renamed. One that a crash left behind (it can hold a key) is removed whenever an
+  `opcua` input, `browse` or `probe` starts, once it is more than an hour old: a younger one may be a
+  generation still running. A directory whose time is in the future (the clock was set back) is removed
+  only once the clock is an hour past that time. Each removed directory gets one `WARN` naming it: `opcua
+  pki: removed a temporary own certificate directory left by an interrupted run`; inputs that start
+  together report it once, because each first claims the directory by renaming it to
+  `own-<number>.tmp.sweep-<hex>` and only the one whose rename succeeds removes it (a claimed name a crash
+  leaves behind is removed the same way). Only plain directories of those exact names directly under
+  `pki/` are removed, never a symlink, junction or mount point, nor what it points to.
 - **The server's certificate is trusted explicitly.** With a policy other than `None`, at every connect the
   agent discovers the server's endpoints, takes the one for the policy and mode, computes the thumbprint of
   its certificate and goes on only when `trusted/<thumbprint>.der` exists and holds a certificate with that

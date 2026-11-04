@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -632,6 +633,99 @@ func TestIsPlainDir(t *testing.T) {
 	for _, tt := range tests {
 		if got := isPlainDir(tt.mode); got != tt.want {
 			t.Errorf("isPlainDir(%v) = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// Sweeps running together (two inputs starting at once, or the agent and a
+// command) claim each directory by renaming it: exactly one of them removes
+// and reports it.
+func TestConcurrentSweepsRemoveEachDirectoryOnce(t *testing.T) {
+	dataDir := t.TempDir()
+	pki := PKIDir(dataDir)
+	now := time.Now().Add(48 * time.Hour)
+
+	var want []string
+
+	for _, name := range []string{"own-1.tmp", "own-2.tmp", "own-3.tmp", "own-4.tmp"} {
+		dir := filepath.Join(pki, name)
+		writeFile(t, filepath.Join(dir, "key.pem"), []byte("KEY"))
+		want = append(want, dir)
+	}
+
+	const sweeps = 8
+
+	results := make([][]string, sweeps)
+
+	var wg sync.WaitGroup
+	for i := range sweeps {
+		wg.Go(func() {
+			removed, err := SweepStaleOwn(dataDir, now)
+			if err != nil {
+				t.Error(err)
+			}
+			results[i] = removed
+		})
+	}
+	wg.Wait()
+
+	var all []string
+	for _, r := range results {
+		all = append(all, r...)
+	}
+	slices.Sort(all)
+
+	if !slices.Equal(all, want) {
+		t.Errorf("removed by all sweeps = %v, want each of %v once", all, want)
+	}
+
+	entries, err := os.ReadDir(pki)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("left in the PKI directory: %v", entries)
+	}
+}
+
+// A sweep that crashed between its claim and the removal leaves
+// own-<n>.tmp.sweep-<hex>: the next sweep handles it with the same checks.
+func TestSweepStaleOwnRemovesAnInterruptedClaim(t *testing.T) {
+	dataDir := t.TempDir()
+	pki := PKIDir(dataDir)
+	now := time.Now().Add(48 * time.Hour)
+
+	claimed := filepath.Join(pki, "own-9.tmp.sweep-0123abcd")
+	writeFile(t, filepath.Join(claimed, "key.pem"), []byte("KEY"))
+
+	fresh := filepath.Join(pki, "own-8.tmp.sweep-ffff")
+	writeFile(t, filepath.Join(fresh, "key.pem"), []byte("KEY"))
+	if err := os.Chtimes(fresh, now, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	odd := filepath.Join(pki, "own-7.tmp.sweep-XYZ")
+	writeFile(t, filepath.Join(odd, "key.pem"), []byte("KEY"))
+
+	removed, err := SweepStaleOwn(dataDir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(removed, []string{claimed}) {
+		t.Errorf("removed = %v, want [%s]", removed, claimed)
+	}
+
+	for _, kept := range []string{fresh, odd} {
+		if _, err := os.Lstat(kept); err != nil {
+			t.Errorf("%s was removed: %v", kept, err)
+		}
+	}
+
+	entries, _ := os.ReadDir(pki)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "own-9.") {
+			t.Errorf("the claim left %s", e.Name())
 		}
 	}
 }
