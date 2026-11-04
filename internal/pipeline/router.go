@@ -3,11 +3,14 @@
 package pipeline
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/buffer"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
@@ -23,6 +26,43 @@ const HoldLimit = 10_000
 // records the buffers refused. Every refusal still reaches the buffer, whose
 // drop counters count it.
 const refusedLogWindow = time.Minute
+
+// refusalKind classifies a refusal for the rate limit: a different kind in
+// the same episode is logged in full. The kinds are few, never the error
+// text. A key is the output id and the kind joined by a dot, so it never
+// equals a fixed attribute of the summary (suppressed, window_seconds).
+func refusalKind(err error) string {
+	switch {
+	case errors.Is(err, buffer.ErrDropped):
+		return "dropped"
+	case errors.Is(err, buffer.ErrTooLarge):
+		return "too_large"
+	case errors.Is(err, buffer.ErrNotDurable):
+		return "not_durable"
+	case errors.Is(err, buffer.ErrClosed):
+		return "closed"
+	default:
+		return "failed"
+	}
+}
+
+// Run flushes the rate-limited refusal log every refusedLogWindow until ctx
+// is done, so that the summary of a burst of refusals is logged once the
+// refusals stop, without waiting for another one: within one to two windows
+// of the first refusal. The supervisor owns the goroutine that runs it.
+func (r *Router) Run(ctx context.Context) {
+	for {
+		timer := r.clk.NewTimer(refusedLogWindow)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+
+			return
+		case <-timer.C():
+			r.refused.Flush(r.clk.Now())
+		}
+	}
+}
 
 // Appender is what the router uses of an output's buffer (*buffer.Buffer).
 type Appender interface {
@@ -479,7 +519,7 @@ func (r *Router) append(id string, buf Appender, rec model.Record) {
 		} else {
 			attrs = append(attrs, "event", rec.Event.Kind.String())
 		}
-		r.refused.Report(r.clk.Now(), id, slog.LevelWarn, "router: cannot buffer a record", attrs...)
+		r.refused.Report(r.clk.Now(), id+"."+refusalKind(err), slog.LevelWarn, "router: cannot buffer a record", attrs...)
 	}
 }
 

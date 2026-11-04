@@ -508,8 +508,10 @@ service manager to collect and rotate. `--log-level` takes `debug`, `info` (defa
   next failure is logged in full again. The router logs a record the buffer refuses at `WARN`
   ("router: cannot buffer a record", with the output, device and signal) the first time in an
   episode, then at most one summary a minute ("router: records refused by a buffer repeated since the
-  last report", with `suppressed` and a count per output); each refused record still reaches the buffer,
-  whose `laraplate_edge_dropped_samples_total` counts it.
+  last report", with `suppressed` and a count per `<output>.<kind>`, kind being `dropped`, `too_large`,
+  `not_durable`, `closed` or `failed`; a new kind in the same episode is logged in full). The summary is
+  logged once the minute has passed even if the refusals stopped, within one to two minutes of the first
+  one. Each refused record still reaches the buffer, whose `laraplate_edge_dropped_samples_total` counts it.
 - A transform runtime error is logged at `WARN` the first time for each device, signal and step of an
   episode ("transform: runtime error, the sample is sent bad", with `input`, `device`, `signal`, `step`,
   `transform` and `error`, never the value); later ones are only counted, in at most one summary a

@@ -707,7 +707,7 @@ func TestTokenIsComparedAsDigests(t *testing.T) {
 	}
 }
 
-func TestServerTimeoutsBoundASlowClient(t *testing.T) {
+func TestServerSetsReadAndWriteTimeouts(t *testing.T) {
 	h := start(t, "127.0.0.1:0", "", nil)
 
 	hs := h.srv.http
@@ -719,10 +719,11 @@ func TestServerTimeoutsBoundASlowClient(t *testing.T) {
 	}
 }
 
-// TestMetricsOfALargeAgentFitTheWriteTimeout answers /metrics for an agent
-// with thousands of series through the real server, whose WriteTimeout would
-// cut the answer short.
-func TestMetricsOfALargeAgentFitTheWriteTimeout(t *testing.T) {
+// TestLargeMetricsAnswerIsComplete checks that /metrics of an agent with
+// thousands of series is answered whole through the real server. It does not
+// exercise the write deadline itself, which net/http enforces; the timeouts'
+// values are checked by TestServerSetsReadAndWriteTimeouts.
+func TestLargeMetricsAnswerIsComplete(t *testing.T) {
 	h := start(t, "127.0.0.1:0", "", nil)
 	st := sampleStatus()
 	for i := range 3000 {

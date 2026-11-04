@@ -386,6 +386,7 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	s.router = pipeline.NewRouter(s.clk, s.log)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.wg.Go(func() { s.router.Run(s.ctx) })
 
 	return s, nil
 }

@@ -137,21 +137,22 @@ func TestRunAgentServesTheStatusEndpoint(t *testing.T) {
 	}
 }
 
-// firstNowClock answers its first Now at the base time and every later one
-// an hour after it, so that the process start differs from the time the
-// status endpoint starts.
-type firstNowClock struct {
+// lateClock answers the base time until late is set and an hour after it
+// from then on. The test sets it from the environment lookup, which runAgent
+// makes after it has noted the process start and before the status endpoint
+// starts, whatever number of Now calls come before.
+type lateClock struct {
 	*clock.Fake
-	calls atomic.Int64
-	base  time.Time
+	late atomic.Bool
+	base time.Time
 }
 
-func (c *firstNowClock) Now() time.Time {
-	if c.calls.Add(1) == 1 {
-		return c.base
+func (c *lateClock) Now() time.Time {
+	if c.late.Load() {
+		return c.base.Add(time.Hour)
 	}
 
-	return c.base.Add(time.Hour)
+	return c.base
 }
 
 func TestRunAgentUptimeCountsFromTheProcessStart(t *testing.T) {
@@ -161,11 +162,17 @@ func TestRunAgentUptimeCountsFromTheProcessStart(t *testing.T) {
 	writeFile(t, bootstrapFile, bootstrapYAML("plant-a-edge-01", quietConfig(t, dir, be.srv.URL), filepath.Join(dir, "data")))
 	base := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
 
+	clk := &lateClock{Fake: clock.NewFake(base), base: base}
+	env := &fakeEnv{vars: map[string]string{runEnv: runToken}}
 	a := startAgent(t, bootstrapFile, agentDeps{
-		lookupEnv: (&fakeEnv{vars: map[string]string{runEnv: runToken}}).lookup,
-		clock:     &firstNowClock{Fake: clock.NewFake(base), base: base},
-		drivers:   map[string]input.Factory{config.DriverSimulated: quietFactory},
-		logger:    slog.New(slog.DiscardHandler),
+		lookupEnv: func(key string) (string, bool) {
+			clk.late.Store(true)
+
+			return env.lookup(key)
+		},
+		clock:   clk,
+		drivers: map[string]input.Factory{config.DriverSimulated: quietFactory},
+		logger:  slog.New(slog.DiscardHandler),
 	})
 
 	_, body := httpGet(t, "http://"+a.addr+"/status")

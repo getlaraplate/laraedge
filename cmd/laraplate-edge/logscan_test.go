@@ -60,7 +60,7 @@ func (v *sampleValues) add(rec model.Record) {
 		// Only an integer of three digits or more can stand for a value: a
 		// small one appears in ordinary log lines (versions, statuses,
 		// counts), so its absence proves nothing.
-		if str := strconv.FormatInt(val.Int, 10); len(str) >= minIntDigits {
+		if str := strconv.FormatInt(val.Int, 10); len(strings.TrimPrefix(str, "-")) >= minIntDigits {
 			v.ints[str] = true
 		}
 	case model.KindString:
@@ -103,6 +103,39 @@ func holdsNumber(line, form string) bool {
 		}
 		i = at + 1
 	}
+}
+
+// countingAttributes are the numeric log attributes the agent writes: counts,
+// sequence numbers, HTTP statuses and versions. They say how many or which,
+// never what a machine measured, and they grow through the same range as a
+// counter sample (a batch seq of 401, a status of 401), so scanning them would
+// fail the test by coincidence, as a timestamp did in the router test. The
+// scan drops them from the line, and every other numeric attribute is scanned:
+// a new one that collides fails the test and has to be named here on purpose.
+var countingAttributes = []string{
+	"time", "level", "records", "seq", "started", "stopped", "unchanged", "version", "status",
+	"suppressed", "window_seconds", "attempt", "attempts",
+}
+
+// withoutCountingAttributes returns the JSON line without the countingAttributes.
+func withoutCountingAttributes(t *testing.T, line string) string {
+	t.Helper()
+
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(line), &fields); err != nil {
+		t.Fatalf("a log line is not a JSON object: %s", line)
+	}
+	for _, key := range countingAttributes {
+		if _, isNumber := fields[key].(float64); isNumber {
+			delete(fields, key)
+		}
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(out)
 }
 
 func isNumberByte(b byte) bool { return b >= '0' && b <= '9' || b == '.' }
@@ -315,8 +348,9 @@ outputs:
 				t.Errorf("a %s log line holds the sample value %s: %s", rec.Level, form, line)
 			}
 		}
+		scanned := withoutCountingAttributes(t, line)
 		for _, form := range ints {
-			if holdsNumber(line, form) {
+			if holdsNumber(scanned, form) {
 				t.Errorf("a %s log line holds the integer sample value %s: %s", rec.Level, form, line)
 			}
 		}

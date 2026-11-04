@@ -2,6 +2,7 @@ package pipeline_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -358,13 +359,71 @@ func TestRouterLogsARefusingBufferOnceThenOneSummaryPerInterval(t *testing.T) {
 	if got := strings.Count(out, "router: records refused by a buffer repeated since the last report"); got != 1 {
 		t.Fatalf("%d summaries after the interval, want 1:\n%s", got, out)
 	}
-	for _, want := range []string{`"suppressed":999`, `"main":999`} {
+	for _, want := range []string{`"suppressed":999`, `"main.dropped":999`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log %q does not contain %s", out, want)
 		}
 	}
 	if got := strings.Count(out, "router: cannot buffer a record"); got != 1 {
 		t.Fatalf("%d full warnings in all, want 1", got)
+	}
+}
+
+func TestRouterLogsTheSummaryOnceTheRefusalsStop(t *testing.T) {
+	var logs bytes.Buffer
+	clk := clock.NewFake(start)
+	r := pipeline.NewRouter(clk, slog.New(timelessJSON(&logs)))
+	failing := &sink{err: fmt.Errorf("buffer: %w", buffer.ErrDropped)}
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, failing)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	clk.BlockUntil(t, 1)
+
+	for range 50 {
+		r.Emit(sample("press-07", "state"))
+	}
+	clk.Advance(time.Minute)
+	clk.BlockUntil(t, 1) // the flush ran and the loop is armed again
+
+	out := logs.String()
+	if got := strings.Count(out, "repeated since the last report"); got != 1 {
+		t.Fatalf("%d summaries after the window without a new refusal, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, `"suppressed":49`) {
+		t.Errorf("log %q does not count the 49 suppressed refusals", out)
+	}
+
+	clk.Advance(time.Minute)
+	clk.BlockUntil(t, 1)
+	if got := strings.Count(logs.String(), "repeated since the last report"); got != 1 {
+		t.Fatalf("%d summaries after a quiet window, want still 1", got)
+	}
+}
+
+func TestRouterLogsADifferentRefusalInTheSameEpisodeInFull(t *testing.T) {
+	var logs bytes.Buffer
+	r := pipeline.NewRouter(clock.NewFake(start), slog.New(timelessJSON(&logs)))
+	failing := &sink{err: buffer.ErrDropped}
+	r.SetOutput("main", config.Route{Include: []string{"*"}}, failing)
+
+	r.Emit(sample("press-07", "state"))
+	r.Emit(sample("press-07", "state"))
+	failing.mu.Lock()
+	failing.err = buffer.ErrClosed
+	failing.mu.Unlock()
+	r.Emit(sample("press-07", "state"))
+
+	if got := strings.Count(logs.String(), "router: cannot buffer a record"); got != 2 {
+		t.Fatalf("%d full warnings, want 2 (one per kind):\n%s", got, logs.String())
 	}
 }
 
