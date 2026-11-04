@@ -25,9 +25,7 @@ func TestHostRestartsAfterThreeFailedHealthChecks(t *testing.T) {
 	h := newHarness(t, newSpec(t, ""))
 	h.start()
 	pid := h.host.Status().Pid
-	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
-		t.Fatal(err)
-	}
+	h.stopProcess(pid)
 
 	for range 3 {
 		h.waitFor("the health timer", func() bool { return h.clk.PendingTimers() == 1 })
@@ -99,15 +97,34 @@ func TestHostStopSequence(t *testing.T) {
 	}
 }
 
-// failHealthChecks lets n health checks of a stopped plugin time out.
+// stopProcess stops process pid with SIGSTOP and waits until it is stopped:
+// kill returns before the process stops, and a plugin still running answers
+// the next health check, which then passes instead of timing out (C61).
+func (h *harness) stopProcess(pid int) {
+	h.t.Helper()
+
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		h.t.Fatal(err)
+	}
+	h.waitFor("the plugin process stopped", func() bool { return processStopped(pid) })
+}
+
+// failHealthChecks lets n health checks of a stopped plugin time out, and
+// returns once the host has counted the last one. Advance only delivers the
+// deadline: the check is cancelled by a goroutine of the host, so a SIGCONT
+// sent before that goroutine ran lets the plugin answer the check, which then
+// passes (C61).
 func (h *harness) failHealthChecks(n int) {
 	h.t.Helper()
 
-	for range n {
+	failed := func() int { return strings.Count(h.log.String(), "plugin health check failed") }
+	before := failed()
+	for i := range n {
 		h.waitFor("the health timer", func() bool { return h.clk.PendingTimers() == 1 })
 		h.clk.Advance(5 * time.Second)
 		h.waitFor("the health check deadline", func() bool { return h.clk.PendingTimers() == 1 })
 		h.clk.Advance(2 * time.Second)
+		h.waitFor("the failed health check", func() bool { return failed() == before+i+1 })
 	}
 }
 
@@ -116,9 +133,7 @@ func TestHostHealthFailuresResetOnSuccess(t *testing.T) {
 	h.start()
 	pid := h.host.Status().Pid
 
-	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
-		t.Fatal(err)
-	}
+	h.stopProcess(pid)
 	h.failHealthChecks(2)
 	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
 		t.Fatal(err)
@@ -128,9 +143,7 @@ func TestHostHealthFailuresResetOnSuccess(t *testing.T) {
 	h.waitFor("a passed health check", func() bool {
 		return strings.Count(h.log.String(), "plugin health check passed") == 1 && h.clk.PendingTimers() == 1
 	})
-	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
-		t.Fatal(err)
-	}
+	h.stopProcess(pid)
 	h.failHealthChecks(2)
 	h.waitFor("the fourth failure", func() bool {
 		return strings.Count(h.log.String(), "plugin health check failed") == 4 && h.clk.PendingTimers() == 1
