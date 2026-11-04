@@ -155,8 +155,10 @@ const ownTmpClaim = ".sweep-"
 // key. It removes only what EnsureOwnCertificate creates, or what an
 // interrupted sweep claimed (own-<n>.tmp.sweep-<hex>): a direct entry of the
 // PKI directory with that exact name that is a plain directory (isPlainDir:
-// never a symlink, a junction or a mount point, which are not followed), last
-// modified at least ownTmpStaleAge before now. A directory whose time is in
+// never a symlink, nor on Windows a junction or a mount point, which are not
+// followed; on Linux Lstat reports a mount point as a plain directory, so
+// one is not told apart, and mounting there takes root), last modified at
+// least ownTmpStaleAge before now. A directory whose time is in
 // the future (the clock was set back) waits until now passes it by that age.
 // now is wall-clock time, as file times are.
 //
@@ -252,6 +254,12 @@ func sweepStaleOwnWith(dataDir string, now time.Time, rename func(oldPath, newPa
 		}
 
 		if !present {
+			// A path settle could not find but that is still there (one
+			// it could not name, say) was moved by no rename in flight.
+			if _, err := os.Lstat(claimed); !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("opcua pki: settle %s: not found, yet it is still there; left for a later sweep", claimed))
+			}
+
 			continue
 		}
 

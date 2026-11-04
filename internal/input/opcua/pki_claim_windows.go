@@ -3,6 +3,8 @@ package opcua
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -10,8 +12,10 @@ import (
 
 const (
 	// settleAttempts bounds how often settleClaim looks for a rename in
-	// flight; one finishes within microseconds of opening its handle.
-	settleAttempts = 20
+	// flight: one finishes within microseconds of opening its handle, and the
+	// bound of about a second, paid only under contention, leaves room for a
+	// loaded machine.
+	settleAttempts = 200
 	// settleWait is the pause between two of those looks.
 	settleWait = 5 * time.Millisecond
 )
@@ -27,9 +31,16 @@ const (
 // now under this sweep's claimed name, to its own claim, at any time until it
 // closes that handle. An open of path for DELETE sharing nothing succeeds only
 // while no such handle is open, and none can be opened later: the name it
-// was opened by is gone and other sweeps leave a fresh claim alone.
+// was opened by is gone and other sweeps leave a fresh claim alone. The path
+// is opened in its \\?\ form, as package os opens one, so a data directory
+// beyond MAX_PATH works too.
 func settleClaim(path string) (present bool, err error) {
-	name, err := windows.UTF16PtrFromString(path)
+	long, err := extendedLengthPath(path)
+	if err != nil {
+		return false, err
+	}
+
+	name, err := windows.UTF16PtrFromString(long)
 	if err != nil {
 		return false, err
 	}
@@ -55,4 +66,24 @@ func settleClaim(path string) (present bool, err error) {
 
 		time.Sleep(settleWait)
 	}
+}
+
+// extendedLengthPath returns path absolute in its \\?\ form (\\?\UNC\ for a
+// share), which Windows takes beyond MAX_PATH; a path already in a device
+// form is returned as it is.
+func extendedLengthPath(path string) (string, error) {
+	if strings.HasPrefix(path, `\\?\`) || strings.HasPrefix(path, `\\.\`) {
+		return path, nil
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+
+	if strings.HasPrefix(abs, `\\`) {
+		return `\\?\UNC\` + abs[2:], nil
+	}
+
+	return `\\?\` + abs, nil
 }

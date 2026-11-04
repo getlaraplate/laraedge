@@ -881,8 +881,9 @@ func TestSweepSkipsAClaimThatVanished(t *testing.T) {
 // On Windows a rename that opened own-<n>.tmp before this sweep claimed it
 // can still move the directory to its own claim. A claim moved away while the
 // sweep waits for such renames belongs to that other sweep: this one neither
-// removes nor reports it, and it is no error. A wait that fails leaves the
-// claim for a later sweep and says so.
+// removes nor reports it, and it is no error. A wait that fails, or that
+// finds the claim gone while it is still there (on Windows a path it could
+// not name), leaves the claim for a later sweep and says so.
 func TestSweepLeavesAClaimToARenameInFlight(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -900,6 +901,9 @@ func TestSweepLeavesAClaimToARenameInFlight(t *testing.T) {
 		{"the wait fails", func(*testing.T, string) (bool, error) {
 			return false, errors.New("another handle stays open on it")
 		}, "left for a later sweep"},
+		{"found gone but still there", func(*testing.T, string) (bool, error) {
+			return false, nil
+		}, "still there; left for a later sweep"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

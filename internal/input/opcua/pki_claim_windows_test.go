@@ -59,3 +59,16 @@ func TestSettleClaimWaitsForARenameInFlight(t *testing.T) {
 		t.Fatalf("settleClaim(gone) = %v, %v; want absent and no error", present, err)
 	}
 }
+
+// A data directory beyond MAX_PATH (260 characters) is settled like any
+// other: the path is opened in its \\?\ form, never read as gone.
+func TestSettleClaimTakesALongPath(t *testing.T) {
+	claimed := filepath.Join(t.TempDir(), strings.Repeat("d", 120), strings.Repeat("e", 120), "own-1.tmp.sweep-0000000000000001-0123456789abcdef")
+	if err := os.MkdirAll(claimed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if present, err := settleClaim(claimed); err != nil || !present {
+		t.Fatalf("settleClaim(%d characters) = %v, %v; want present", len(claimed), present, err)
+	}
+}
