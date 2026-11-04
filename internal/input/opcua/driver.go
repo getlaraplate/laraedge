@@ -362,35 +362,6 @@ func (in *Input) timings() timings {
 	return productionTimings
 }
 
-// dialDeps are the dependencies of one dial; onLost is bound to that dial.
-func (in *Input) dialDeps(own ownKeyPair, onLost func()) dialDeps {
-	deps := dialDeps{
-		InputID:   in.cfg.ID,
-		OwnCert:   own.cert,
-		OwnKey:    own.key,
-		Trust:     &TrustStore{Dir: PKIDir(in.opts.DataDir)},
-		Rejected:  &in.rejected,
-		OnLost:    onLost,
-		Log:       in.log,
-		timing:    in.timing,
-		newClient: in.newClient,
-	}
-	if in.conn.User != "" {
-		deps.Password = in.password
-	}
-
-	return deps
-}
-
-// password resolves the password reference, at every connect (O11).
-func (in *Input) password(ctx context.Context) (string, error) {
-	if in.opts.Resolver == nil {
-		return "", errNoResolver
-	}
-
-	return in.opts.Resolver.Resolve(ctx, in.conn.Password)
-}
-
 // run is the goroutine owning the session: it connects, serves the session
 // until it fails or is lost, closes it and connects again after the backoff,
 // until ctx is done.
@@ -433,49 +404,6 @@ func errorKind(err error) string {
 	}
 
 	return input.ReadErrorConnection
-}
-
-// connect dials a session in a goroutine of its own and waits for it or for
-// ctx (Modbus R10): Close must not wait for a dial. When ctx is done first,
-// connect returns at once and the goroutine closes the session if its dial
-// succeeds late; it never touches the health nor emits. The returned channel
-// receives the session's loss: its OnLost is bound to this dial only, so a
-// late call from a closed session reaches a channel nobody reads.
-func (in *Input) connect(ctx context.Context, own ownKeyPair) (session, <-chan struct{}, error) {
-	lost := make(chan struct{}, 1)
-	deps := in.dialDeps(own, func() {
-		select {
-		case lost <- struct{}{}:
-		default:
-		}
-	})
-
-	type result struct {
-		s   session
-		err error
-	}
-
-	// Unbuffered: the session is handed over only to a waiting connect, so
-	// exactly one side owns it.
-	dialled := make(chan result)
-
-	go func() {
-		s, err := in.dial(ctx, in.conn, deps)
-		select {
-		case dialled <- result{s, err}:
-		case <-ctx.Done():
-			if err == nil {
-				s.Close()
-			}
-		}
-	}()
-
-	select {
-	case r := <-dialled:
-		return r.s, lost, r.err
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
-	}
 }
 
 // link is what the owner and the notification reader share of one session.
@@ -589,93 +517,6 @@ func (in *Input) resolve(s session, l *link) ([]*ua.NodeID, error) {
 	}
 
 	return ids, nil
-}
-
-// subscribe creates the session's subscription for the resolved subscribe
-// points and starts the reader of its notifications. A monitored item the
-// server refuses gets one bad sample, and kind exception counts once for the
-// response (ruling R8); the item is created again at the next connect only.
-func (in *Input) subscribe(ctx context.Context, s session, ids []*ua.NodeID, l *link, reader *sync.WaitGroup) error {
-	var items []item
-
-	for _, i := range in.subscribed {
-		if ids[i] == nil {
-			continue
-		}
-
-		sub := config.Subscribe{Sampling: config.SamplingDefault}
-		if in.points[i].cfg.Read.Subscribe != nil {
-			sub = *in.points[i].cfg.Read.Subscribe
-		}
-
-		items = append(items, item{Handle: uint32(i), Node: ids[i], Sub: sub})
-	}
-
-	if len(items) == 0 {
-		return nil
-	}
-
-	notifications, statuses, err := s.Subscribe(ctx, in.conn.PublishingInterval, items)
-	if err != nil {
-		return err
-	}
-
-	now := in.clk.Now()
-	refused := false
-
-	for k, status := range statuses {
-		if Quality(status) == model.Bad {
-			refused = true
-			l.setup = append(l.setup, in.badSample(int(items[k].Handle), now))
-		}
-	}
-
-	if refused {
-		in.health.CountError(input.ReadErrorException)
-	}
-
-	// Started after l.setup is complete. The reader never blocks on anything
-	// but emit, so the session's drain never stalls the library's publish
-	// loop on I/O (Task 4).
-	reader.Go(func() {
-		var counted uint64
-
-		for n := range notifications {
-			if ctx.Err() == nil {
-				in.notify(n, l, &counted)
-			}
-		}
-	})
-
-	return nil
-}
-
-// notify emits the sample of one data change; a notification is a
-// successful exchange (O4). A Bad status counts kind exception once per
-// publish message (ruling R8): counted is the last message counted.
-//
-// A notification for a handle the input never gave is dropped and does not
-// count as an exchange: it is not an answer about any point of the input, and
-// a server that sends only such notifications is still checked by the
-// watchdog read, which keeps the devices alive while the server answers.
-func (in *Input) notify(n notification, l *link, counted *uint64) {
-	if int(n.Handle) >= len(in.points) {
-		in.log.Debug("opcua: notification for an unknown handle ignored", "input", in.cfg.ID, "handle", n.Handle)
-
-		return
-	}
-
-	in.alive(l)
-
-	s, kind := in.sample(int(n.Handle), n.Value)
-	switch {
-	case kind == input.ReadErrorDecode:
-		in.health.CountError(kind)
-	case kind == input.ReadErrorException && (n.Message == 0 || n.Message != *counted):
-		in.health.CountError(kind)
-		*counted = n.Message
-	}
-	l.emit(model.SampleRecord(s))
 }
 
 // poll reads one poll group; no request without nodes. Decode counts per
