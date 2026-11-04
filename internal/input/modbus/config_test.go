@@ -109,6 +109,14 @@ func TestParseConnectionRefusals(t *testing.T) {
 		{"rate limit negative", `{"transport":"tcp","host":"h","rate_limit":-3}`, "connection.rate_limit: want a positive integer"},
 		{"rate limit fraction", `{"transport":"tcp","host":"h","rate_limit":2.5}`, "connection.rate_limit: want a positive integer"},
 		{"unknown field", `{"transport":"tcp","host":"h","retries":3}`, "connection.retries: unknown field"},
+		{"two unknown fields report the first by name", `{"transport":"tcp","host":"h","zeta":1,"alpha":2}`, "connection.alpha: unknown field"},
+		{"rtuovertcp refuses device", `{"transport":"rtuovertcp","host":"h","device":"/dev/x"}`, "connection.device: only for rtu"},
+		{"rtuovertcp refuses baud", `{"transport":"rtuovertcp","host":"h","baud":9600}`, "connection.baud: only for rtu"},
+		{"rtuovertcp refuses data_bits", `{"transport":"rtuovertcp","host":"h","data_bits":8}`, "connection.data_bits: only for rtu"},
+		{"rtuovertcp refuses parity", `{"transport":"rtuovertcp","host":"h","parity":"even"}`, "connection.parity: only for rtu"},
+		{"rtuovertcp refuses stop_bits", `{"transport":"rtuovertcp","host":"h","stop_bits":1}`, "connection.stop_bits: only for rtu"},
+		{"device not string", `{"transport":"rtu","device":5,"baud":9600}`, "connection.device: must be a string"},
+		{"parity not string", `{"transport":"rtu","device":"/dev/x","baud":9600,"parity":1}`, "connection.parity: must be a string"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,7 +225,7 @@ func TestParseAddressRefusals(t *testing.T) {
 	}
 }
 
-func TestAddressRegisterCountAndAreaKind(t *testing.T) {
+func TestAreaIsRegister(t *testing.T) {
 	if !AreaHoldingRegister.IsRegister() || !AreaInputRegister.IsRegister() {
 		t.Fatal("hr and ir are register areas")
 	}
@@ -271,11 +279,11 @@ func TestCheckPointRefusals(t *testing.T) {
 		addr string
 		want string
 	}{
-		{"bool on hr", point("bool", "", config.ReadPoll), "hr:0", "type bool: only on co or di"},
-		{"bool on ir", point("bool", "", config.ReadPoll), "ir:0", "type bool: only on co or di"},
-		{"float32 on co", point("float32", "", config.ReadPoll), "co:0", "type float32: only on hr or ir"},
-		{"int16 on di", point("int16", "", config.ReadPoll), "di:0", "type int16: only on hr or ir"},
-		{"string on co", point("string", "", config.ReadPoll), "co:0#4", "type string: only on hr or ir"},
+		{"bool on hr", point("bool", "", config.ReadPoll), "hr:0", "type: bool only on co or di"},
+		{"bool on ir", point("bool", "", config.ReadPoll), "ir:0", "type: bool only on co or di"},
+		{"float32 on co", point("float32", "", config.ReadPoll), "co:0", "type: float32 only on hr or ir"},
+		{"int16 on di", point("int16", "", config.ReadPoll), "di:0", "type: int16 only on hr or ir"},
+		{"string on co", point("string", "", config.ReadPoll), "co:0#4", "type: string only on hr or ir"},
 		{"count on int16", point("int16", "", config.ReadPoll), "hr:0#4", "address: #<registers> is only for string"},
 		{"count on bool", point("bool", "", config.ReadPoll), "co:0#1", "address: #<registers> is only for string"},
 		{"count on float64", point("float64", "", config.ReadPoll), "hr:0#4", "address: #<registers> is only for string"},

@@ -427,9 +427,9 @@ func CheckPoint(p config.Point, a Address) error {
 
 	switch {
 	case p.Type == "bool" && a.Area.IsRegister():
-		return errors.New("type bool: only on co or di")
+		return errors.New("type: bool only on co or di")
 	case p.Type != "bool" && !a.Area.IsRegister():
-		return errors.New("type " + p.Type + ": only on hr or ir")
+		return errors.New("type: " + p.Type + " only on hr or ir")
 	}
 
 	if p.Type == "string" {
