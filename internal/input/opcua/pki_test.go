@@ -742,7 +742,11 @@ func TestSweepStaleOwnRemovesAnInterruptedClaim(t *testing.T) {
 
 // A directory replaced after the sweep looked at it (a symlink to a directory
 // outside, or another directory) is refused once claimed: nothing is removed
-// and the outside target is untouched.
+// and the outside target is untouched. The other directory is swapped in by
+// moving the claimed one aside, as a real swapper must to keep it: deleting
+// it instead lets the filesystem give the new directory the same inode
+// number (ext4 does at once), and the two are then the same file to
+// os.SameFile. The symlink is refused for its type whatever its number.
 func TestSweepRefusesADirectorySwappedDuringTheClaim(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks need a privilege on Windows")
@@ -761,7 +765,7 @@ func TestSweepRefusesADirectorySwappedDuringTheClaim(t *testing.T) {
 			}
 		}},
 		{"another plain directory", func(t *testing.T, claimed, _ string) {
-			if err := os.RemoveAll(claimed); err != nil {
+			if err := os.Rename(claimed, filepath.Join(filepath.Dir(claimed), "aside")); err != nil {
 				t.Fatal(err)
 			}
 			writeFile(t, filepath.Join(claimed, "other"), []byte("OTHER"))

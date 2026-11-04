@@ -168,7 +168,12 @@ const ownTmpClaim = ".sweep-"
 // path must still be the directory looked at (a plain directory, os.SameFile
 // with the identity read before the rename): one swapped in meanwhile is
 // refused and left in place; one already gone was removed by someone else and
-// is skipped. It is removed with
+// is skipped. The identity is the file's number on its volume, which a
+// filesystem may give a new file once the old one is deleted (ext4 does at
+// once): a directory deleted and replaced by another plain directory under the
+// claimed name can pass as the same and is removed. That stays inside the PKI
+// directory, at a name only a sweep makes; the type check, not the identity,
+// is what refuses a symlink or a junction. It is removed with
 // os.RemoveAll on the claimed path, which unlinks a top-level symlink without
 // following it and never follows one below. A sweep that dies between its
 // claim and the removal leaves a claimed name, which the next sweep handles
