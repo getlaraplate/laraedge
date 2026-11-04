@@ -142,7 +142,11 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	if code, ok := parse(fs, args); !ok {
 		return code
 	}
-	if *bootstrap == "" || fs.NArg() != 0 {
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "laraplate-edge run: unexpected argument %q\n", fs.Arg(0))
+		return exitUsage
+	}
+	if *bootstrap == "" {
 		fmt.Fprintf(stderr, "laraplate-edge run: --bootstrap <path> is required\n")
 		return exitUsage
 	}
@@ -343,7 +347,9 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 // parseArgs parses args like parse, but accepts flags before, between and
-// after the positional arguments, which it returns.
+// after the positional arguments, which it returns. A "--" ends the flags:
+// everything after it is positional, even when it starts with a dash. (A "--"
+// given as the value of a flag, "--input --", is read as the terminator too.)
 func parseArgs(fs *flag.FlagSet, args []string) (positional []string, code int, ok bool) {
 	for {
 		if code, ok := parse(fs, args); !ok {
@@ -351,6 +357,10 @@ func parseArgs(fs *flag.FlagSet, args []string) (positional []string, code int, 
 		}
 		if fs.NArg() == 0 {
 			return positional, exitOK, true
+		}
+
+		if rest := fs.Args(); len(args) > len(rest) && args[len(args)-len(rest)-1] == "--" {
+			return append(positional, rest...), exitOK, true
 		}
 
 		positional = append(positional, fs.Arg(0))

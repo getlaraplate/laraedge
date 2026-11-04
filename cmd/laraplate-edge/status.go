@@ -51,9 +51,12 @@ func fetchStatus(listen, token string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatusBody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatusBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: read the answer: %w", url, err)
+	}
+	if len(body) > maxStatusBody {
+		return nil, fmt.Errorf("GET %s: answer too large (over 4 MiB)", url)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, fmt.Errorf("GET %s: HTTP 401: the endpoint needs its token in %s", url, statusTokenEnv)
