@@ -181,13 +181,17 @@ func TestHostStopDuringHandshake(t *testing.T) {
 	if alive(pid) {
 		t.Fatal("the plugin process is alive after Stop returned")
 	}
+	// Stop returns once Start has run its last statement (startDone is closed
+	// by Start's outermost defer), but the goroutine still has to send what
+	// Start returned: that send may come after Stop returns, so the result is
+	// awaited, not polled.
 	select {
 	case err := <-started:
 		if err == nil || err.Error() != "the plugin host is stopped" {
 			t.Fatalf("Start() = %v, want the host is stopped", err)
 		}
-	default:
-		t.Fatal("Start had not returned when Stop returned")
+	case <-time.After(guard):
+		t.Fatal("Start did not return after Stop")
 	}
 	if status := h.host.Status(); status.State != plugin.StateStopped || status.Pid != 0 {
 		t.Fatalf("Status() = %+v, want stopped", status)
