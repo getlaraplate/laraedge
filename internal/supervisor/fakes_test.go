@@ -59,6 +59,11 @@ type fakeDriver struct {
 	called chan string
 	// health makes the input of an id report its health (input.HealthReporter).
 	health map[string]input.Health
+	// exclusive makes the inputs of an id hold one exclusive resource, as a
+	// serial port: a Start finding it held by another instance fails with
+	// errBusy; the instance holding it releases it in Close.
+	exclusive map[string]bool
+	held      map[string]*fakeInput
 }
 
 func newFakeDriver() *fakeDriver {
@@ -78,6 +83,8 @@ func newFakeDriver() *fakeDriver {
 		emits:        map[string][]func(model.Record){},
 		called:       make(chan string, 64),
 		health:       map[string]input.Health{},
+		exclusive:    map[string]bool{},
+		held:         map[string]*fakeInput{},
 	}
 }
 
@@ -185,6 +192,14 @@ type fakeInput struct {
 func (in *fakeInput) Start(ctx context.Context, emit func(model.Record)) error {
 	d := in.d
 	d.mu.Lock()
+	if d.exclusive[in.cfg.ID] {
+		if h := d.held[in.cfg.ID]; h != nil && h != in {
+			d.mu.Unlock()
+
+			return errBusy
+		}
+		d.held[in.cfg.ID] = in
+	}
 	d.starts = append(d.starts, in.cfg.ID+" "+string(in.cfg.Raw))
 	d.emits[in.cfg.ID] = append(d.emits[in.cfg.ID], emit)
 	hang, err := d.hang[in.cfg.ID], d.failStart[in.cfg.ID]
@@ -258,6 +273,9 @@ func (in *fakeInput) Close() error {
 	}
 	if d.running[in.cfg.ID] == in {
 		delete(d.running, in.cfg.ID)
+	}
+	if d.held[in.cfg.ID] == in {
+		delete(d.held, in.cfg.ID)
 	}
 
 	return nil
@@ -605,3 +623,5 @@ func (b *lockedBuffer) String() string {
 }
 
 var errRefused = errors.New("connection refused by the fake machine")
+
+var errBusy = errors.New("the fake machine port is held by another instance")

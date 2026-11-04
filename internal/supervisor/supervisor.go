@@ -159,6 +159,9 @@ type Supervisor struct {
 	// closed processors of that input, so the count reported never goes
 	// back when an input restarts.
 	transformErrors map[string]uint64
+	// abandoned holds, by input id, a channel closed once the abandoned
+	// start of that id has returned and its input is closed (C43).
+	abandoned map[string]chan struct{}
 }
 
 // runningInput is a started input with its transform processor. The
@@ -179,6 +182,13 @@ type runningInput struct {
 // one step with retire, so after retire nothing is registered or routed for
 // this instance, and its router registration, owned by its token, is removed
 // without touching one of a later instance of the same id (ruling R50).
+//
+// The emits of one instance therefore serialise on mu, after the lock of its
+// transform processor: this is by design (C45). The records of one input are
+// routed in the order it emitted them, and a retire never interleaves with a
+// record half routed; the lock is held while one record is routed. Each start
+// of an input has its own instance, so different inputs never wait on each
+// other here.
 //
 // Lock order: the input's transform processor, then inputInstance.mu, then
 // the router's locks (Router.mu, then a hold queue's), then an output
@@ -371,6 +381,7 @@ func New(cfg Config) (*Supervisor, error) {
 		processors:      map[string]*runningProcessor{},
 		failedProc:      map[string]failure{},
 		transformErrors: map[string]uint64{},
+		abandoned:       map[string]chan struct{}{},
 	}
 	if s.store == nil {
 		s.store = config.NewStore(cfg.DataDir)
@@ -1179,6 +1190,10 @@ func (s *Supervisor) stopOutput(id string, how outputStop, holdRoute config.Rout
 // instance a rollback started meanwhile. Its processor is closed before
 // startInput returns, the input of an abandoned start still running: no two
 // live processors of one input ever share the state file (ruling R11).
+// Before it starts, it waits for an abandoned start of the same id to return
+// and close its input (waitAbandoned): an input holding an exclusive
+// resource, as a serial port, frees it before the next instance opens it
+// (C43).
 func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.Input) error {
 	proc, err := transform.NewProcessor(cfg, s.dataDir, s.clk, s.log)
 	if err != nil {
@@ -1194,18 +1209,38 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 		return errors.New("the transform chains cannot be built")
 	}
 
+	s.waitAbandoned(ctx, cfg.ID)
+
 	lifeCtx, cancel := context.WithCancel(s.ctx)
 	inst := &inputInstance{router: s.router, cfg: cfg, live: true, taps: &s.taps}
 	proc.Start(lifeCtx)
 	emit := proc.Wrap(inst.emit)
 
+	closed := make(chan struct{})
 	err = s.startBounded(ctx, cancel, func() error { return in.Start(lifeCtx, emit) }, func() {
 		inst.retire()
 		if err := in.Close(); err != nil {
 			s.log.Warn("supervisor: cannot close an input that did not start", "input", cfg.ID, "error", err)
 		}
+
+		s.mu.Lock()
+		if s.abandoned[cfg.ID] == closed {
+			delete(s.abandoned, cfg.ID)
+		}
+		close(closed)
+		s.mu.Unlock()
 	})
 	if err != nil {
+		// An abandoned start closes its input later, in its goroutine: the
+		// next start of the id waits for it.
+		s.mu.Lock()
+		select {
+		case <-closed:
+		default:
+			s.abandoned[cfg.ID] = closed
+		}
+		s.mu.Unlock()
+
 		inst.retire()
 		cancel()
 		s.closeProcessor(cfg.ID, proc)
@@ -1222,6 +1257,32 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 	s.mu.Unlock()
 
 	return nil
+}
+
+// waitAbandoned waits for the abandoned start of input id, if any, to return
+// and close its input, at most the start timeout or until ctx is done. A
+// start that is still running then is left to its goroutine, as before, and
+// the next instance starts anyway, with a warning: a driver whose Start never
+// returns must not keep the input down. The input never started, so nothing
+// of it is lost meanwhile.
+func (s *Supervisor) waitAbandoned(ctx context.Context, id string) {
+	s.mu.Lock()
+	closed := s.abandoned[id]
+	s.mu.Unlock()
+	if closed == nil {
+		return
+	}
+
+	timer := s.clk.NewTimer(s.timeout)
+	defer timer.Stop()
+	s.step("wait abandoned input " + id)
+
+	select {
+	case <-closed:
+	case <-timer.C():
+		s.log.Warn("supervisor: an abandoned start of the input has not returned; starting the input again anyway", "input", id, "waited", s.timeout.String())
+	case <-ctx.Done():
+	}
 }
 
 // closeProcessor closes the processor of input id, which waits for its

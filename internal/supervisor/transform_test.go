@@ -258,16 +258,18 @@ func TestRolledBackInputRebuildsItsProcessor(t *testing.T) {
 				f.t.Cleanup(func() { release.Do(func() { close(f.drv.blockRelease) }) })
 				f.drv.blockNth["a"] = 2
 
-				done := make(chan Outcome, 1)
-				go func() { done <- f.apply(doc) }()
+				waiting := f.stepSeen("wait abandoned input a")
+				done := f.applyAsync(doc)
 				select {
 				case <-f.drv.blockStarted:
 				case <-time.After(guard):
 					f.t.Fatal("the changed input a did not start")
 				}
 				f.clk.Advance(DefaultStartTimeout)
+				f.expireAbandonedWait(waiting)
 				select {
-				case out := <-done:
+				case res := <-done:
+					out := f.outcome(res)
 					return out
 				case <-time.After(guard):
 					f.t.Fatal("Apply did not return after the start timeout")
@@ -473,10 +475,7 @@ func TestRollbackDoesNotResurrectARemovedCount(t *testing.T) {
 	t.Cleanup(func() { release.Do(func() { close(f.drv.blockRelease) }) })
 	f.drv.blockNth["c"] = 1
 
-	done := make(chan Outcome, 1)
-	go func() {
-		done <- f.apply(f.transformDocumentFor("a", 3, 0, door, inSpec{id: "c", devices: []string{"c1"}}))
-	}()
+	done := f.applyAsync(f.transformDocumentFor("a", 3, 0, door, inSpec{id: "c", devices: []string{"c1"}}))
 	select {
 	case <-f.drv.blockStarted:
 	case <-time.After(guard):
@@ -491,7 +490,8 @@ func TestRollbackDoesNotResurrectARemovedCount(t *testing.T) {
 
 	f.clk.Advance(DefaultStartTimeout)
 	select {
-	case out := <-done:
+	case res := <-done:
+		out := f.outcome(res)
 		if out.Result != ResultRolledBack {
 			t.Fatalf("Apply() = %+v, want rolled_back", out)
 		}
@@ -534,10 +534,7 @@ func TestRolledBackRenameStartsTheRestoredInputFromZero(t *testing.T) {
 	t.Cleanup(func() { release.Do(func() { close(f.drv.blockRelease) }) })
 	f.drv.blockNth["c"] = 1
 
-	done := make(chan Outcome, 1)
-	go func() {
-		done <- f.apply(f.transformDocumentFor("b", 2, 0, door, inSpec{id: "c", devices: []string{"c1"}}))
-	}()
+	done := f.applyAsync(f.transformDocumentFor("b", 2, 0, door, inSpec{id: "c", devices: []string{"c1"}}))
 	select {
 	case <-f.drv.blockStarted:
 	case <-time.After(guard):
@@ -548,7 +545,8 @@ func TestRolledBackRenameStartsTheRestoredInputFromZero(t *testing.T) {
 
 	f.clk.Advance(DefaultStartTimeout)
 	select {
-	case out := <-done:
+	case res := <-done:
+		out := f.outcome(res)
 		if out.Result != ResultRolledBack {
 			t.Fatalf("Apply() = %+v, want rolled_back", out)
 		}
