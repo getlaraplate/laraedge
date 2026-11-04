@@ -1240,10 +1240,11 @@ func TestWaitAbandonedWaitsForEveryStartWithinOneTimeout(t *testing.T) {
 		closeFirst  bool
 		closeSecond bool
 		wantWarn    bool
+		wantStill   int
 	}{
 		{name: "every start closed", closeFirst: true, closeSecond: true},
-		{name: "the first still runs", closeSecond: true, wantWarn: true},
-		{name: "the second still runs", closeFirst: true, wantWarn: true},
+		{name: "the first still runs", closeSecond: true, wantWarn: true, wantStill: 1},
+		{name: "the second still runs", closeFirst: true, wantWarn: true, wantStill: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1281,6 +1282,9 @@ func TestWaitAbandonedWaitsForEveryStartWithinOneTimeout(t *testing.T) {
 			warned := strings.Contains(f.logs.String(), "an abandoned start of the input has not returned")
 			if warned != tt.wantWarn {
 				t.Fatalf("warned = %v, want %v; logs:\n%s", warned, tt.wantWarn, f.logs.String())
+			}
+			if tt.wantWarn && !strings.Contains(f.logs.String(), fmt.Sprintf(`"still_running":%d`, tt.wantStill)) {
+				t.Fatalf("want still_running=%d in the warning; logs:\n%s", tt.wantStill, f.logs.String())
 			}
 			f.sup.mu.Lock()
 			left := len(f.sup.abandoned["x"])

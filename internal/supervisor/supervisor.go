@@ -1284,7 +1284,7 @@ func (s *Supervisor) waitAbandoned(ctx context.Context, id string) {
 		select {
 		case <-closed:
 		case <-timer.C():
-			s.log.Warn("supervisor: an abandoned start of the input has not returned; starting the input again anyway", "input", id, "waited", s.timeout.String(), "still_running", len(pending)-i)
+			s.log.Warn("supervisor: an abandoned start of the input has not returned; starting the input again anyway", "input", id, "waited", s.timeout.String(), "still_running", stillRunning(pending[i:]))
 			s.mu.Lock()
 			for _, c := range pending[i:] {
 				s.dropAbandoned(id, c)
@@ -1296,6 +1296,20 @@ func (s *Supervisor) waitAbandoned(ctx context.Context, id string) {
 			return
 		}
 	}
+}
+
+// stillRunning counts the starts in pending that have not closed yet.
+func stillRunning(pending []chan struct{}) int {
+	n := 0
+	for _, c := range pending {
+		select {
+		case <-c:
+		default:
+			n++
+		}
+	}
+
+	return n
 }
 
 // dropAbandoned removes closed from the abandoned starts of input id. The
