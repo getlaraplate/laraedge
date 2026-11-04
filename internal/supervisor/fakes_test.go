@@ -64,6 +64,40 @@ type fakeDriver struct {
 	// errBusy; the instance holding it releases it in Close.
 	exclusive map[string]bool
 	held      map[string]*fakeInput
+	// gates makes the nth Start of an input (by id, then n from 1) wait,
+	// ignoring its context, until its gate is released; several starts of
+	// one id can each have their own.
+	gates map[string]map[int]*startGate
+}
+
+// startGate holds one Start of a fake input: started is closed when the
+// Start begins, release lets it return its context's error, and closed is
+// closed when that instance is closed.
+type startGate struct {
+	started, release, closed chan struct{}
+	releaseOnce, closeOnce   sync.Once
+}
+
+func newStartGate() *startGate {
+	return &startGate{started: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (g *startGate) open() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+// gate holds the nth Start of input id; the gate is released at cleanup.
+func (d *fakeDriver) gate(t *testing.T, id string, n int) *startGate {
+	t.Helper()
+
+	g := newStartGate()
+	t.Cleanup(g.open)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.gates[id] == nil {
+		d.gates[id] = map[int]*startGate{}
+	}
+	d.gates[id][n] = g
+
+	return g
 }
 
 func newFakeDriver() *fakeDriver {
@@ -85,6 +119,7 @@ func newFakeDriver() *fakeDriver {
 		health:       map[string]input.Health{},
 		exclusive:    map[string]bool{},
 		held:         map[string]*fakeInput{},
+		gates:        map[string]map[int]*startGate{},
 	}
 }
 
@@ -187,6 +222,7 @@ type fakeInput struct {
 	emit    func(model.Record)
 	started bool
 	blocked bool
+	gate    *startGate
 }
 
 func (in *fakeInput) Start(ctx context.Context, emit func(model.Record)) error {
@@ -209,9 +245,17 @@ func (in *fakeInput) Start(ctx context.Context, emit func(model.Record)) error {
 	late := d.lateEmit[in.cfg.ID]
 	block := d.blockNth[in.cfg.ID] > 0 && d.countStarts(in.cfg.ID) == d.blockNth[in.cfg.ID]
 	in.blocked = block
+	gate := d.gates[in.cfg.ID][d.countStarts(in.cfg.ID)]
+	in.gate = gate
 	d.mu.Unlock()
 	d.called <- in.cfg.ID
 
+	if gate != nil {
+		close(gate.started)
+		<-gate.release
+
+		return ctx.Err()
+	}
 	if block {
 		close(d.blockStarted)
 		<-d.blockRelease
@@ -266,6 +310,9 @@ func (in *fakeInput) Close() error {
 	if in.blocked {
 		in.blocked = false
 		close(d.blockClosed)
+	}
+	if g := in.gate; g != nil {
+		g.closeOnce.Do(func() { close(g.closed) })
 	}
 	if in.started {
 		d.closed = append(d.closed, in.cfg.ID)

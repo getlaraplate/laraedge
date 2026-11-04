@@ -159,9 +159,10 @@ type Supervisor struct {
 	// closed processors of that input, so the count reported never goes
 	// back when an input restarts.
 	transformErrors map[string]uint64
-	// abandoned holds, by input id, a channel closed once the abandoned
-	// start of that id has returned and its input is closed (C43).
-	abandoned map[string]chan struct{}
+	// abandoned holds, by input id, one channel per abandoned start of that
+	// id still running, closed once that start has returned and its input is
+	// closed (C43). A wait that ran out drops the channels it waited for.
+	abandoned map[string][]chan struct{}
 }
 
 // runningInput is a started input with its transform processor. The
@@ -381,7 +382,7 @@ func New(cfg Config) (*Supervisor, error) {
 		processors:      map[string]*runningProcessor{},
 		failedProc:      map[string]failure{},
 		transformErrors: map[string]uint64{},
-		abandoned:       map[string]chan struct{}{},
+		abandoned:       map[string][]chan struct{}{},
 	}
 	if s.store == nil {
 		s.store = config.NewStore(cfg.DataDir)
@@ -1224,20 +1225,19 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 		}
 
 		s.mu.Lock()
-		if s.abandoned[cfg.ID] == closed {
-			delete(s.abandoned, cfg.ID)
-		}
+		s.dropAbandoned(cfg.ID, closed)
 		close(closed)
 		s.mu.Unlock()
 	})
 	if err != nil {
 		// An abandoned start closes its input later, in its goroutine: the
-		// next start of the id waits for it.
+		// next start of the id waits for it, and for every other abandoned
+		// start of the id still running.
 		s.mu.Lock()
 		select {
 		case <-closed:
 		default:
-			s.abandoned[cfg.ID] = closed
+			s.abandoned[cfg.ID] = append(s.abandoned[cfg.ID], closed)
 		}
 		s.mu.Unlock()
 
@@ -1259,17 +1259,20 @@ func (s *Supervisor) startInput(ctx context.Context, cfg config.Input, in input.
 	return nil
 }
 
-// waitAbandoned waits for the abandoned start of input id, if any, to return
-// and close its input, at most the start timeout or until ctx is done. A
-// start that is still running then is left to its goroutine, as before, and
-// the next instance starts anyway, with a warning: a driver whose Start never
-// returns must not keep the input down. The input never started, so nothing
-// of it is lost meanwhile.
+// waitAbandoned waits for every abandoned start of input id still running
+// to return and close its input, at most one start timeout in total or until
+// ctx is done. When the wait runs out, the starts still running are left to
+// their goroutines, as before, and dropped from abandoned, so a later start of
+// the id does not wait for them again; the next instance starts anyway, with
+// a warning: a driver whose Start never returns must not keep the input down.
+// The input never started, so nothing of it is lost meanwhile. A shutdown
+// during a rollback that waits here can take up to one start timeout more:
+// the rollback runs on the supervisor's context.
 func (s *Supervisor) waitAbandoned(ctx context.Context, id string) {
 	s.mu.Lock()
-	closed := s.abandoned[id]
+	pending := slices.Clone(s.abandoned[id])
 	s.mu.Unlock()
-	if closed == nil {
+	if len(pending) == 0 {
 		return
 	}
 
@@ -1277,12 +1280,34 @@ func (s *Supervisor) waitAbandoned(ctx context.Context, id string) {
 	defer timer.Stop()
 	s.step("wait abandoned input " + id)
 
-	select {
-	case <-closed:
-	case <-timer.C():
-		s.log.Warn("supervisor: an abandoned start of the input has not returned; starting the input again anyway", "input", id, "waited", s.timeout.String())
-	case <-ctx.Done():
+	for i, closed := range pending {
+		select {
+		case <-closed:
+		case <-timer.C():
+			s.log.Warn("supervisor: an abandoned start of the input has not returned; starting the input again anyway", "input", id, "waited", s.timeout.String(), "still_running", len(pending)-i)
+			s.mu.Lock()
+			for _, c := range pending[i:] {
+				s.dropAbandoned(id, c)
+			}
+			s.mu.Unlock()
+
+			return
+		case <-ctx.Done():
+			return
+		}
 	}
+}
+
+// dropAbandoned removes closed from the abandoned starts of input id. The
+// caller holds s.mu.
+func (s *Supervisor) dropAbandoned(id string, closed chan struct{}) {
+	left := slices.DeleteFunc(s.abandoned[id], func(c chan struct{}) bool { return c == closed })
+	if len(left) == 0 {
+		delete(s.abandoned, id)
+
+		return
+	}
+	s.abandoned[id] = left
 }
 
 // closeProcessor closes the processor of input id, which waits for its

@@ -82,11 +82,6 @@ ignores `read`, `byte_order` and `death_tolerance`: it emits the initial state a
 start, then, at each tick, what changed. Qualities are always `good`.
 
 The scenario (at most 1 MiB, unknown keys refused; see `examples/simulated/scenario.yaml`):
-a `scenario_file` larger than 1 MiB, or one that is not a valid scenario, is refused when the document
-is checked (`config validate`, or the apply, which rejects the document), with the message
-`connection.scenario_file: <path> is larger than 1 MiB` naming the file. A file that cannot be opened
-or read when the document is checked fails the input's start instead, so a file that appears later is
-picked up by the next start.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -96,6 +91,12 @@ picked up by the next start.
 | `cycle_time` | | `{mean, stddev}`, durations; `mean` is required when a state produces, from the tick to 24 h. A part completes when its drawn cycle time has elapsed, at most one per tick. |
 | `scrap_rate` | `0` | probability, 0 to 1, that a part is scrap (`scrap_count`), else good (`good_count`) |
 | `measurements` | | `{signal, mean, stddev, unit}` drawn once per completed part; the name is not `state`, `good_count` or `scrap_count`; `unit` is informative (the point's `unit` is reported) |
+
+A `scenario_file` larger than 1 MiB, or one that is not a valid scenario, is refused when the document
+is checked (`config validate`, or the apply, which rejects the document), with the message
+`connection.scenario_file: <path> is larger than 1 MiB` naming the file. A file that cannot be opened
+or read when the document is checked fails the input's start instead, so a file that appears later is
+picked up by the next start.
 
 ### The `modbus` driver
 

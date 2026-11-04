@@ -1116,6 +1116,182 @@ func TestRollbackWaitsForTheAbandonedStartOfTheSameInput(t *testing.T) {
 	}
 }
 
+// recv waits for ch to be closed or to deliver, failing the test after guard.
+func recv[T any](t *testing.T, ch <-chan T, what string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	case <-time.After(guard):
+		t.Fatalf("%s did not happen", what)
+	}
+}
+
+// TestAnExpiredAbandonedWaitIsNotWaitedAgain: once the rollback's wait for an
+// abandoned start ran out, a later document restarting the same input does
+// not wait for that start again.
+func TestAnExpiredAbandonedWaitIsNotWaitedAgain(t *testing.T) {
+	f := newFixture(t)
+	f.mustApply(f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+
+	g := f.drv.gate(t, "a", 2)
+	waiting := f.stepSeen("wait abandoned input a")
+	done := f.applyAsync(f.document(2, []inSpec{{id: "a", variant: 1, devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	recv(t, g.started, "the changed start of a")
+	f.clk.Advance(DefaultStartTimeout)
+	f.expireAbandonedWait(waiting)
+	select {
+	case res := <-done:
+		if out := f.outcome(res); out.Result != ResultRolledBack {
+			t.Fatalf("Apply() = %+v, want rolled_back", out)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return")
+	}
+
+	// The abandoned start still runs.
+	again := f.stepSeen("wait abandoned input a")
+	done = f.applyAsync(f.document(3, []inSpec{{id: "a", variant: 2, devices: []string{"a1"}}}, []outSpec{{id: "main"}}))
+	select {
+	case res := <-done:
+		if out := f.outcome(res); out.Result != ResultApplied {
+			t.Fatalf("Apply() = %+v, want applied", out)
+		}
+	case <-again:
+		t.Fatal("the next start of a waited again for the abandoned start whose wait ran out")
+	case <-time.After(guard):
+		t.Fatal("Apply did not return")
+	}
+
+	g.open()
+	recv(t, g.closed, "the close of the abandoned start")
+}
+
+// TestEveryAbandonedStartOfAnInputIsKept: a second start of an input
+// abandoned while the first abandoned one still runs does not hide the first;
+// both are waited for, and both leave once they closed.
+func TestEveryAbandonedStartOfAnInputIsKept(t *testing.T) {
+	f := newFixture(t)
+	b := inSpec{id: "b", devices: []string{"b1"}}
+	a := inSpec{id: "a", devices: []string{"a1"}}
+	f.mustApply(f.document(1, []inSpec{b}, []outSpec{{id: "main"}}))
+
+	// a is new: its abandoned start is not restarted by the rollback.
+	g1 := f.drv.gate(t, "a", 1)
+	done := f.applyAsync(f.document(2, []inSpec{b, a}, []outSpec{{id: "main"}}))
+	recv(t, g1.started, "the first start of a")
+	f.clk.Advance(DefaultStartTimeout)
+	select {
+	case res := <-done:
+		if out := f.outcome(res); out.Result != ResultRolledBack {
+			t.Fatalf("Apply() = %+v, want rolled_back", out)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return")
+	}
+
+	// The next start of a waits for the first; a shutdown ends that wait and
+	// abandons the second start too.
+	g2 := f.drv.gate(t, "a", 2)
+	waiting := f.stepSeen("wait abandoned input a")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cancelled := make(chan error, 1)
+	go func() {
+		_, err := f.sup.Apply(ctx, f.document(3, []inSpec{b, a}, []outSpec{{id: "main"}}))
+		cancelled <- err
+	}()
+	recv(t, waiting, "the wait for the first abandoned start")
+	cancel()
+	recv(t, g2.started, "the second start of a")
+	select {
+	case err := <-cancelled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Apply() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(guard):
+		t.Fatal("Apply did not return after cancel")
+	}
+
+	pending := func() int {
+		f.sup.mu.Lock()
+		defer f.sup.mu.Unlock()
+
+		return len(f.sup.abandoned["a"])
+	}
+	if n := pending(); n != 2 {
+		t.Fatalf("%d abandoned starts of a recorded, want 2", n)
+	}
+
+	g1.open()
+	g2.open()
+	recv(t, g1.closed, "the close of the first abandoned start")
+	recv(t, g2.closed, "the close of the second abandoned start")
+	waitFor(t, "the abandoned starts to leave", func() bool { return pending() == 0 })
+	f.mustApply(f.document(4, []inSpec{b, a}, []outSpec{{id: "main"}}))
+}
+
+// TestWaitAbandonedWaitsForEveryStartWithinOneTimeout: the wait ends when
+// every abandoned start closed, or after one start timeout in total, which
+// drops the starts still running and warns.
+func TestWaitAbandonedWaitsForEveryStartWithinOneTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		closeFirst  bool
+		closeSecond bool
+		wantWarn    bool
+	}{
+		{name: "every start closed", closeFirst: true, closeSecond: true},
+		{name: "the first still runs", closeSecond: true, wantWarn: true},
+		{name: "the second still runs", closeFirst: true, wantWarn: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			first, second := make(chan struct{}), make(chan struct{})
+			f.sup.mu.Lock()
+			f.sup.abandoned["x"] = []chan struct{}{first, second}
+			f.sup.mu.Unlock()
+
+			waiting := f.stepSeen("wait abandoned input x")
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				f.sup.waitAbandoned(t.Context(), "x")
+			}()
+			recv(t, waiting, "the wait")
+			// As a start's cleanup does: leave abandoned, then close.
+			closeStart := func(c chan struct{}) {
+				f.sup.mu.Lock()
+				f.sup.dropAbandoned("x", c)
+				close(c)
+				f.sup.mu.Unlock()
+			}
+			if tt.closeFirst {
+				closeStart(first)
+			}
+			if tt.closeSecond {
+				closeStart(second)
+			}
+			if tt.wantWarn {
+				f.clk.Advance(DefaultStartTimeout)
+			}
+			recv(t, done, "the end of the wait")
+
+			warned := strings.Contains(f.logs.String(), "an abandoned start of the input has not returned")
+			if warned != tt.wantWarn {
+				t.Fatalf("warned = %v, want %v; logs:\n%s", warned, tt.wantWarn, f.logs.String())
+			}
+			f.sup.mu.Lock()
+			left := len(f.sup.abandoned["x"])
+			f.sup.mu.Unlock()
+			if left != 0 {
+				t.Fatalf("%d abandoned starts left after the wait, want 0", left)
+			}
+		})
+	}
+}
+
 // TestAbandonedStartDoesNotUnregisterTheRestoredInput: a changed input that
 // does not start within the timeout is abandoned and the previous one is
 // restarted by the rollback; when the abandoned Start returns later, its
