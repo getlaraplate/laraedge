@@ -38,6 +38,9 @@ const (
 	// busyBound before it counts as an outage. busyBound matches the 10 s
 	// the SDK allows the plugin's Stop before it releases the instance
 	// (stopTimeout).
+	// busyWait must stay below driverkit.BackoffMin/2: the supervisor tests tell
+	// busy waits from host restart waits by that gap
+	// (TestBusyWaitStaysBelowBackoffFloor).
 	busyWait  = 100 * time.Millisecond
 	busyBound = 10 * time.Second
 )

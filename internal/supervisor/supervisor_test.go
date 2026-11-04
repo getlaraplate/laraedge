@@ -253,10 +253,14 @@ func (f *fixture) waitStatus(what string, cond func(Status) bool) {
 // advanceUntil moves the clock one minute at a time, each time once the output
 // waits on a backoff timer, until cond holds. After each step it waits for the
 // output either to satisfy cond or to arm its next timer.
-func (f *fixture) advanceUntil(what string, cond func() bool) {
+func (f *fixture) advanceUntil(what string, cond func() bool, got func() string) {
 	f.t.Helper()
 
+	deadline := time.Now().Add(guard)
 	for !cond() {
+		if time.Now().After(deadline) {
+			f.t.Fatalf("%s not reached; main received %s", what, got())
+		}
 		f.clk.BlockUntil(f.t, 1)
 		f.clk.Advance(time.Minute)
 		waitFor(f.t, what, func() bool { return cond() || f.clk.PendingTimers() > 0 })
@@ -627,7 +631,8 @@ func TestBirthsAgainOnOutputReconnection(t *testing.T) {
 	f.waitStatus("main backing off", outputState("main", "backoff"))
 
 	// Move the clock until the backoff ends and the batch is resent.
-	f.advanceUntil("the birth resent and the reconnection birth", func() bool { return len(f.be.got("main")) >= 2 })
+	f.advanceUntil("the birth resent and the reconnection birth", func() bool { return len(f.be.got("main")) >= 2 },
+		func() string { return fmt.Sprintf("%q", f.be.got("main")) })
 
 	if got := f.be.got("main"); !reflect.DeepEqual(got, []string{birthA1, birthA1}) {
 		t.Fatalf("main received %q, want the birth then the reconnection birth", got)
@@ -748,7 +753,8 @@ func TestRollbackOfAChangedOutputKeepsItsBufferAndSeq(t *testing.T) {
 		t.Fatalf("main runs %s, want the previous configuration", got)
 	}
 
-	f.advanceUntil("the buffered sample after the rollback", func() bool { return slices.Contains(f.be.got("main"), "a1/state") })
+	f.advanceUntil("the buffered sample after the rollback", func() bool { return slices.Contains(f.be.got("main"), "a1/state") },
+		func() string { return fmt.Sprintf("%q", f.be.got("main")) })
 	seqs := f.be.seqsOf("main")
 	for i := 1; i < len(seqs); i++ {
 		if seqs[i] != seqs[i-1]+1 {

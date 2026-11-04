@@ -76,7 +76,13 @@ func (p installedPlugin) read(t *testing.T, name string) string {
 func (p installedPlugin) waitFile(t *testing.T, name, what string, cond func(string) bool) {
 	t.Helper()
 
-	waitFor(t, fmt.Sprintf("%s of plugin %s: %s", name, p.id, what), func() bool { return cond(p.read(t, name)) })
+	deadline := time.Now().Add(guard)
+	for !cond(p.read(t, name)) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s of plugin %s: %s not reached:\n%s", name, p.id, what, p.read(t, name))
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // waitFor polls cond every millisecond until it holds; guard bounds the
@@ -114,7 +120,8 @@ func withRestartClock(c *restartClock) fixtureOption {
 // Sleep is clock.Fake's Sleep, counting a host restart wait once its timer
 // is pending. It mirrors clock.Fake.Sleep. A restart wait is the host's
 // driverkit.Backoff, which draws at least BackoffMin/2; the only other
-// sleepers in these tests are the plugin busy waits of busyWait (100 ms), so
+// sleepers in these tests are the plugin busy waits of busyWait (100 ms;
+// plugin.TestBusyWaitStaysBelowBackoffFloor guards the gap), so
 // the duration tells them apart and no stack frame is read. The count cannot
 // come from BlockUntil: the hosts' health, memory and deadline timers are
 // pending too.
