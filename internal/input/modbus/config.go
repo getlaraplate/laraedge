@@ -106,7 +106,7 @@ func ParseConnection(raw json.RawMessage) (Connection, error) {
 	}
 	for _, key := range sortedKeys(fields) {
 		if !slices.Contains(connectionFields, key) {
-			return Connection{}, unknownField(key)
+			return Connection{}, docrules.UnknownKey("connection.", key)
 		}
 	}
 
@@ -264,16 +264,6 @@ func integer(v json.RawMessage, lo, hi int64) (int64, error) {
 		return 0, errors.New("out of range")
 	}
 	return n, nil
-}
-
-// unknownField refuses an unknown connection key. The key is named only when it
-// has the shape of a document key (docrules.IsSafeKey), otherwise it shows as
-// `*`: a secret written as a key must not reach a log.
-func unknownField(key string) error {
-	if !docrules.IsSafeKey(key) {
-		key = "*"
-	}
-	return errors.New("connection." + key + ": unknown field")
 }
 
 func sortedKeys(m map[string]json.RawMessage) []string {

@@ -108,7 +108,7 @@ func ParseConnection(raw json.RawMessage) (Connection, error) {
 	}
 	for _, key := range sortedKeys(fields) {
 		if !slices.Contains(connectionFields, key) {
-			return Connection{}, unknownField("connection.", key)
+			return Connection{}, docrules.UnknownKey("connection.", key)
 		}
 	}
 
@@ -211,7 +211,7 @@ func parseAuth(raw json.RawMessage, conn *Connection) error {
 	}
 	for _, key := range sortedKeys(fields) {
 		if !slices.Contains(authFields, key) {
-			return unknownField("connection.auth.", key)
+			return docrules.UnknownKey("connection.auth.", key)
 		}
 	}
 	if err := stringField(fields, "connection.auth.user", "user", &conn.User); err != nil {
@@ -246,16 +246,6 @@ func stringField(fields map[string]json.RawMessage, name, key string, dst *strin
 		return errors.New(name + ": must be a string")
 	}
 	return nil
-}
-
-// unknownField refuses an unknown key under prefix. The key is named only when
-// it has the shape of a document key (docrules.IsSafeKey), otherwise it shows
-// as `*`: a secret written as a key must not reach a log.
-func unknownField(prefix, key string) error {
-	if !docrules.IsSafeKey(key) {
-		key = "*"
-	}
-	return errors.New(prefix + key + ": unknown field")
 }
 
 func sortedKeys(m map[string]json.RawMessage) []string {
