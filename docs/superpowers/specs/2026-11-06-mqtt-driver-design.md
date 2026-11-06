@@ -112,7 +112,9 @@ session, since a broker may have lost it. `laraplate_edge_input_connected{input}
 - A device with `availability`: the `offline` payload is its death at once, for that device only. The `online`
   payload, or its first sample if no `online` came (a Last Will that is not retained is seen only when it changes),
   is its birth.
-- A device without `availability`: birth at its first sample after the connection.
+- Every device not held dead by its availability topic is alive while the broker is connected: the input renews it on
+  connection and then every half `death_tolerance`, so silence never kills it and the reconnection gives its birth at
+  once (amended 2026-11-06 by plan 1, decision Q2: the core's lifecycle kills a device without reads).
 - An availability payload that is neither `online` nor `offline` is ignored and counted with kind `availability`.
 
 **Configuration changes:** stopping an input for a reload disconnects without unsubscribing, so the persistent
@@ -190,8 +192,8 @@ names and types in the `…|metric` form.
 **Plans, in order:**
 
 1. **`mqtt` with JSON and plain payloads:** connection and TLS, addresses, subscriptions, conversions,
-   timestamps, availability, `probe`, `browse`, the JSON Schema of the connection, `CheckBuild` no longer refusing
-   `mqtt`. The adoption of paho (under BSD-3-Clause) and mochi is approved by the user in this plan.
+   timestamps, availability, `probe`, `browse`, the validation of the connection by the driver's factory (the schema
+   keeps `connection` open, as for `modbus`), `CheckBuild` no longer refusing `mqtt`. The adoption of paho (under BSD-3-Clause) and mochi is approved by the user in this plan.
 2. **Sparkplug B:** the format, the decoder, birth and death, aliases, `seq` and `bdSeq`, `rebirth`, `browse` for
    Sparkplug.
 
