@@ -10,18 +10,29 @@ import (
 	"github.com/getlaraplate/laraedge/internal/atomicfile"
 )
 
-// topicsFile is the name of the file holding the subscription set of an
-// input, under data_dir/inputs/{input_id} (decision Q7).
-const topicsFile = "mqtt-topics.json"
+// The subscription set of an input is data_dir/mqtt/topics/{input_id}.json
+// (decision Q7, amended by the final review). It stays outside
+// data_dir/inputs/{input_id}, which the supervisor deletes on a rollback and
+// when an input leaves the document: the set must survive both, or a topic
+// subscribed by a document that was rolled back would stay in the persistent
+// session with no record of it.
+const (
+	topicsSubdir    = "mqtt/topics"
+	topicsExtension = ".json"
+)
 
 // errNoDataDir is the reason the subscription set is not kept: without a
 // data directory the input never unsubscribes a topic it no longer uses.
 var errNoDataDir = errors.New("mqtt: data_dir unknown, the subscription set is not kept")
 
-// topicsDir is the directory of the subscription set of input id, the one
-// the transform state of the input already uses.
-func topicsDir(dataDir, id string) string {
-	return filepath.Join(dataDir, "inputs", id)
+// topicsDir is the directory of the subscription sets of every input.
+func topicsDir(dataDir string) string {
+	return filepath.Join(dataDir, filepath.FromSlash(topicsSubdir))
+}
+
+// topicsFile is the name of the subscription set of input id.
+func topicsFile(id string) string {
+	return id + topicsExtension
 }
 
 // readTopics returns the subscription set the input last wrote. A missing
@@ -32,7 +43,7 @@ func readTopics(dataDir, id string) ([]string, error) {
 		return nil, errNoDataDir
 	}
 
-	data, err := os.ReadFile(filepath.Join(topicsDir(dataDir, id), topicsFile))
+	data, err := os.ReadFile(filepath.Join(topicsDir(dataDir), topicsFile(id)))
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +63,7 @@ func writeTopics(dataDir, id string, topics []string) error {
 		return errNoDataDir
 	}
 
-	dir := topicsDir(dataDir, id)
+	dir := topicsDir(dataDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -62,7 +73,7 @@ func writeTopics(dataDir, id string, topics []string) error {
 		return err
 	}
 
-	return atomicfile.Write(dir, topicsFile, data)
+	return atomicfile.Write(dir, topicsFile(id), data)
 }
 
 // staleTopics returns the topics of old that are not in current, sorted

@@ -1,6 +1,8 @@
 package mqtt
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -331,6 +333,62 @@ func TestInputReloadDropsATopic(t *testing.T) {
 	}
 	if got := samplesOf(next.snapshot(), "temp"); len(got) != 0 {
 		t.Errorf("temp samples emitted: %+v", got)
+	}
+	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count"}) {
+		t.Errorf("subscription set = %q, %v", got, err)
+	}
+}
+
+// TestInputRollbackUnsubscribesTheFailedDocumentTopics replays a rollback:
+// the input of a new document subscribes an extra topic and writes the
+// subscription set, the supervisor deletes data_dir/inputs/{id}, and the
+// input of the previous document starts again. It finds the set, which lives
+// outside that directory, and unsubscribes the topic only the failed
+// document used.
+func TestInputRollbackUnsubscribesTheFailedDocumentTopics(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{})
+	dataDir := t.TempDir()
+	opts := Options{DataDir: dataDir, AgentID: "agent"}
+
+	previous := mqttInput(t, "line", b, nil, device("press", subscribePoint("count", "plant/press/count", "int32")))
+	first := newHarness(t, previous, opts)
+	first.start()
+	first.serving()
+	first.close()
+
+	failed := mqttInput(t, "line", b, nil, device("press",
+		subscribePoint("count", "plant/press/count", "int32"),
+		subscribePoint("extra", "plant/press/extra", "float64"),
+	))
+	second := newHarness(t, failed, opts)
+	second.start()
+	second.serving()
+	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count", "plant/press/extra"}) {
+		t.Fatalf("subscription set of the failed document = %q, %v", got, err)
+	}
+	second.close()
+
+	// The rollback removes the transform state of the restarted input.
+	inputState := filepath.Join(dataDir, "inputs", "line")
+	if err := os.MkdirAll(inputState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(inputState); err != nil {
+		t.Fatal(err)
+	}
+
+	restored := newHarness(t, previous, opts)
+	restored.start()
+	restored.serving()
+
+	// Published in this order on one connection: had extra still been
+	// subscribed, its message would arrive before the count sample.
+	b.Publish("plant/press/extra", []byte("1.5"), false, 1)
+	b.Publish("plant/press/count", []byte("7"), false, 1)
+	restored.waitValue("count", model.IntValue(7))
+
+	if n := restored.in.Health().ReadErrors[KindUnmapped]; n != 0 {
+		t.Errorf("unmapped = %d, want 0: the failed document's topic stayed subscribed", n)
 	}
 	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count"}) {
 		t.Errorf("subscription set = %q, %v", got, err)

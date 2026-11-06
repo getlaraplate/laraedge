@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -177,6 +178,10 @@ func TestTopicsFile(t *testing.T) {
 	got, err := readTopics(dir, "line")
 	if err != nil || !slices.Equal(got, []string{"a", "b/c"}) {
 		t.Fatalf("readTopics = %q, %v", got, err)
+	}
+	// Outside data_dir/inputs/{id}, which the supervisor prunes (Q7 amended).
+	if _, err := os.Stat(filepath.Join(dir, "mqtt", "topics", "line.json")); err != nil {
+		t.Errorf("subscription set not at data_dir/mqtt/topics/line.json: %v", err)
 	}
 
 	if got := staleTopics([]string{"z", "a", "b", "a"}, []string{"b"}); !slices.Equal(got, []string{"a", "z"}) {
