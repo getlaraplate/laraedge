@@ -40,9 +40,9 @@ type PathPreview struct {
 
 // BrowseEntry is one topic seen by browse. Messages counts what arrived;
 // Retained and Size are those of the last message. For a JSON object or
-// list, Paths lists its leaves in payload order (at most 100); otherwise, and
-// for a payload above max_payload nothing, Text is the escaped preview of the
-// payload. Topic and the previews hold the raw text: escape the topic with
+// list, Paths lists its leaves sorted, object keys by name and list items by
+// index (at most 100); otherwise, and for a payload above max_payload
+// nothing, Text is the escaped preview of the payload. Topic and the previews hold the raw text: escape the topic with
 // Escape before printing it.
 type BrowseEntry struct {
 	Topic    string
