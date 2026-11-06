@@ -127,3 +127,13 @@ func TestBrowseFlagsBelongToTheirDriver(t *testing.T) {
 		}
 	}
 }
+
+// TestMQTTExampleValidates: the document of examples/mqtt is accepted
+// offline, the factory's checks of the connection, the addresses and the
+// availability topic included.
+func TestMQTTExampleValidates(t *testing.T) {
+	r := runCLI(t, "", "config", "validate", filepath.Join("..", "..", "examples", "mqtt", "config.yaml"))
+	if r.code != exitOK || !strings.HasSuffix(strings.TrimSpace(r.stdout), ": valid") {
+		t.Errorf("config validate = %d, stdout %q, stderr %q, want exit 0 and valid", r.code, r.stdout, r.stderr)
+	}
+}
