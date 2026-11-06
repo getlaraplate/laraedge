@@ -44,6 +44,12 @@ func TestFactoryValidatesWithoutConnecting(t *testing.T) {
 			p.Read = config.Read{Mode: config.ReadPoll, Interval: time.Second}
 			c.Devices = []config.Device{device("press", p)}
 		}, `mqtt input "line": devices.0.points.0: read: want subscribe`},
+		{"availability on a point topic", func(c *config.Input) {
+			c.Connection = json.RawMessage(`{"broker":"mqtt://192.0.2.1","availability":[{"device":"press","topic":"plant/press/temp","online":"1","offline":"0"}]}`)
+		}, `mqtt input "line": connection.availability[0].topic: also the topic of a point`},
+		{"topics key no point uses", func(c *config.Input) {
+			c.Connection = json.RawMessage(`{"broker":"mqtt://192.0.2.1","topics":{"plant/press/tmep":{}}}`)
+		}, `mqtt input "line": connection.topics: a key is not the topic of a point`},
 		{"missing type", func(c *config.Input) {
 			c.Devices = []config.Device{device("press", subscribePoint("a", "plant/ok", ""))}
 		}, `mqtt input "line": devices.0.points.0: type: required`},

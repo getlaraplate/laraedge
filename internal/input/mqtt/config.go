@@ -158,6 +158,7 @@ const (
 	keepAliveShape  = "connection.keepalive: want a positive duration such as 30s"
 	maxPayloadShape = "connection.max_payload: want 1 byte to 16MiB, as bytes or a size such as 256KiB"
 	topicsKeyShape  = "connection.topics: topic must be non-empty without + or #"
+	topicsKeyUnused = "connection.topics: a key is not the topic of a point"
 	notInThisBuild  = ": not available in this build"
 )
 
@@ -222,14 +223,14 @@ func ParseConnection(raw json.RawMessage, cfg config.Input) (Connection, error) 
 		conn.Timestamp = spec
 	}
 	if v, ok := fields["topics"]; ok {
-		topics, err := parseTopics(v)
+		topics, err := parseTopics(v, pointTopics(cfg))
 		if err != nil {
 			return Connection{}, err
 		}
 		conn.Topics = topics
 	}
 	if v, ok := fields["availability"]; ok {
-		availability, err := parseAvailability(v, cfg)
+		availability, err := parseAvailability(v, cfg, pointTopics(cfg))
 		if err != nil {
 			return Connection{}, err
 		}
@@ -489,9 +490,27 @@ func parseTimestamp(raw json.RawMessage, name string) (*TimestampSpec, error) {
 	return &spec, nil
 }
 
-// parseTopics decodes `topics`: per-topic overrides keyed by a concrete topic.
-// The topic is never named in an error, since it comes from the document.
-func parseTopics(raw json.RawMessage) (map[string]TopicOverride, error) {
+// pointTopics returns the topics of the points of cfg, or nil when an
+// address does not parse: the point check then refuses the document with its
+// own message, so the cross checks against point topics are skipped.
+func pointTopics(cfg config.Input) map[string]bool {
+	topics := make(map[string]bool)
+	for _, dev := range cfg.Devices {
+		for _, p := range dev.Points {
+			addr, err := ParseAddress(p.Address)
+			if err != nil {
+				return nil
+			}
+			topics[addr.Topic] = true
+		}
+	}
+	return topics
+}
+
+// parseTopics decodes `topics`: per-topic overrides keyed by a concrete topic
+// that a point of the input uses (pointTopics; nil skips that check). The
+// topic is never named in an error, since it comes from the document.
+func parseTopics(raw json.RawMessage, pointTopics map[string]bool) (map[string]TopicOverride, error) {
 	entries, err := objectFields(raw, "connection.topics")
 	if err != nil {
 		return nil, err
@@ -518,14 +537,19 @@ func parseTopics(raw json.RawMessage) (map[string]TopicOverride, error) {
 			}
 			override.Timestamp = spec
 		}
+		if pointTopics != nil && !pointTopics[topic] {
+			return nil, errors.New(topicsKeyUnused)
+		}
 		topics[topic] = override
 	}
 	return topics, nil
 }
 
 // parseAvailability decodes `availability`: a list of entries, at most one per
-// device, each naming a device of cfg.
-func parseAvailability(raw json.RawMessage, cfg config.Input) (map[string]Availability, error) {
+// device, each naming a device of cfg on a topic no point uses (pointTopics;
+// nil skips that check): the router gives an availability topic to the
+// tracker only, so a point on it would never have a sample.
+func parseAvailability(raw json.RawMessage, cfg config.Input, pointTopics map[string]bool) (map[string]Availability, error) {
 	var entries []json.RawMessage
 	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil {
 		return nil, errors.New("connection.availability: must be a list")
@@ -536,6 +560,9 @@ func parseAvailability(raw json.RawMessage, cfg config.Input) (map[string]Availa
 		device, a, err := parseAvailabilityEntry(entry, name, cfg)
 		if err != nil {
 			return nil, err
+		}
+		if pointTopics[a.Topic] {
+			return nil, errors.New(name + ".topic: also the topic of a point")
 		}
 		if _, dup := result[device]; dup {
 			return nil, errors.New(name + ".device: already has an availability entry")

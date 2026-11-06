@@ -10,10 +10,13 @@ import (
 	"github.com/getlaraplate/laraedge/internal/config"
 )
 
+// testInput is an input whose devices each have one point on topic plant/a.
 func testInput(devices ...string) config.Input {
 	in := config.Input{ID: "broker", Driver: config.DriverMQTT}
 	for _, d := range devices {
-		in.Devices = append(in.Devices, config.Device{Device: d})
+		in.Devices = append(in.Devices, config.Device{Device: d, Points: []config.Point{
+			{Signal: "v", Address: "plant/a|" + d, Type: "float64"},
+		}})
 	}
 	return in
 }
@@ -259,6 +262,8 @@ func TestParseConnectionRefusals(t *testing.T) {
 		{"availability topic wildcard", `{"broker":"mqtt://b","availability":[{"device":"d","topic":"a/#","online":"1","offline":"0"}]}`, []string{"d"}, "connection.availability[0].topic: must not contain + or #"},
 		{"availability online empty", `{"broker":"mqtt://b","availability":[{"device":"d","topic":"t","online":"","offline":"0"}]}`, []string{"d"}, "connection.availability[0].online: required"},
 		{"availability offline missing", `{"broker":"mqtt://b","availability":[{"device":"d","topic":"t","online":"1"}]}`, []string{"d"}, "connection.availability[0].offline: required"},
+		{"topics key no point uses", `{"broker":"mqtt://b","topics":{"plant/a":{},"plant/b":{}}}`, []string{"d"}, "connection.topics: a key is not the topic of a point"},
+		{"availability topic of a point", `{"broker":"mqtt://b","availability":[{"device":"d","topic":"plant/a","online":"1","offline":"0"}]}`, []string{"d"}, "connection.availability[0].topic: also the topic of a point"},
 		{"availability online equals offline", `{"broker":"mqtt://b","availability":[{"device":"d","topic":"t","online":"x","offline":"x"}]}`, []string{"d"}, "connection.availability[0].offline: must differ from online"},
 	}
 	for _, tt := range tests {
