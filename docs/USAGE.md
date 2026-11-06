@@ -416,9 +416,9 @@ laraplate-edge browse broker --config config.yaml --bootstrap bootstrap.yaml --f
 ```
 plant/furnace-02/door  3 msg  4 B  -  true
 plant/press-07/state  5 msg  58 B  retained
-  plant/press-07/state|running  true
-  plant/press-07/state|force.kn  182.5
   plant/press-07/state|counters.0  4121
+  plant/press-07/state|force.kn  182.5
+  plant/press-07/state|running  true
 plant/press-07/status  1 msg  6 B  retained  online
 ```
 
@@ -429,7 +429,7 @@ plant/press-07/status  1 msg  6 B  retained  online
 - One line per topic seen, sorted by topic: the topic, the number of messages, the size of the last message,
   `retained` or `-` (the retained flag of the last message) and, for a payload that is not JSON, a preview of
   the text. Bytes that are not printable are escaped (`\x00`), so a payload cannot disturb the terminal.
-- For a JSON object or list, the topic line is followed by one indented line per leaf: the address, already in
+- For a JSON object or list, the topic line is followed by one indented line per leaf, sorted by path: the address, already in
   the `topic|path` form to copy into the `address` of a point, and a preview of the value (a string quoted).
   A preview is at most 40 characters and ends in `...` when cut. At most 100 leaves are listed per topic. A
   key that is empty or contains a dot has no path and is skipped. A payload above the input's `max_payload` is
@@ -558,7 +558,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
 | `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down; only inputs that run and keep a connection: the series of an input that failed or was removed ends (a stale series to Prometheus), so alert on `input_up == 0` for a failed input |
-| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); an `mqtt` input has its own kinds, `connection`, `payload_too_large`, `malformed_json`, `bad_timestamp`, `conversion`, `availability` and `unmapped` (CONFIGURATION.md, "The `mqtt` driver"), whose series appear at their first count; for the other drivers all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
+| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, for every input that reports its health (an `mqtt` input counts only `connection` among them); an `mqtt` input adds the kinds `payload_too_large`, `malformed_json`, `bad_timestamp`, `conversion`, `availability` and `unmapped` (CONFIGURATION.md, "The `mqtt` driver"), whose series appear at their first count; the series restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
 | `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |

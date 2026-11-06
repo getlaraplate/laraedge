@@ -606,8 +606,10 @@ session is dropped and counted as `unmapped`, never emitted. The subscriptions a
 connection, whether or not the broker kept the session.
 
 **Read errors.** `read_errors` of `/status` and `laraplate_edge_input_read_errors_total{input, kind}` use the
-kinds below. Unlike the other drivers' kinds, which exist from the start at 0, the `mqtt` kinds appear at their
-first count.
+kinds below. Like every input that reports its health, an `mqtt` input shows `timeout`, `connection`,
+`exception` and `decode` from the start, at 0; this driver counts only `connection` among them and never
+`timeout`, `exception` or `decode`. The kinds specific to `mqtt` (`payload_too_large`, `malformed_json`,
+`bad_timestamp`, `conversion`, `availability`, `unmapped`) appear at their first count.
 
 | Kind | Counts |
 |---|---|
