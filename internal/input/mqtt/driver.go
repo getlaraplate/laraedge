@@ -39,9 +39,8 @@ type SecretResolver interface {
 const clientIDPrefix = "laraplate-edge-"
 
 var (
-	errNoResolver   = errors.New("mqtt: no secret resolver for the password")
-	errPassword     = errors.New("mqtt: the password reference cannot be resolved")
-	errProbeMissing = errors.New("mqtt: probe is not available")
+	errNoResolver = errors.New("mqtt: no secret resolver for the password")
+	errPassword   = errors.New("mqtt: the password reference cannot be resolved")
 )
 
 // Factory returns the factory of MQTT inputs. It validates the connection
@@ -232,12 +231,6 @@ func (in *Input) Close() error {
 // Health returns the connection state and the read errors of the input.
 func (in *Input) Health() edgeinput.Health {
 	return in.health.Snapshot()
-}
-
-// Probe is not available yet: it always fails (the probe command of the
-// driver comes with its own client id, decision Q9).
-func (in *Input) Probe(_ context.Context) ([]model.Sample, error) {
-	return nil, fmt.Errorf("mqtt input %q: %w", in.cfg.ID, errProbeMissing)
 }
 
 // topics returns the subscription set of the input: the topics of the plan

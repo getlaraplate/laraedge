@@ -52,14 +52,25 @@ commands:
                              last valid one in the bootstrap's data_dir;
                              --record writes the raw samples as JSON Lines;
                              a plugin:<id> input starts its plugin for the
-                             probe
+                             probe; an mqtt input waits up to 30 s for a
+                             message on every topic and prints "no message"
+                             for a point whose topic stayed silent
   browse <input> (--config <file> | --bootstrap <path>) [--node <nodeid>] [--depth <n>]
+         [--filter <topic filter>] [--duration <1s-5m>]
                              list the nodes of an OPC UA server, or of a
                              plugin:<id> input whose plugin.json declares
                              browse, indented by depth, from the Objects
                              folder or --node (nsu=<uri>;<id> works);
                              --depth 1 to 10, default 2; stops after 1000
                              nodes; reads no value
+                             an mqtt input takes --filter (default #) and
+                             --duration (default 10s) instead of --node and
+                             --depth: it collects messages for that long and
+                             prints, per topic sorted, "<topic>  <n> msg
+                             <size> B  <retained|->" with a preview of a plain
+                             payload, or one "  <topic>|<path>  <value>" line
+                             per JSON leaf; previews are 40 characters at
+                             most; stops after 1000 topics
   opcua trust <input> (--config <file> | --bootstrap <path>) [--thumbprint <hex>]
                              show the certificate an OPC UA server presents and
                              trust it after a yes on stdin, or without asking

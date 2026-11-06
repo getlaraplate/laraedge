@@ -84,6 +84,14 @@ type pahoClient struct {
 // not a connection failure. password is the resolved value of conn.Auth's
 // reference; onMessage receives a copy of every payload.
 func newPahoClient(conn Connection, clientID, password string, cleanSession bool, onMessage func(topic string, payload []byte)) (client, error) {
+	return newPahoClientRetained(conn, clientID, password, cleanSession, func(topic string, payload []byte, _ bool) {
+		onMessage(topic, payload)
+	})
+}
+
+// newPahoClientRetained is newPahoClient for a receiver that also wants the
+// retain flag of a message (browse).
+func newPahoClientRetained(conn Connection, clientID, password string, cleanSession bool, onMessage func(topic string, payload []byte, retained bool)) (client, error) {
 	broker, err := brokerAddress(conn)
 	if err != nil {
 		return nil, err
@@ -101,7 +109,7 @@ func newPahoClient(conn Connection, clientID, password string, cleanSession bool
 		SetAutoReconnect(false).
 		SetConnectRetry(false).
 		SetDefaultPublishHandler(func(_ paho.Client, m paho.Message) {
-			onMessage(m.Topic(), append([]byte(nil), m.Payload()...))
+			onMessage(m.Topic(), append([]byte(nil), m.Payload()...), m.Retained())
 		}).
 		SetConnectionLostHandler(func(paho.Client, error) {
 			select {

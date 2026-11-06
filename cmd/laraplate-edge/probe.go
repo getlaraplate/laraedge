@@ -27,8 +27,9 @@ import (
 	"github.com/getlaraplate/laraedge/internal/transform"
 )
 
-// probeTimeout bounds the one read of every point.
-const probeTimeout = 30 * time.Second
+// probeTimeout bounds the one read of every point. A variable so the tests
+// can shorten the wait for a silent mqtt topic.
+var probeTimeout = 30 * time.Second
 
 // runProbe runs "probe <input>" (decision P8): it builds the input the
 // document names through the driver registry of run, reads every point once
@@ -92,6 +93,9 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 	for _, s := range samples {
 		fmt.Fprintf(&out, "%s\t%s\t%s\t%s\t%s\n", s.Device, s.Signal, formatValue(s.Value), kindName(s.Value.Kind), s.Quality)
 	}
+	for _, p := range pointsWithoutSample(doc, positional[0], samples) {
+		fmt.Fprintf(&out, "%s\t%s\t%s\n", p[0], p[1], probeNoMessage)
+	}
 	fmt.Fprintf(&out, "response time: %s\n", elapsed.Round(time.Microsecond))
 	if _, err := stdout.Write(out.Bytes()); err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge probe: write the samples: %v\n", err)
@@ -99,6 +103,31 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return exitOK
+}
+
+// probeNoMessage stands, in a probe line, for the value, the type and the
+// quality of a point the driver returned no sample for (an mqtt topic that
+// stayed silent until the timeout).
+const probeNoMessage = "no message"
+
+// pointsWithoutSample returns the device and signal of the points of input id
+// that have no sample, in the order of the document.
+func pointsWithoutSample(doc config.Document, id string, samples []model.Sample) [][2]string {
+	i := slices.IndexFunc(doc.Inputs, func(in config.Input) bool { return in.ID == id })
+	if i < 0 {
+		return nil
+	}
+
+	var missing [][2]string
+	for _, dev := range doc.Inputs[i].Devices {
+		for _, p := range dev.Points {
+			if !slices.ContainsFunc(samples, func(s model.Sample) bool { return s.Device == dev.Device && s.Signal == p.Signal }) {
+				missing = append(missing, [2]string{dev.Device, p.Signal})
+			}
+		}
+	}
+
+	return missing
 }
 
 // probeDocument returns the document to probe and the bootstrap the driver
@@ -133,15 +162,16 @@ func probeDocument(configFile, bootstrapPath string) (doc config.Document, boot 
 
 // probeBootstrap completes boot when the document comes from --config and a
 // --bootstrap is given too: an opcua input takes data_dir (its certificate)
-// and agent_id (its application URI) from the bootstrap (ruling R9). For the
-// other drivers the bootstrap is not read, as --config wins over it.
+// and agent_id (its application URI) from the bootstrap (ruling R9), an mqtt
+// input its agent_id (the default client id). For the other drivers the
+// bootstrap is not read, as --config wins over it.
 func probeBootstrap(doc config.Document, boot bootstrap.File, id, configFile, bootstrapPath string) (bootstrap.File, error) {
 	if configFile == "" || bootstrapPath == "" {
 		return boot, nil
 	}
 
 	i := slices.IndexFunc(doc.Inputs, func(in config.Input) bool { return in.ID == id })
-	if i < 0 || doc.Inputs[i].Driver != config.DriverOPCUA {
+	if i < 0 || (doc.Inputs[i].Driver != config.DriverOPCUA && doc.Inputs[i].Driver != config.DriverMQTT) {
 		return boot, nil
 	}
 

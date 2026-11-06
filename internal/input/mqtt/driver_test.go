@@ -156,16 +156,6 @@ func TestStartAndCloseStates(t *testing.T) {
 	}
 }
 
-func TestProbeIsNotAvailableYet(t *testing.T) {
-	in, err := New(config.Input{ID: "line", Connection: json.RawMessage(`{"broker":"mqtt://192.0.2.1"}`), Devices: []config.Device{device("press", subscribePoint("temp", "t", "float64"))}}, clock.Real(), Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := in.Probe(t.Context()); !errors.Is(err, errProbeMissing) {
-		t.Fatalf("Probe error = %v, want errProbeMissing", err)
-	}
-}
-
 func TestTopicsFile(t *testing.T) {
 	dir := t.TempDir()
 
