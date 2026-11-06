@@ -145,6 +145,36 @@ func TestInputBrokerOutageKillsAndRevivesTheDevices(t *testing.T) {
 	}
 }
 
+// TestInputOutageShorterThanTheTolerance loses the broker just before the
+// next keep-alive, when the last renewal is almost half a tolerance old: the
+// loss renews the devices, so an outage shorter than the tolerance kills
+// nothing and one beyond it still does.
+func TestInputOutageShorterThanTheTolerance(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{})
+	cfg := mqttInput(t, "line", b, nil, device("press", subscribePoint("count", "plant/press/count", "int32")))
+	h := newHarness(t, cfg, Options{})
+	h.start()
+	h.serving()
+
+	h.clk.Advance(testTolerance/2 - time.Second)
+	h.clk.BlockUntil(t, idleTimers)
+	b.Stop()
+	h.waitEvent(traceDown)
+
+	// 9 s after the loss, 13 s after the last periodic renewal: the
+	// lifecycle checks (its timer fires) and finds the press alive.
+	h.clk.BlockUntil(t, idleTimers)
+	h.clk.Advance(testTolerance - time.Second)
+	h.waitEvent(traceDown)
+	h.clk.BlockUntil(t, idleTimers)
+	if records := h.snapshot(); len(records) != 0 {
+		t.Fatalf("records of an outage shorter than the tolerance: %s", describe(records))
+	}
+
+	h.clk.Advance(2 * time.Second)
+	h.waitEvents(model.Death, 1, "press")
+}
+
 func TestInputUnreachableBrokerAtStart(t *testing.T) {
 	b := mqtttest.Start(t, mqtttest.Options{})
 	b.Stop()

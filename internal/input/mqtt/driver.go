@@ -207,8 +207,9 @@ func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 // so a persistent session keeps the messages published meanwhile (spec
 // section 5), and the goroutines are waited for. A connection attempt in
 // flight is abandoned and closed by the library in the background; a
-// message it may still deliver is dropped. After Close returns emit is never
-// called. It is safe on an input never started and when called twice.
+// message it may still deliver is dropped; paho has acknowledged a QoS 1
+// one already, so the broker does not send it again. After Close returns
+// emit is never called. It is safe on an input never started and when called twice.
 func (in *Input) Close() error {
 	in.mu.Lock()
 	in.closed = true

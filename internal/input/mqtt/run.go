@@ -142,9 +142,10 @@ func (in *Input) unsubscribeStale(ctx context.Context, c client, topics []string
 	return c.Unsubscribe(ctx, staleTopics(old, topics))
 }
 
-// keepAlive renews every device not held dead by its availability topic now
-// and then every half death tolerance on the clock (decision Q2), until the
-// connection is lost (errConnectionLost) or the input stops (ctx.Err()).
+// keepAlive renews every device not held dead by its availability topic now,
+// then every half death tolerance on the clock and once more when the
+// connection is lost (decision Q2), until the connection is lost
+// (errConnectionLost) or the input stops (ctx.Err()).
 func (in *Input) keepAlive(ctx context.Context, lost <-chan struct{}, tracker *Tracker) error {
 	tracker.KeepAlive()
 
@@ -162,7 +163,17 @@ func (in *Input) keepAlive(ctx context.Context, lost <-chan struct{}, tracker *T
 		case <-ctx.Done():
 			timer.Stop()
 
-			return lostOr(lost, ctx.Err())
+			// A lost connection renews the devices once more: the last
+			// renewal may be up to half a tolerance old, and only an outage
+			// beyond the tolerance kills them (decision Q2). Close does not.
+			select {
+			case <-lost:
+				tracker.KeepAlive()
+
+				return errConnectionLost
+			default:
+				return ctx.Err()
+			}
 		case <-timer.C():
 			tracker.KeepAlive()
 		}
