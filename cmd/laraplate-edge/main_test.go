@@ -177,6 +177,8 @@ func TestConfigValidate(t *testing.T) {
 	writeFile(t, badAddress, driversDoc("hr:70000"))
 	opcuaOffline := filepath.Join(dir, "opcua.yaml")
 	writeFile(t, opcuaOffline, opcuaDoc)
+	mqttOffline := filepath.Join(dir, "mqtt.yaml")
+	writeFile(t, mqttOffline, mqttDoc)
 
 	tests := []struct {
 		name       string
@@ -228,6 +230,14 @@ func TestConfigValidate(t *testing.T) {
 			wantStderr: []string{
 				opcuaOffline + ": inputs.0: opcua input \"press\": devices.0.points.1: address: namespace index: want an integer from 0 to 65535\n",
 				opcuaOffline + ": inputs.1: opcua input \"oven\": connection.auth: user and password need a security_policy other than None\n",
+			},
+		},
+		{
+			name:     "an MQTT address, offline",
+			file:     mqttOffline,
+			wantCode: 1,
+			wantStderr: []string{
+				mqttOffline + ": inputs.0: mqtt input \"line\": devices.0.points.1: address: topic: must not contain + or #\n",
 			},
 		},
 		{
@@ -305,6 +315,23 @@ inputs:
       - device: oven-02
         points:
           - {signal: temp, address: "ns=2;i=7", type: float64, read: subscribe}
+outputs:
+  - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
+`
+
+// mqttDoc is a document with an MQTT input whose second point has a
+// wildcard topic, which the driver refuses offline. The broker host never
+// resolves.
+const mqttDoc = `schema: laraplate-edge-config/1
+inputs:
+  - id: line
+    driver: mqtt
+    connection: {broker: 'mqtt://broker.example'}
+    devices:
+      - device: press-07
+        points:
+          - {signal: state, address: "plant/press/state|mode", type: string, read: subscribe}
+          - {signal: temp, address: "plant/+/temp", type: float64, read: subscribe}
 outputs:
   - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
 `
