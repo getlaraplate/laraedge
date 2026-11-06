@@ -4,3 +4,4 @@ Navigation aid only. Agent-only specs live here; specs spanning the backend and 
 (`../../../../docs/superpowers/specs/`, the parent being `2026-10-12-laraplate-edge-agent-design.md`).
 
 - `2026-10-19-transforms-modbus-opcua-design.md` (approved 2026-10-19; transforms built 2026-10-20, `modbus` built 2026-10-21, `opcua` built 2026-10-22): the level-1 transform catalogue, the `modbus` and `opcua` drivers, the driver kit, `probe` and `config test`; delivered by three plans: transforms (`../plans/2026-10-19-transforms.md`, closed), `modbus` (`../plans/2026-10-20-modbus.md`, closed), `opcua` (`../plans/2026-10-21-opcua.md`, closed).
+- `2026-11-06-mqtt-driver-design.md`: the `mqtt` input driver, with JSON and plain payloads and Sparkplug B; client library, addresses, availability and death, `probe` and `browse`; delivered by two plans, JSON and plain first (`../plans/2026-11-06-mqtt-json.md`), then Sparkplug B.
