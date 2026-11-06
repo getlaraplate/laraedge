@@ -20,7 +20,8 @@ import (
 const (
 	// KindMalformedJSON is a payload that is not valid JSON where a path needs it.
 	KindMalformedJSON = "malformed_json"
-	// KindBadTimestamp is a payload timestamp that is missing or unreadable.
+	// KindBadTimestamp is a payload timestamp that is missing, unreadable or
+	// outside 1970-01-01T00:00:00Z to the end of year 9999.
 	KindBadTimestamp = "bad_timestamp"
 	// KindConversion is a value that does not convert losslessly to the type.
 	KindConversion = "conversion"
@@ -307,24 +308,45 @@ const (
 	maxUnixMillis  = maxUnixSeconds * 1000
 )
 
-// parseTimestampValue reads a payload timestamp in the given format.
+// timestampCeiling is the first instant after the latest plausible payload
+// timestamp: the envelope writes a four-digit year (date-time), so year
+// 10000 would make the backend reject the whole batch.
+var timestampCeiling = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// plausibleTimestamp is the rule of the opcua driver (non-zero, not before
+// the Unix epoch) with the envelope's year 9999 as the upper bound: a
+// timestamp outside it is bad_timestamp, never a sample the backend refuses.
+func plausibleTimestamp(t time.Time) bool {
+	return !t.IsZero() && t.Unix() >= 0 && t.Before(timestampCeiling)
+}
+
+// parseTimestampValue reads a payload timestamp in the given format and
+// returns it in UTC; an implausible one is not ok.
 func parseTimestampValue(v any, format string) (time.Time, bool) {
+	var (
+		t  time.Time
+		ok bool
+	)
 	switch format {
 	case TimestampRFC3339:
-		s, ok := v.(string)
-		if !ok {
+		s, isString := v.(string)
+		if !isString {
 			return time.Time{}, false
 		}
-		t, err := time.Parse(time.RFC3339Nano, s)
-		return t, err == nil
+		parsed, err := time.Parse(time.RFC3339Nano, s)
+		t, ok = parsed.UTC(), err == nil
 	case TimestampUnixSeconds, TimestampUnixMillis:
-		num, ok := v.(json.Number)
-		if !ok {
+		num, isNumber := v.(json.Number)
+		if !isNumber {
 			return time.Time{}, false
 		}
-		return parseUnix(num.String(), format == TimestampUnixMillis)
+		t, ok = parseUnix(num.String(), format == TimestampUnixMillis)
 	}
-	return time.Time{}, false
+	if !ok || !plausibleTimestamp(t) {
+		return time.Time{}, false
+	}
+
+	return t, true
 }
 
 func parseUnix(s string, millis bool) (time.Time, bool) {

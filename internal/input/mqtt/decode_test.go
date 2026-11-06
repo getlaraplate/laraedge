@@ -200,6 +200,18 @@ func TestDecodeTimestamp(t *testing.T) {
 		{"nested path", TimestampSpec{"meta.ts", TimestampUnixSeconds}, `{"meta":{"ts":1793957415},"v":1}`, want, true},
 		{"missing field", TimestampSpec{"ts", TimestampUnixSeconds}, `{"v":1}`, time.Time{}, false},
 		{"malformed json", TimestampSpec{"ts", TimestampUnixSeconds}, `{"v":`, time.Time{}, false},
+		{"unix_s epoch", TimestampSpec{"ts", TimestampUnixSeconds}, `{"ts":0,"v":1}`, time.Unix(0, 0).UTC(), true},
+		{"unix_s end of 9999", TimestampSpec{"ts", TimestampUnixSeconds}, `{"ts":253402300799,"v":1}`, time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), true},
+		{"unix_s negative", TimestampSpec{"ts", TimestampUnixSeconds}, `{"ts":-1,"v":1}`, time.Time{}, false},
+		{"unix_s negative fraction", TimestampSpec{"ts", TimestampUnixSeconds}, `{"ts":-0.5,"v":1}`, time.Time{}, false},
+		{"unix_s far negative", TimestampSpec{"ts", TimestampUnixSeconds}, `{"ts":-100000000000,"v":1}`, time.Time{}, false},
+		{"unix_ms negative", TimestampSpec{"ts", TimestampUnixMillis}, `{"ts":-1000,"v":1}`, time.Time{}, false},
+		{"unix_ms after 9999", TimestampSpec{"ts", TimestampUnixMillis}, `{"ts":253402300800000,"v":1}`, time.Time{}, false},
+		{"rfc3339 before 1970", TimestampSpec{"ts", TimestampRFC3339}, `{"ts":"1969-12-31T23:59:59Z","v":1}`, time.Time{}, false},
+		{"rfc3339 offset before 1970", TimestampSpec{"ts", TimestampRFC3339}, `{"ts":"1970-01-01T00:30:00+01:00","v":1}`, time.Time{}, false},
+		{"rfc3339 offset into 10000", TimestampSpec{"ts", TimestampRFC3339}, `{"ts":"9999-12-31T23:00:00-05:00","v":1}`, time.Time{}, false},
+		{"rfc3339 last instant of 9999", TimestampSpec{"ts", TimestampRFC3339}, `{"ts":"9999-12-31T23:59:59.999Z","v":1}`, time.Date(9999, 12, 31, 23, 59, 59, 999000000, time.UTC), true},
+		{"rfc3339 zero time", TimestampSpec{"ts", TimestampRFC3339}, `{"ts":"0001-01-01T00:00:00Z","v":1}`, time.Time{}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
