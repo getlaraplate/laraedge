@@ -37,8 +37,10 @@ func newTestClient(t *testing.T, conn Connection, clientID, password string, cle
 	t.Helper()
 
 	messages := make(chan message, 16)
-	c, err := newPahoClient(conn, clientID, password, cleanSession, func(topic string, payload []byte) {
+	c, err := newPahoClient(conn, clientID, password, cleanSession, func(topic string, payload []byte) bool {
 		messages <- message{topic: topic, payload: string(payload)}
+
+		return true
 	})
 	if err != nil {
 		t.Fatalf("newPahoClient: %v", err)
@@ -104,6 +106,58 @@ func TestPahoClientReceivesAPublishedMessage(t *testing.T) {
 	got := receive(t, messages)
 	if got != (message{topic: "plant/line1/temp", payload: `{"v":21.5}`}) {
 		t.Errorf("message = %+v", got)
+	}
+}
+
+// TestPahoClientUnhandledMessageIsRedelivered: a QoS 1 message the receiver
+// did not handle (the router stopped by Close) is not acknowledged, so the
+// persistent session gives it to the next connection; a handled one is
+// acknowledged and not given again.
+func TestPahoClientUnhandledMessageIsRedelivered(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{})
+	conn := testConnection(b, SchemePlain)
+	ctx := testContext(t)
+
+	connect := func(handled bool) (client, <-chan message) {
+		messages := make(chan message, 16)
+		c, err := newPahoClient(conn, "unacked", "", false, func(topic string, payload []byte) bool {
+			messages <- message{topic: topic, payload: string(payload)}
+
+			return handled
+		})
+		if err != nil {
+			t.Fatalf("newPahoClient: %v", err)
+		}
+		t.Cleanup(c.Disconnect)
+		if _, err := c.Connect(ctx); err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+		if err := c.Subscribe(ctx, []string{"plant/count"}, 1); err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+
+		return c, messages
+	}
+
+	dropping, dropped := connect(false)
+	b.Publish("plant/count", []byte("1"), false, 1)
+	if got := receive(t, dropped); got.payload != "1" {
+		t.Fatalf("message = %+v", got)
+	}
+	dropping.Disconnect()
+
+	handling, handled := connect(true)
+	if got := receive(t, handled); got.payload != "1" {
+		t.Fatalf("redelivered message = %+v, want the unacknowledged one", got)
+	}
+	// Acknowledged now: after a new connection the next message is the
+	// first one received, nothing comes again before it.
+	handling.Disconnect()
+
+	_, last := connect(true)
+	b.Publish("plant/count", []byte("2"), false, 1)
+	if got := receive(t, last); got.payload != "2" {
+		t.Errorf("message after the acknowledgement = %+v, want 2", got)
 	}
 }
 
@@ -341,7 +395,7 @@ func TestNewPahoClientLocalFiles(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := Connection{Broker: &url.URL{Scheme: SchemeTLS, Host: "127.0.0.1:8883"}, KeepAlive: DefaultKeepAlive, TLS: &tt.tls}
 
-			_, err := newPahoClient(conn, "files", "", true, func(string, []byte) {})
+			_, err := newPahoClient(conn, "files", "", true, func(string, []byte) bool { return true })
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("newPahoClient = %v, want %v", err, tt.wantErr)
 			}

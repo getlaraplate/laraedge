@@ -82,16 +82,31 @@ type pahoClient struct {
 // newPahoClient builds the client of conn without connecting. It reads the
 // TLS files here, so a missing or broken file is a local resource error and
 // not a connection failure. password is the resolved value of conn.Auth's
-// reference; onMessage receives a copy of every payload.
-func newPahoClient(conn Connection, clientID, password string, cleanSession bool, onMessage func(topic string, payload []byte)) (client, error) {
-	return newPahoClientRetained(conn, clientID, password, cleanSession, func(topic string, payload []byte, _ bool) {
-		onMessage(topic, payload)
+// reference; onMessage receives a copy of every payload and reports whether
+// the message was handled: only then is a QoS 1 message acknowledged, so one
+// left unhandled (the input is closing) stays in the persistent session and
+// the broker delivers it again to the next connection.
+func newPahoClient(conn Connection, clientID, password string, cleanSession bool, onMessage func(topic string, payload []byte) (handled bool)) (client, error) {
+	return newLibClient(conn, clientID, password, cleanSession, func(m paho.Message) bool {
+		return onMessage(m.Topic(), append([]byte(nil), m.Payload()...))
 	})
 }
 
 // newPahoClientRetained is newPahoClient for a receiver that also wants the
-// retain flag of a message (browse).
+// retain flag of a message and handles every message (browse and probe, on a
+// clean session at QoS 0).
 func newPahoClientRetained(conn Connection, clientID, password string, cleanSession bool, onMessage func(topic string, payload []byte, retained bool)) (client, error) {
+	return newLibClient(conn, clientID, password, cleanSession, func(m paho.Message) bool {
+		onMessage(m.Topic(), append([]byte(nil), m.Payload()...), m.Retained())
+
+		return true
+	})
+}
+
+// newLibClient builds the paho client. The automatic acknowledgement is off:
+// a message is acknowledged after handle returns true, on the delivery
+// goroutine, so in order.
+func newLibClient(conn Connection, clientID, password string, cleanSession bool, handle func(m paho.Message) (handled bool)) (client, error) {
 	broker, err := brokerAddress(conn)
 	if err != nil {
 		return nil, err
@@ -108,8 +123,11 @@ func newPahoClientRetained(conn Connection, clientID, password string, cleanSess
 		SetOrderMatters(true).
 		SetAutoReconnect(false).
 		SetConnectRetry(false).
+		SetAutoAckDisabled(true).
 		SetDefaultPublishHandler(func(_ paho.Client, m paho.Message) {
-			onMessage(m.Topic(), append([]byte(nil), m.Payload()...), m.Retained())
+			if handle(m) {
+				m.Ack()
+			}
 		}).
 		SetConnectionLostHandler(func(paho.Client, error) {
 			select {

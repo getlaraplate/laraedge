@@ -492,3 +492,23 @@ func (h *harness) waitValue(signal string, v model.Value) {
 		return slices.ContainsFunc(samplesOf(rs, signal), func(s model.Sample) bool { return s.Value == v })
 	})
 }
+
+// TestRouterHandledReportsWhatToAcknowledge: a message the router counts
+// is handled, so acknowledged; one arriving after stop is not.
+func TestRouterHandledReportsWhatToAcknowledge(t *testing.T) {
+	r := &router{in: &Input{conn: Connection{MaxPayload: 1}}}
+	if !r.message("plant/a", []byte("too large")) {
+		t.Error("a message counted payload_too_large was not handled")
+	}
+	if n := r.in.Health().ReadErrors[KindPayloadTooLarge]; n != 1 {
+		t.Errorf("payload_too_large = %d, want 1", n)
+	}
+
+	r.stop()
+	if r.message("plant/a", []byte("x")) {
+		t.Error("a message after stop was handled, so acknowledged")
+	}
+	if n := r.in.Health().ReadErrors[KindPayloadTooLarge]; n != 1 {
+		t.Errorf("payload_too_large = %d after stop, want still 1", n)
+	}
+}

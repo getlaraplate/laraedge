@@ -206,35 +206,38 @@ type router struct {
 // message routes one message: the size check first, then the availability
 // topics, then the topic plan, else the message is unmapped (spec sections
 // 4 and 5). Every sample renews its device before it is emitted, so a birth
-// comes before the sample.
-func (r *router) message(topic string, payload []byte) {
+// comes before the sample. It reports whether the message was handled, which
+// is every message but those arriving after stop: the client acknowledges
+// only a handled one, so the broker redelivers the others from the
+// persistent session.
+func (r *router) message(topic string, payload []byte) (handled bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.stopped {
-		return
+		return false
 	}
 
 	in := r.in
 	if len(payload) > in.conn.MaxPayload {
 		in.health.CountError(KindPayloadTooLarge)
 
-		return
+		return true
 	}
 
-	if handled, kind := r.tracker.Message(topic, payload); handled {
+	if availability, kind := r.tracker.Message(topic, payload); availability {
 		if kind != "" {
 			in.health.CountError(kind)
 		}
 
-		return
+		return true
 	}
 
 	plan := in.plan[topic]
 	if plan == nil {
 		in.health.CountError(KindUnmapped)
 
-		return
+		return true
 	}
 
 	samples, kinds := Decode(plan, payload, in.clk.Now())
@@ -245,9 +248,12 @@ func (r *router) message(topic string, payload []byte) {
 		r.tracker.Sample(s.Device)
 		r.emit(model.SampleRecord(s))
 	}
+
+	return true
 }
 
-// stop drops every later message; a message being routed finishes first.
+// stop drops every later message, unacknowledged; a message being routed
+// finishes first.
 func (r *router) stop() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
