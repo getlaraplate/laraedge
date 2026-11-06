@@ -120,7 +120,9 @@ session, since a broker may have lost it. `laraplate_edge_input_connected{input}
 
 **Configuration changes:** stopping an input for a reload disconnects without unsubscribing, so the persistent
 session keeps the messages. At restart the input subscribes to the topics of the new document and unsubscribes
-from those it no longer uses (the previous set is kept in `data_dir/inputs/{input_id}/mqtt-topics.json`).
+from those it no longer uses (the previous set is kept in `data_dir/mqtt/topics/{input_id}.json`, outside the
+input's state directory that the supervisor deletes on a rollback; amended 2026-11-06 by plan 1's final review,
+decision Q7).
 
 ## 6. Commands and metrics
 

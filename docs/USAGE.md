@@ -147,7 +147,8 @@ data_dir/
   config/laraplate-state.json   laraplate provider: last attempted version and undelivered reports
   inputs/{input id}/            removed when the applied document has no input of that id
     transform-state.json        the edge_counter counts of the input's transform chains
-    mqtt-topics.json            an mqtt input: the topics it subscribed to, to unsubscribe the ones a reload dropped
+  mqtt/topics/{input id}.json   an mqtt input: the topics it subscribed to, to unsubscribe the ones a reload or a
+                                rollback dropped; kept when the input is removed or rolled back
   outputs/{output id}/
     critical/  bulk/            the two queues: segment files and segment_size
     acked                       confirmed position of each queue
@@ -376,7 +377,7 @@ their own ids from it.
 Both commands connect with the id `<client_id>-probe` or `<client_id>-browse`, a clean session and QoS 0. They
 never use the agent's id: a second client with that id would make the broker disconnect the running agent and
 take over its persistent session. So they are safe beside a running agent, and they neither read nor change its
-subscriptions or its `mqtt-topics.json`. Neither publishes anything.
+subscriptions or its `mqtt/topics/<input id>.json`. Neither publishes anything.
 
 ### Reading the points once: `probe`
 
@@ -687,7 +688,8 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | an `mqtt` point never gets a sample, no read error | the message arrives but the path is not in it (a message without the path gives no sample, since devices send partial updates), the topic is spelled differently (topics are case-sensitive), or nothing is published there | `browse --filter` on the topic shows the payload and the exact `topic\|path` address of each leaf to copy |
 | `read_errors` `malformed_json`, `bad_timestamp` or `conversion` growing, `mqtt` points `bad` | the payload is not JSON where an address has a path, a `timestamp` is set for a topic whose payload has none (every point of the topic, plain ones included, is `bad`), or a value does not convert to the point's `type` (`3.0` or `1e3` to an integer type, `70000` to `int16`, a JSON string to a number) | look at the payload with `browse`; set the `type` the value has; give the `timestamp` only to the JSON topics, per topic under `topics` |
 | `read_errors` `payload_too_large` growing | a message above `max_payload` (256 KiB by default) is dropped | raise `max_payload` (up to 16 MiB) if the message is expected; the topic is probably not one for a point |
-| `read_errors` `unmapped` counts a few messages after a reload | the persistent session still held messages of a topic the new document no longer uses: they are dropped, never sent, and the topic is unsubscribed at the next connection | nothing: it happens once per reload, since the topic is unsubscribed at the next connection |
+| `read_errors` `unmapped` counts a few messages after a reload or a rollback | the persistent session still held messages of a topic the new document no longer uses: they are dropped, never sent, and the topic is unsubscribed at the first connection of the new document (after a rollback, of the restored one), since the subscription set in `data_dir/mqtt/topics/` survives both | nothing: it stops once that connection is made. If it keeps growing, the file was lost (a `data_dir` wiped or not writable): connect once with `persistent_session: false`, which clears the session, or clear the session of the client id on the broker |
+| the broker keeps queuing messages for the client id of an `mqtt` input that was removed from the document | the persistent session of the removed input stays on the broker, which queues its QoS 1 messages until it expires the session or the session is cleared | before removing an input, apply once a document with `persistent_session: false` for it; afterwards, clear the session of its client id on the broker (or let the broker's session expiry remove it) |
 | `read_errors` `availability` growing | a message on the availability topic is neither the `online` nor the `offline` string of the entry; the comparison is exact, case and spaces included | fix the two strings to what the device publishes (`browse` shows it) |
 | an `mqtt` device dead while the broker is connected, then born again at its first message | its availability topic holds `offline`: the device (or its Last Will, which a broker may retain) said so. The device stays dead until `online` or a sample arrives, however long it is silent | check what the device publishes on the topic; publish `online`, or clear a stale retained `offline` on the broker |
 | `mqtt` samples carry the time of the connection though the data is old | the sample time is the arrival time unless the document sets a `timestamp`, and a retained message (or one replayed by a persistent session) arrives at each connection | set `timestamp: {path, format}` for the topic, so the payload's own time is used; without it the first sample after a connection can be a stale value stamped now |

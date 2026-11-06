@@ -523,8 +523,8 @@ never repeats the value, so a broker address, a user name or a topic does not re
 | `keepalive` | `30s` | the MQTT keep alive, a positive duration |
 | `max_payload` | `256KiB` | the largest message accepted: a number of bytes, or a size written `<n>KiB` or `<n>MiB`, from 1 byte to 16 MiB. A larger message is dropped, before any parsing, and counted as `payload_too_large`. |
 | `timestamp` | reception | `{path, format}`: where the sample time is in a JSON payload, for every topic of the input. `format` is `rfc3339`, `unix_s` or `unix_ms`; both keys are required. |
-| `topics` | | per-topic overrides, keyed by topic; only `timestamp` for now, with the same `{path, format}` |
-| `availability` | | `[{device, topic, online, offline}]`, at most one per device, all four keys required, `online` and `offline` different (see "Availability and death") |
+| `topics` | | per-topic overrides, keyed by the topic of a point (a key that no point of the input uses is refused, so a misspelt topic does not pass silently); only `timestamp` for now, with the same `{path, format}` |
+| `availability` | | `[{device, topic, online, offline}]`, at most one per device, all four keys required, `online` and `offline` different, `topic` not the topic of a point (see "Availability and death") |
 
 The password is resolved at every connect, as for `opcua`: a rotated `secret://file/` password takes
 effect at the next connect, and a password that does not resolve is a `connection` error with the usual
@@ -568,13 +568,15 @@ A `bad` sample carries the zero of the point's kind, as in the other drivers.
 |---|---|
 | The path is missing from the message | no sample for that point (devices send partial updates) |
 | The payload is not valid JSON | `bad` samples for the points of that topic that have a path (a plain point of the topic reads it as text); read error `malformed_json`, once per message |
-| A `timestamp` is set for the topic and the message has none, or it is unreadable | `bad` samples for every point of that topic, plain ones included; read error `bad_timestamp` (and `malformed_json` too for a payload that is not JSON). So set a `timestamp` only on JSON topics, per topic through `topics`, not for an input that also has plain topics |
+| A `timestamp` is set for the topic and the message has none, it is unreadable, or it is before 1970-01-01T00:00:00Z or after the end of year 9999 (after applying an `rfc3339` offset) | `bad` samples for every point of that topic, plain ones included; read error `bad_timestamp` (and `malformed_json` too for a payload that is not JSON). So set a `timestamp` only on JSON topics, per topic through `topics`, not for an input that also has plain topics |
 | A value does not convert | `bad` sample for that point; read error `conversion`, per point |
 | The payload is above `max_payload` | dropped, no sample; read error `payload_too_large` |
 | A message on a topic no point subscribes to | dropped; read error `unmapped`. It happens with a persistent session after a configuration change that removed the topic (see below) |
 
 **Timestamp.** Without a `timestamp` the sample time is the agent's clock at the arrival of the message.
-`rfc3339` reads a JSON string, `unix_s` and `unix_ms` a JSON number (fractions are kept). **A retained message
+`rfc3339` reads a JSON string, `unix_s` and `unix_ms` a JSON number (fractions are kept). A time before the Unix
+epoch (a negative number) or after year 9999 is `bad_timestamp`: the backend would refuse it, and with it the
+whole batch. **A retained message
 is an ordinary message: with the reception time as timestamp, a value retained days ago takes the time of the
 connection.** Give the topic a payload timestamp, or know that the first sample after each connection can be old
 data stamped now.
@@ -593,17 +595,28 @@ device is alive.
   revive it. The `online` string, or the first sample of the device, is its `birth`. A retained `offline` (a
   Last Will that the broker keeps) is seen at start and gives the death right after the birth. A payload that is
   neither of the two strings is ignored and counted as `availability`. One availability topic may serve
-  several devices.
+  several devices. An availability topic is not also the topic of a point: such a document is refused, since a
+  message on it would only ever be read as availability. A device that publishes values on its status topic
+  needs them on another topic.
 
 **Persistent session and configuration changes.** With `persistent_session: true` (and QoS 1) the broker keeps
 the messages published while the agent is down, and the input receives them as samples, in order, when it
 connects again. Stopping an input for a reload disconnects without unsubscribing, so the session keeps the
-messages. The set of topics the input subscribed to is kept in `data_dir/inputs/<input id>/mqtt-topics.json` (a
+messages. The set of topics the input subscribed to is kept in `data_dir/mqtt/topics/<input id>.json` (a
 sorted JSON list, written after the broker acknowledged the subscriptions). At every connection the input
 unsubscribes the topics of that file that its document no longer uses, then subscribes its own: so a topic
 removed by a reload is dropped from the session at the next connection, and a message of it still queued in the
-session is dropped and counted as `unmapped`, never emitted. The subscriptions are made again at every
-connection, whether or not the broker kept the session.
+session is dropped and counted as `unmapped`, never emitted. The file is outside `data_dir/inputs/<input id>`,
+which the agent removes on a rollback and when an input leaves the document, so a rollback also unsubscribes
+the topics only the failed document used. The subscriptions are made again at every connection, whether or not
+the broker kept the session. A message is acknowledged to the broker only after the input has handled it
+(emitted its samples, or counted it as a read error), so one that arrives while the input is stopping stays in the
+session and comes again at the next connection.
+
+**Removing an input.** An input removed from the document leaves its persistent session on the broker, which goes
+on queuing the QoS 1 messages of its topics until the broker expires the session or it is cleared. To avoid it,
+apply once a document with `persistent_session: false` for that input before removing it (a clean session
+discards the broker's session), or clear the session of its client id on the broker.
 
 **Read errors.** `read_errors` of `/status` and `laraplate_edge_input_read_errors_total{input, kind}` use the
 kinds below. Like every input that reports its health, an `mqtt` input shows `timeout`, `connection`,
@@ -616,7 +629,7 @@ kinds below. Like every input that reports its health, an `mqtt` input shows `ti
 | `connection` | any failure of the broker connection: a refused or reset connection, a failed TLS handshake, bad credentials, a password that does not resolve, a lost connection. A subscription the broker refuses (an ACL that forbids the topic) is shown only this way, by repeated `connection` errors and the death of the devices; nothing else names the topic |
 | `payload_too_large` | a message above `max_payload`, dropped |
 | `malformed_json` | a message that is not valid JSON where a path or a timestamp needs it, once per message |
-| `bad_timestamp` | a message whose `timestamp` is missing or unreadable, once per message |
+| `bad_timestamp` | a message whose `timestamp` is missing, unreadable, before 1970 or after year 9999, once per message |
 | `conversion` | a value that does not convert to the point's `type`, per point |
 | `availability` | an availability payload that is neither `online` nor `offline` |
 | `unmapped` | a message on a topic no point subscribes to |
@@ -627,10 +640,6 @@ Payload values, user names, passwords and broker addresses are never written to 
 
 - The sample time of a message is the agent's clock unless a payload timestamp is configured; retained and
   replayed messages are stamped with the time they arrive (see "Timestamp").
-- A reload or a stop in the middle of a connection attempt abandons that attempt in the background: a QoS 1
-  message that the abandoned connection receives before it closes is acknowledged to the broker and dropped,
-  not delivered to the next input. The window is narrow (one connection attempt) and a stop between
-  connections never has it.
 - A broker that refuses a subscription is retried at every reconnection and reported only through the
   `connection` kind (above); the logs carry the details at `debug`.
 - `connected` turns true when the broker accepts the connection, a little before the subscriptions are
