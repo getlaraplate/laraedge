@@ -37,7 +37,7 @@ the `User-Agent` header.
 | `config validate <file> [--plugins-dir <path>]` | checks a configuration document with both validation layers (schema and rules, then what this build provides and the type check of every transform chain), and builds every input through its driver without connecting; with `--plugins-dir` (absolute) every plugin binary must also lie inside that directory, as `plugins_dir` does for the agent; relative paths in a `connection` resolve against the file's directory, as with the `file` provider; applies nothing | 0 and `<file>: valid` on stdout, or 1 and one `<file>: <path>: <problem>` line per problem on stderr |
 | `config test <file> --input <samples.jsonl>` | replays recorded samples through the transform chains of a document and writes the resulting samples to stdout; applies nothing (see "Trying transforms") | 0; 1 when the document is invalid, the sample file is unreadable or has a bad line; 2 on a usage error |
 | `probe <input> (--config <file> \| --bootstrap <path>) [--record <file>]` | reads every point of one input once and prints the raw samples, before transforms; never starts an output; an input served by a plugin is probed by starting its plugin for the duration of the probe (see "Trying transforms" and "Running plugins") | 0; 1 when the document is invalid, the input is unknown or the read fails; 2 on a usage error |
-| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>]` | lists the nodes of an OPC UA server, or of a plugin input whose manifest declares `browse`, to find the addresses of points (see "OPC UA servers" and "Running plugins") | 0; 1 when the document is invalid, the input is unknown or neither `opcua` nor a plugin that supports browse, or the source cannot be browsed; 2 on a usage error |
+| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>] [--filter <topic filter>] [--duration <d>]` | lists the nodes of an OPC UA server, or of a plugin input whose manifest declares `browse`, to find the addresses of points (see "OPC UA servers" and "Running plugins"); for an `mqtt` input, lists the topics a broker publishes in a time window, with the `topic\|path` addresses of JSON leaves (`--filter` and `--duration`; see "MQTT brokers") | 0; 1 when the document is invalid, the input is unknown or none of `opcua`, `mqtt` and a plugin that supports browse, or the source cannot be browsed; 2 on a usage error |
 | `opcua trust <input> (--config <file> \| --bootstrap <path>) [--thumbprint <hex>]` | shows the certificate an OPC UA server presents and trusts it (see "OPC UA servers") | 0 when trusted or already trusted; 1 when refused, mismatched or on any other failure; 2 on a usage error |
 | `opcua trust --list --bootstrap <path>` | lists the trusted server certificates | 0; 1 when the bootstrap cannot be read, or no certificate could be listed because a file is unreadable; 2 on a usage error |
 | `status [--listen addr]` | prints the `/status` answer of a running agent, indented; `--listen` defaults to `127.0.0.1:9180`; the bearer token, when the endpoint has one, is read from `LARAPLATE_EDGE_STATUS_TOKEN` | 0, or 1 when the agent does not answer |
@@ -147,6 +147,8 @@ data_dir/
   config/laraplate-state.json   laraplate provider: last attempted version and undelivered reports
   inputs/{input id}/            removed when the applied document has no input of that id
     transform-state.json        the edge_counter counts of the input's transform chains
+  mqtt/topics/{input id}.json   an mqtt input: the topics it subscribed to, to unsubscribe the ones a reload or a
+                                rollback dropped; kept when the input is removed or rolled back
   outputs/{output id}/
     critical/  bulk/            the two queues: segment files and segment_size
     acked                       confirmed position of each queue
@@ -222,6 +224,10 @@ response time: 3µs
   bootstrap is read only for an `opcua` input, so `--config` keeps working with a broken bootstrap for the
   other drivers), or `--bootstrap` alone. `--config` alone fails with `data_dir unknown`. An untrusted
   server is an error naming its thumbprint: run `opcua trust` (below).
+- An `mqtt` input is probed through a connection of its own, beside a running agent's, with the client id
+  `<client_id>-probe`: it subscribes to the topics of the points and waits for the first message of each, up to
+  the 30 seconds of the command (retained messages answer at once). A point with no message in that time is
+  printed as `no message` and is not an error. See "MQTT brokers".
 - A plugin input (`driver: plugin:<id>`) is probed by starting its plugin, with the hashes checked as at
   every start, configuring the input, reading each point once and stopping the plugin again. The
   plugin resolves the `secret://` values of its `connection` as the agent does. It runs a plugin
@@ -359,6 +365,81 @@ nsu=urn:vendor:press;s=Press07  Press07  Object
   default 2) counts the levels below the start node as for OPC UA. A node with nothing below it prints
   `(no node below the start node)`, as for OPC UA.
 
+## MQTT brokers
+
+The `mqtt` driver ([CONFIGURATION.md](CONFIGURATION.md#the-mqtt-driver)) subscribes to a broker, and its points
+are `topic|path` addresses. Two commands help, `probe` and `browse`; each takes the input id and the usual two
+ways to find the document (`--config <file>`, or `--bootstrap <path>` for the last valid document of its
+`data_dir`). Give `--bootstrap` with `--config` when the input has no `client_id`: the default client id
+`laraplate-edge-<agent_id>-<input_id>` contains the `agent_id` of the bootstrap, and the two commands derive
+their own ids from it.
+
+Both commands connect with the id `<client_id>-probe` or `<client_id>-browse`, a clean session and QoS 0. They
+never use the agent's id: a second client with that id would make the broker disconnect the running agent and
+take over its persistent session. So they are safe beside a running agent, and they neither read nor change its
+subscriptions or its `mqtt/topics/<input id>.json`. Neither publishes anything.
+
+### Reading the points once: `probe`
+
+```bash
+laraplate-edge probe broker --config config.yaml --bootstrap bootstrap.yaml
+```
+
+```
+press-07	running	true	boolean	good
+press-07	press_force	182.5	float	good
+press-07	cycle_count	no message
+furnace-02	door_open	false	boolean	good
+response time: 1.204s
+```
+
+- It subscribes to the topics of the points and decodes the messages as the running input does, then keeps the
+  first sample of each point. It returns as soon as every point has one, or when the command's 30 seconds end.
+  Retained messages answer at once; a topic that is not retained is silent until the device publishes, so a
+  quiet device needs the full wait.
+- A point that got no sample in that time is printed as `<device><TAB><signal><TAB>no message`, after the
+  samples. It is not an error: the exit code stays 0. The same line is printed for any driver whose point
+  returned no sample.
+- A first sample can be `bad` (a payload that is not JSON, a value that does not convert). The line shows what
+  the agent would send; `--record <file>` writes the samples as for the other drivers.
+- The time of a sample is the arrival time unless the document sets a `timestamp`, and a retained message is
+  stamped with the time of the probe, not the time the device published it.
+- The command fails with exit code 1 when it cannot connect or subscribe, or loses the connection before the
+  wait ends: the message is the driver's fixed text, which never carries the address, the user name or the
+  password.
+
+### Finding the topics and paths: `browse`
+
+```bash
+laraplate-edge browse broker --config config.yaml --bootstrap bootstrap.yaml --filter 'plant/#' --duration 20s
+```
+
+```
+plant/furnace-02/door  3 msg  4 B  -  true
+plant/press-07/state  5 msg  58 B  retained
+  plant/press-07/state|counters.0  4121
+  plant/press-07/state|force.kn  182.5
+  plant/press-07/state|running  true
+plant/press-07/status  1 msg  6 B  retained  online
+```
+
+- `--filter` is the topic filter to subscribe to, `#` (everything) by default; `+` and `#` must be whole
+  levels and `#` the last one. `--duration` is how long to collect messages, `10s` by default, from `1s` to
+  `5m`. `--node` and `--depth` belong to OPC UA and plugin inputs and are a usage error here, as `--filter`
+  and `--duration` are for any other input (exit 2).
+- One line per topic seen, sorted by topic: the topic, the number of messages, the size of the last message,
+  `retained` or `-` (the retained flag of the last message) and, for a payload that is not JSON, a preview of
+  the text. Bytes that are not printable are escaped (`\x00`), so a payload cannot disturb the terminal.
+- For a JSON object or list, the topic line is followed by one indented line per leaf, sorted by path: the address, already in
+  the `topic|path` form to copy into the `address` of a point, and a preview of the value (a string quoted).
+  A preview is at most 40 characters and ends in `...` when cut. At most 100 leaves are listed per topic. A
+  key that is empty or contains a dot has no path and is skipped. A payload above the input's `max_payload` is
+  counted and sized but not previewed.
+- `(no message received)` when nothing arrived. The scan stops after 1000 topics with `... stopped after 1000
+  topics` on stdout: narrow it with `--filter`. Ctrl-C ends the collection early and prints what was seen.
+- With the default filter it sees only what the broker lets that client subscribe to: an ACL that hides a
+  topic hides it from `browse` too, and from the agent.
+
 ## Running plugins
 
 A plugin is an external process, built on `laraedge-sdk`, that provides an input driver
@@ -478,7 +559,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
 | `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down; only inputs that run and keep a connection: the series of an input that failed or was removed ends (a stale series to Prometheus), so alert on `input_up == 0` for a failed input |
-| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, and restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
+| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, for every input that reports its health (an `mqtt` input counts only `connection` among them); an `mqtt` input adds the kinds `payload_too_large`, `malformed_json`, `bad_timestamp`, `conversion`, `availability` and `unmapped` (CONFIGURATION.md, "The `mqtt` driver"), whose series appear at their first count; the series restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
 | `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |
@@ -497,7 +578,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_output_settle_failures_total` | counter | `output` | failed attempts to settle a batch: to acknowledge a delivered batch in the buffer, or to save the loss marker or the split of a batch the destination refused (`422`, `413`). The batch stays in flight and is resent after a backoff, so a counter that keeps growing means the output is stuck on that batch; the text is in `/status` `last_error`. Restarts from 0 when the output restarts |
 
 The plugin series exist only for plugins the applied document uses, the processor series only for its
-processors. The connection and read error series exist only for inputs that report their health (`modbus` and `opcua`, not `simulated`). The buffer series, the drop counters and the settle failure counter exist only for outputs that run (a `failed` output has no open
+processors. The connection and read error series exist only for inputs that report their health (`modbus`, `opcua` and `mqtt`, not `simulated`). The buffer series, the drop counters and the settle failure counter exist only for outputs that run (a `failed` output has no open
 buffer). Counters restart from 0 when the agent restarts.
 
 ## Logs
@@ -601,6 +682,19 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `read_errors` `decode` growing for an `opcua` point | the value does not convert to the point's `type`: a float to an integer type, a number too large for the type, an array or a structure, a string that is not UTF-8 | set the `type` the node holds (`browse` shows its data type); the conversion rules are in CONFIGURATION.md, "Conversion". |
 | an `opcua` input `connected` true, its devices alive, but the values are stale or `bad` | the liveness is the server's: while the server answers, the devices are alive even if the machine behind it is off. A Bad status gives `bad` samples, `read_errors` `exception` grows; an unchanged value gives no sample at all with a subscription. | look at the machine and at the server's own status of the nodes. The devices are reported dead only when the server stops answering for `death_tolerance`. |
 | the agent stops with a Go panic whose trace is in the OPC UA library | the library panicked in one of its own goroutines (malformed data from a server): this cannot be caught | the service manager restarts the agent (`Restart=` under systemd). Report it with the trace; `--log-level debug` logs the library's lines with `source=gopcua`. |
+| an `mqtt` input `connected` false, `read_errors` `connection` growing, devices reported dead after `death_tolerance` | the agent cannot hold a connection to the broker: host, port or firewall wrong, a TLS handshake that fails (the CA in `tls.ca_file`, a certificate that does not name the host, an `mqtt://` broker behind a TLS port or the reverse), refused credentials, or a `secret://` password that does not resolve | check the address and the scheme (`mqtts://` for 8883), the CA and the host name in the certificate, the user and the secret. The log at `debug` has the fixed error texts, never the address or the password. `probe` shows the same failure from the command line. |
+| an `mqtt` input connects and is dropped again and again, `connection` growing, devices dying and born again | another client uses the same `client_id`: the broker disconnects the older one at each connect, so the two take turns. The default id is `laraplate-edge-<agent_id>-<input_id>`, so two agents with the same `agent_id` and input id collide, and so does a second agent on a copy of the same bootstrap | give each agent a distinct `agent_id`, or set a unique `client_id`. `probe` and `browse` use `<client_id>-probe` and `<client_id>-browse` and never collide with the agent. |
+| an `mqtt` input `connected` true at times but no sample, `read_errors` `connection` growing, devices dead, the broker log shows a denied subscription | the broker's ACL refuses the user a topic of the document (or the availability topic) and drops the connection or refuses the subscription: the agent subscribes again at each reconnection, and nothing but `connection` errors and the death of the devices shows it, since the topic is never named | allow the user to read the topics, or take the point away. `browse` with the same user lists only what the ACL lets it see, so a topic missing from it is a hint. |
+| an `mqtt` point never gets a sample, no read error | the message arrives but the path is not in it (a message without the path gives no sample, since devices send partial updates), the topic is spelled differently (topics are case-sensitive), or nothing is published there | `browse --filter` on the topic shows the payload and the exact `topic\|path` address of each leaf to copy |
+| `read_errors` `malformed_json`, `bad_timestamp` or `conversion` growing, `mqtt` points `bad` | the payload is not JSON where an address has a path, a `timestamp` is set for a topic whose payload has none (every point of the topic, plain ones included, is `bad`), or a value does not convert to the point's `type` (`3.0` or `1e3` to an integer type, `70000` to `int16`, a JSON string to a number) | look at the payload with `browse`; set the `type` the value has; give the `timestamp` only to the JSON topics, per topic under `topics` |
+| `read_errors` `payload_too_large` growing | a message above `max_payload` (256 KiB by default) is dropped | raise `max_payload` (up to 16 MiB) if the message is expected; the topic is probably not one for a point |
+| `read_errors` `unmapped` counts a few messages after a reload or a rollback | the persistent session still held messages of a topic the new document no longer uses: they are dropped, never sent, and the topic is unsubscribed at the first connection of the new document (after a rollback, of the restored one), since the subscription set in `data_dir/mqtt/topics/` survives both | nothing: it stops once that connection is made. If it keeps growing, the file was lost (a `data_dir` wiped or not writable): connect once with `persistent_session: false`, which clears the session, or clear the session of the client id on the broker |
+| the broker keeps queuing messages for the client id of an `mqtt` input that was removed from the document | the persistent session of the removed input stays on the broker, which queues its QoS 1 messages until it expires the session or the session is cleared | before removing an input, apply once a document with `persistent_session: false` for it; afterwards, clear the session of its client id on the broker (or let the broker's session expiry remove it) |
+| `read_errors` `availability` growing | a message on the availability topic is neither the `online` nor the `offline` string of the entry; the comparison is exact, case and spaces included | fix the two strings to what the device publishes (`browse` shows it) |
+| an `mqtt` device dead while the broker is connected, then born again at its first message | its availability topic holds `offline`: the device (or its Last Will, which a broker may retain) said so. The device stays dead until `online` or a sample arrives, however long it is silent | check what the device publishes on the topic; publish `online`, or clear a stale retained `offline` on the broker |
+| `mqtt` samples carry the time of the connection though the data is old | the sample time is the arrival time unless the document sets a `timestamp`, and a retained message (or one replayed by a persistent session) arrives at each connection | set `timestamp: {path, format}` for the topic, so the payload's own time is used; without it the first sample after a connection can be a stale value stamped now |
+| messages published while the agent was down did not arrive, with `persistent_session: true` | the broker did not keep them: it was restarted without persistence, it expires or drops sessions by policy, the `client_id` changed, or the publisher or the input uses QoS 0 (the delivery is at the lower of the two QoS, and a broker queues only QoS 1 and 2 for an offline client) | publish at QoS 1, keep `qos: 1`, keep the `client_id` stable, and enable session persistence and a long enough expiry on the broker. The agent subscribes again at every connection but cannot recover what the broker dropped. |
+| the document is `rolled_back` with an `mqtt` input error naming `connection.tls.ca_file` (or another `tls` field) | `Start` cannot read the file: it is missing or unreadable, or a relative path was read against the agent's working directory | give an absolute path, readable by the agent's user |
 | the document is `rolled_back` with `cannot open the serial port: it does not exist`, `cannot open the serial port: permission denied` or plain `cannot open the serial port` | the `rtu` input could not open the port: `does not exist` is a wrong `device` path, `permission denied` is a user without access to it, and the plain text is any other failure (on Windows also a port another process already has open) | check the path (`ls -l /dev/ttyUSB0`, adapters change number when replugged: prefer `/dev/serial/by-id/...`), and that the agent's user belongs to the group that owns the port (`dialout` on most Linux distributions). On Linux a second open of the port succeeds, so never run `probe` on an `rtu` input while the agent runs: both would read the same port and corrupt each other's frames. |
 | a document is `rejected` with `plugins.N.sha256: does not match the plugin binary` (or `manifest_sha256 ... plugin.json`) | the file at `path`, or its `plugin.json`, is not the one the entry pins: a rebuilt or replaced plugin, or a hash copied from another build | run `laraplate-edge plugin hash <dir>` on the files you mean to deploy and put the two values in the entry. Nothing changed: the previous document keeps running. If the binary on disk changes under a running plugin, its next restart stops on the same check (restart reason `hash`) and the plugin stays down, `last_error` `the plugin files on disk do not match their hashes`, until the files match again or a new document pins the new ones. While the binary on disk differs from the pinned hash, every new document that keeps that plugin entry is rejected, even one that changes only something else, until the entry's hashes are updated with `plugin hash`. |
 | a document is `rejected` with `plugins.N.path: plugins are disabled: set plugins_dir in the bootstrap` | the agent uses the `laraplate` provider and the bootstrap has no `plugins_dir`, so no plugin may run | set `plugins_dir` in the bootstrap to the directory that holds the plugins and restart the agent (the key is read at start). |

@@ -18,6 +18,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/input/modbus"
+	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/input/opcua"
 	"github.com/getlaraplate/laraedge/internal/input/simulated"
 	"github.com/getlaraplate/laraedge/internal/logging"
@@ -184,12 +185,20 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 // the configuration file, which only the file provider has. The opcua driver
 // keeps its PKI under the bootstrap's data_dir, forms its application URI
 // from the agent id, resolves its passwords through resolver and warns
-// through log (decision O13).
+// through log (decision O13). The mqtt driver keeps its subscription set
+// under data_dir, forms its default client id from the agent id and resolves
+// its passwords through resolver.
 func inputDrivers(boot bootstrap.File, resolver opcua.SecretResolver, log *slog.Logger, extra map[string]input.Factory) map[string]input.Factory {
 	drivers := map[string]input.Factory{
 		config.DriverSimulated: simulated.Factory(configBaseDir(boot)),
 		config.DriverModbus:    modbus.Factory(),
 		config.DriverOPCUA: opcua.Factory(opcua.Options{
+			DataDir:  boot.DataDir,
+			AgentID:  boot.AgentID,
+			Resolver: resolver,
+			Logger:   log,
+		}),
+		config.DriverMQTT: mqtt.Factory(mqtt.Options{
 			DataDir:  boot.DataDir,
 			AgentID:  boot.AgentID,
 			Resolver: resolver,

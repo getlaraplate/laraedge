@@ -263,3 +263,82 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestLifecycleDie(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(clk *clock.Fake, lc *input.Lifecycle)
+		want []string
+	}{
+		{
+			name: "a live device dies at once, once",
+			run: func(_ *clock.Fake, lc *input.Lifecycle) {
+				lc.Die("press-07")
+				lc.Die("press-07")
+			},
+			want: []string{"death press-07"},
+		},
+		{
+			name: "a dead device emits nothing",
+			run: func(clk *clock.Fake, lc *input.Lifecycle) {
+				clk.Advance(30 * time.Second)
+				lc.Check()
+				lc.Die("press-07")
+			},
+			want: []string{"death oven-02", "death press-07"},
+		},
+		{
+			name: "an unknown device emits nothing",
+			run: func(_ *clock.Fake, lc *input.Lifecycle) {
+				lc.Die("not-configured")
+			},
+			want: nil,
+		},
+		{
+			name: "a later read emits the birth",
+			run: func(_ *clock.Fake, lc *input.Lifecycle) {
+				lc.Die("press-07")
+				lc.Read("press-07")
+				lc.Read("press-07")
+			},
+			want: []string{"death press-07", "birth press-07"},
+		},
+		{
+			name: "check does not kill it again",
+			run: func(clk *clock.Fake, lc *input.Lifecycle) {
+				lc.Die("press-07")
+				clk.Advance(time.Hour)
+				lc.Check()
+			},
+			want: []string{"death press-07", "death oven-02"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clk := clock.NewFake(start)
+			rec := &recorder{}
+			lc := input.NewLifecycle(twoDevices(), clk, rec.emit)
+
+			tt.run(clk, lc)
+
+			if got := rec.events(); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("events = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLifecycleDieTimestamp(t *testing.T) {
+	clk := clock.NewFake(start)
+	rec := &recorder{}
+	lc := input.NewLifecycle(twoDevices(), clk, rec.emit)
+
+	clk.Advance(7 * time.Second)
+	lc.Die("oven-02")
+
+	want := model.DeviceEvent{Kind: model.Death, Device: "oven-02", TS: start.Add(7 * time.Second)}
+	if len(rec.recs) != 1 || rec.recs[0].Event == nil || !reflect.DeepEqual(*rec.recs[0].Event, want) {
+		t.Fatalf("records = %+v, want death %+v", rec.recs, want)
+	}
+}

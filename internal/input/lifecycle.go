@@ -85,6 +85,22 @@ func (l *Lifecycle) Read(device string) {
 	}
 }
 
+// Die reports device dead now, without waiting for the tolerance: a driver
+// that learns of the loss from the source (an availability message) calls it.
+// It emits death exactly as Check does for a live, known device and does
+// nothing otherwise. The device is born again by its next Read.
+func (l *Lifecycle) Die(device string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, known := l.last[device]; !known || l.dead[device] {
+		return
+	}
+
+	l.dead[device] = true
+	l.emit(model.EventRecord(model.DeviceEvent{Kind: model.Death, Device: device, TS: l.clk.Now().UTC()}))
+}
+
 // Check emits death for every live device whose last successful read is at
 // least the tolerance old, in device name order.
 func (l *Lifecycle) Check() {
