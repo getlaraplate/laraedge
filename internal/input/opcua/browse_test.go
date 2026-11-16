@@ -7,9 +7,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/ua"
+
+	"github.com/getlaraplate/laraedge/internal/clock"
 )
 
 // treeSession is a session over a fixed address space: Browse answers from
@@ -73,7 +76,7 @@ func walkAll(t *testing.T, s session, start *ua.NodeID, depth int) (lines []stri
 	t.Helper()
 
 	w := &walker{s: s, namespaces: s.Namespaces(), depth: depth, printed: map[string]bool{}, emit: func(e BrowseEntry) {
-		lines = append(lines, strings.TrimRight(fmt.Sprintf("%d:%s %s %s %s %s", e.Depth, e.NodeID, e.Name, e.Class, e.DataType, e.Access), " "))
+		lines = append(lines, strings.TrimRight(fmt.Sprintf("%d:%s %s %s %s %s %s", e.Depth, e.NodeID, e.Name, e.Class, e.DataType, e.Access, e.Status), " "))
 	}}
 
 	if err := w.visit(context.Background(), start, 0); err != nil {
@@ -149,8 +152,8 @@ func TestWalkPrintsByDepthWithNamespaceURIsDataTypesAndAccess(t *testing.T) {
 }
 
 // A node below the start node that the server refuses to browse is printed
-// and not expanded; the walk goes on with its siblings. Refused at the start
-// node, the walk is an error.
+// with the status of the refusal and not expanded; the walk goes on with its
+// siblings. Refused at the start node, the walk is an error.
 func TestWalkSkipsANodeTheServerRefusesToBrowse(t *testing.T) {
 	root := ua.NewNumericNodeID(0, id.ObjectsFolder)
 	locked := ua.NewStringNodeID(1, "locked")
@@ -167,7 +170,7 @@ func TestWalkSkipsANodeTheServerRefusesToBrowse(t *testing.T) {
 	}
 
 	got, _ := walkAll(t, s, root, 3)
-	want := []string{"0:nsu=urn:x;s=locked locked Object", "0:nsu=urn:x;s=open open Object", "1:nsu=urn:x;s=inside inside Object"}
+	want := []string{"0:nsu=urn:x;s=locked locked Object   BadUserAccessDenied", "0:nsu=urn:x;s=open open Object", "1:nsu=urn:x;s=inside inside Object"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("walk = %q, want %q", got, want)
 	}
@@ -440,5 +443,67 @@ func TestSessionVariableAttributesChunkAtTheServerLimit(t *testing.T) {
 
 	if !slices.Equal(f.attributeReads, []int{32, 32, 32, 32, 12}) {
 		t.Fatalf("attribute reads = %v, want [32 32 32 32 12] and none for no ids", f.attributeReads)
+	}
+}
+
+func TestBrowseStatusNamesTheRefusal(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		// The standard spelling, as the server's documentation and USAGE.md
+		// write it: Id, not the library's ID.
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadNodeIDUnknown), "BadNodeIdUnknown"},
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadViewIDUnknown), "BadViewIdUnknown"},
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusBadUserAccessDenied), "BadUserAccessDenied"},
+		{fmt.Errorf("opcua browse: %w: %w", errBrowse, ua.StatusCode(0x80FE0000)), "0x80FE0000"},
+		{fmt.Errorf("opcua browse: %w", errBrowse), "Bad"},
+	}
+	for _, tt := range tests {
+		if got := browseStatus(tt.err); got != tt.want {
+			t.Errorf("browseStatus(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
+}
+
+// A server may answer the DataType attribute as an ExpandedNodeId: its name is
+// printed as for a NodeId, the namespace URI it carries used for nsu=.
+func TestDataTypeNameOfAnExpandedNodeID(t *testing.T) {
+	w := &walker{namespaces: []string{"http://opcfoundation.org/UA/", "urn:local", "urn:plant"}}
+
+	tests := []struct {
+		name string
+		in   *ua.ExpandedNodeID
+		want string
+	}{
+		{"standard type", ua.NewExpandedNodeID(ua.NewNumericNodeID(0, id.Double), "", 0), "Double"},
+		{"type of a namespace by index", ua.NewExpandedNodeID(ua.NewNumericNodeID(2, 4711), "", 0), "nsu=urn:plant;i=4711"},
+		{"type with its namespace URI", ua.NewExpandedNodeID(ua.NewNumericNodeID(7, 12), "urn:vendor", 0), "nsu=urn:vendor;i=12"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dv := &ua.DataValue{EncodingMask: ua.DataValueValue, Value: ua.MustVariant(tt.in)}
+			if got := w.dataTypeName(dv); got != tt.want {
+				t.Fatalf("dataTypeName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A depth outside 1 to MaxBrowseDepth, negative included, is refused before
+// anything is opened.
+func TestBrowseRefusesADepthOutOfRange(t *testing.T) {
+	cfg := opcuaInput(noneConn("opc.tcp://127.0.0.1:1"), time.Second, device("press-07", polled("count", "i=2258", "int32", time.Second)))
+
+	in, err := New(cfg, clock.NewFake(driverEpoch), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, depth := range []int{-1, 0, MaxBrowseDepth + 1} {
+		_, err := in.Browse(t.Context(), Node{}, depth, func(BrowseEntry) { t.Error("emit called") })
+		if err == nil || !strings.Contains(err.Error(), "depth must be from 1 to 10") {
+			t.Errorf("depth %d: err = %v", depth, err)
+		}
 	}
 }

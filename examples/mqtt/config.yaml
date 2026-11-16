@@ -1,0 +1,69 @@
+# Configuration document of the MQTT demo: one mqtt input subscribed to a
+# broker, sent to a Laraplate running on this machine. The token is read from
+# the environment of the agent: export LARAPLATE_EDGE_TOKEN before running it.
+# Adjust the broker, the topics and the paths to what your devices publish
+# (docs/CONFIGURATION.md, "The mqtt driver").
+#
+# Find the topics and the paths to use (it connects as <client_id>-browse, so
+# the running agent is not disturbed):
+#   laraplate-edge browse broker --config config.yaml --bootstrap bootstrap.yaml
+# Check the document offline, then read every point once:
+#   laraplate-edge config validate config.yaml
+#   laraplate-edge probe broker --config config.yaml --bootstrap bootstrap.yaml
+
+schema: laraplate-edge-config/1
+version: 1
+
+inputs:
+  - id: broker
+    driver: mqtt
+    # While the broker is connected the devices are alive, whether they publish
+    # or not. The connection missing for this long and they are reported dead;
+    # the reconnection gives their birth at once.
+    death_tolerance: 30s
+    connection:
+      broker: mqtt://192.168.10.5:1883   # mqtts:// for TLS (port 8883)
+      # client_id: laraplate-edge-mqtt-demo-01-broker   # the default
+      # Anonymous is the default. For a user name, the password is a secret
+      # reference, read again at every connect:
+      # auth:
+      #   user: edge
+      #   password: secret://env/MQTT_PASSWORD
+      # TLS uses the system CA pool unless you name one (mqtts:// only):
+      # tls:
+      #   ca_file: /etc/laraplate-edge/broker-ca.pem
+      qos: 1                  # default; 0 or 1
+      persistent_session: true  # default; the broker keeps what is published while the agent is down
+      # The sample time is the reception time unless the payload carries one.
+      # Say where per topic (a timestamp for the whole input would make every
+      # plain topic unreadable, so it suits an input of JSON topics only):
+      topics:
+        plant/press-07/state:
+          timestamp: {path: ts, format: unix_ms}   # rfc3339, unix_s or unix_ms
+        plant/furnace/temp:
+          timestamp: {path: time, format: rfc3339}
+      # A device that publishes its own availability (an MQTT Last Will, for
+      # instance): offline is its death at once, online its birth.
+      availability:
+        - {device: press-07, topic: plant/press-07/status, online: online, offline: offline}
+    devices:
+      - device: press-07
+        points:
+          # <topic>|<dot path>: the value is the field of a JSON payload.
+          - {signal: running, address: "plant/press-07/state|running", type: bool, read: subscribe, priority: critical}
+          - {signal: press_force, address: "plant/press-07/state|force.kn", type: float64, unit: kN, read: subscribe, priority: bulk}
+          # A numeric segment indexes a list.
+          - {signal: cycle_count, address: "plant/press-07/state|counters.0", type: int32, read: subscribe, priority: critical}
+      - device: furnace-02
+        points:
+          # No path: the whole payload is the value, read as text. A plain bool
+          # accepts true/false, 1/0 and on/off in any case.
+          - {signal: door_open, address: plant/furnace-02/door, type: bool, read: subscribe, priority: critical}
+          - {signal: recipe, address: plant/furnace-02/recipe, type: string, read: subscribe, priority: critical}
+          - {signal: temperature, address: "plant/furnace/temp|value", type: float64, unit: C, read: subscribe, priority: bulk}
+
+outputs:
+  - id: laraplate
+    type: laraplate-http
+    url: http://127.0.0.1:8000
+    token: secret://env/LARAPLATE_EDGE_TOKEN

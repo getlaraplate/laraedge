@@ -43,7 +43,7 @@ laraplate-edge config validate config.yaml
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | input id |
-| `driver` | yes | | `simulated`, `modbus`, `opcua` or `plugin:<id>` in this build. The schema also knows `mqtt`, `serial` and `file`. |
+| `driver` | yes | | `simulated`, `modbus`, `opcua`, `mqtt` or `plugin:<id>` in this build. The schema also knows `serial` and `file`. |
 | `connection` | no | `{}` | driver settings, an object the schema does not interpret (see the secret rule below) |
 | `death_tolerance` | no | `30s` | how long without a successful read before the input reports its devices dead; `birth` follows at the next successful read |
 | `devices` | yes | | at least one device |
@@ -92,13 +92,21 @@ The scenario (at most 1 MiB, unknown keys refused; see `examples/simulated/scena
 | `scrap_rate` | `0` | probability, 0 to 1, that a part is scrap (`scrap_count`), else good (`good_count`) |
 | `measurements` | | `{signal, mean, stddev, unit}` drawn once per completed part; the name is not `state`, `good_count` or `scrap_count`; `unit` is informative (the point's `unit` is reported) |
 
+A `scenario_file` larger than 1 MiB, or one that is not a valid scenario, is refused when the document
+is checked (`config validate`, or the apply, which rejects the document), with the message
+`connection.scenario_file: <path> is larger than 1 MiB` naming the file. A file that cannot be opened
+or read when the document is checked fails the input's start instead, so a file that appears later is
+picked up by the next start.
+
 ### The `modbus` driver
 
 Reads coils, discrete inputs, input registers and holding registers from a Modbus device or gateway, by
 polling. The driver is read-only: it sends only the four read functions (1, 2, 3, 4), never a write.
 `examples/modbus` is a complete document.
 
-**Connection.** An unknown field is an error here, named with its path (`connection.<key>: unknown field`).
+**Connection.** An unknown field is an error here, named with its path (`connection.<key>: unknown field`;
+a key that is not snake_case, at most 32 characters, shows as `*`, so a secret written as a key is not
+repeated).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -248,15 +256,17 @@ answer.
   baud with a turnaround of up to about 700 ms.
 
 **Serial port.** For `rtu` the port is opened when the input starts, as the one local resource the driver
-needs: a port that cannot be opened (wrong path, no permission) fails the start with `cannot open the
-serial port` (the path is not repeated), so the document is `rolled_back` and the previous one keeps
-running. On Linux the user running the agent usually needs the `dialout` group (or the group that owns
-the device). A port that fails later is opened again in the background, like a lost network connection.
-`config validate` checks the serial fields but cannot open the port; `probe` opens it itself: stop the
-agent before probing an `rtu` input, because both would read the same port and corrupt each other's
-frames (on Windows the second open is refused). For the same reason two inputs must never name the same
-`device`: on Linux both opens succeed and the two inputs corrupt each other's frames. A real serial port
-is not exercised by the automated tests (see "Known limits of this build"); `rtuovertcp` is.
+needs: a port that cannot be opened fails the start with `cannot open the serial port: it does not exist`
+(wrong path), `cannot open the serial port: permission denied` (no permission) or plain `cannot open the
+serial port` (any other failure; the path is never repeated), so the document is `rolled_back` and the
+previous one keeps running. On Linux the user running the agent usually needs the `dialout` group (or
+the group that owns the device). A port that fails later is opened again in the background, like a lost
+network connection. `config validate` checks the serial fields but cannot open the port; `probe` opens
+it itself: stop the agent before probing an `rtu` input, because both would read the same port and
+corrupt each other's frames (on Windows the second open is refused). For the same reason two inputs
+must never name the same `device`: on Linux both opens succeed and the two inputs corrupt each other's
+frames. A real serial port is not exercised by the automated tests (see "Known limits of this build");
+`rtuovertcp` is.
 
 **Health.** `/status` shows, for the input, `connected` (true while the connection to the device is up)
 and `read_errors` (the counts since the input was last started, always the four kinds `timeout`,
@@ -274,7 +284,9 @@ Reads variables of an OPC UA server, by subscription or by polling. The driver i
 complete document; [USAGE.md](USAGE.md#opc-ua-servers) describes the `opcua trust`, `browse` and `probe`
 commands that go with it.
 
-**Connection.** An unknown field in `connection` or in `auth` is an error, named with its path (`connection.<key>: unknown field`).
+**Connection.** An unknown field in `connection` or in `auth` is an error, named with its path
+(`connection.<key>: unknown field`; a key that is not snake_case, at most 32 characters, shows as `*`, so a
+secret written as a key is not repeated).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -317,14 +329,32 @@ characters. Only the leaf certificate is stored and compared.
   and the host name as alternative names. It is never renewed and its expiry is not checked; to replace it, stop
   the agent and delete the `own/` directory. Most servers refuse a client certificate they were not told to
   trust: add `own/cert.der` to the list of trusted client certificates of the server. The key file mode
-  `0600` is a no-op on Windows: protect `data_dir` with ACLs.
+  `0600` is a no-op on Windows: protect `data_dir` with ACLs. On Linux and the other Unix systems a
+  `key.pem` whose mode grants anything beyond `0600` (readable by the group or by others) is refused, and
+  the start of the input fails with `opcua pki: <path> has mode 0640, want 0600 or narrower (chmod 600
+  it)`: another user may have read the key, so either `chmod 600` it or delete `own/` for a new pair.
+- **Leftovers of an interrupted run.** The pair is written into a temporary `own-<number>.tmp` directory
+  next to `own/` and then renamed. One that a crash left behind (it can hold a key) is removed whenever an
+  `opcua` input, `browse` or `probe` starts, once it is more than an hour old: a younger one may be a
+  generation still running. A directory whose time is in the future (the clock was set back) is removed
+  only once the clock is an hour past that time. Each removed directory gets one `WARN` naming it: `opcua
+  pki: removed a temporary own certificate directory left by an interrupted run`; inputs that start
+  together report it once, because each first claims the directory by renaming it to
+  `own-<number>.tmp.sweep-<claim time>-<random>` and only the one whose rename succeeds removes it. A
+  claimed name a crash leaves behind is removed the same way an hour after the claim; a claim time that is
+  not a real time (beyond any clock) never counts as an hour old. A directory replaced
+  by something else while it was being claimed is left in place, with a `WARN` naming it (`... changed
+  while it was claimed; left in place`); one already gone once claimed is skipped silently. Only plain directories of those exact names directly under `pki/`
+  are removed, never a symlink, junction or mount point, nor what it points to.
 - **The server's certificate is trusted explicitly.** With a policy other than `None`, at every connect the
   agent discovers the server's endpoints, takes the one for the policy and mode, computes the thumbprint of
-  its certificate and goes on only when `trusted/<thumbprint>.der` exists. Otherwise the attempt fails (a
-  `connection` error), the certificate is stored in `rejected/`, and one `WARN` names the input, the thumbprint
-  and the command to run (`laraplate-edge opcua trust <input>`). That warning comes once per thumbprint per run
-  of the input, not at every retry. There is no certificate chain or revocation check: your decision on the
-  thumbprint is the whole trust. Its expiry is shown by `opcua trust`, not enforced.
+  its certificate and goes on only when `trusted/<thumbprint>.der` exists and holds a certificate with that
+  thumbprint (a file whose content does not match its name is not trusted, and is left in place; `opcua
+  trust --list` names it). Otherwise the attempt fails (a `connection` error), the certificate is stored in
+  `rejected/`, and one `WARN` names the input, the thumbprint and the command to run (`laraplate-edge opcua
+  trust <input>`). That warning comes once per thumbprint per run of the input, not at every retry. There
+  is no certificate chain or revocation check: your decision on the thumbprint is the whole trust. Its
+  expiry is shown by `opcua trust`, not enforced.
 - **A newly trusted certificate is picked up at the next retry, without restarting the agent.** The
   retries follow the reconnection backoff (up to 1 minute). A server that was reinstalled, or whose
   certificate was renewed, presents another thumbprint: it is untrusted again until you trust it. The old
@@ -399,7 +429,9 @@ Uncertain is `uncertain` (its value is kept), Bad is `bad`. A Bad status is the 
 failed conversion: the sample is `bad`, carries the zero of the kind, whatever the server sent with it, and
 counts as `exception`, not `decode`. A Good or Uncertain status without a value is `bad` with a `decode` error.
 The sample time is the server's source timestamp when the value carries one, else its server timestamp, else
-the agent clock.
+the agent clock. A timestamp before 1970, or from 2185-07-21 on (what the OPC UA library makes of a date before
+1677 and of the protocol's minimum and maximum dates), counts as absent: a server sends such a time for a clock
+that was never set.
 
 **Reconnection and liveness.** Starting the input opens only local resources (the certificates) and returns;
 the server is connected in the background, so an unreachable or untrusted server is never a failing start:
@@ -466,6 +498,159 @@ writes its own lines through the standard logger: the agent sends them to its lo
 - That test server ignores deadbands and does not check user names, so the deadband and the user name
   authentication are exercised only up to the request they send.
 - Only the `Value` attribute of scalar variables is read: no arrays, structures, events, alarms or history.
+
+### The `mqtt` driver
+
+Subscribes to an MQTT broker (MQTT 3.1.1, over TCP or TLS) and turns the messages that devices and gateways
+publish into typed samples. The driver is read-only: it subscribes and never publishes a message. In this
+build the payloads are JSON (values read through a path) and plain text (the whole payload is the value);
+Sparkplug B comes with a later plan. `examples/mqtt` is a complete document; [USAGE.md](USAGE.md#mqtt-brokers)
+describes the `probe` and `browse` commands that go with it.
+
+**Connection.** An unknown field in `connection`, `auth`, `tls`, `timestamp` or an `availability` entry is an
+error, named with its path (`connection.<key>: unknown field`). Every error of the driver names the field and
+never repeats the value, so a broker address, a user name or a topic does not reach a log.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `broker` | | required: `mqtt://<host>[:<port>]` (port 1883) or `mqtts://<host>[:<port>]` (port 8883), without a user name, a path or a query |
+| `client_id` | `laraplate-edge-<agent_id>-<input_id>` | the MQTT client id. It must be unique on the broker: a second client with the same id makes the broker disconnect the first. |
+| `auth` | anonymous | `anonymous`, or `{user, password}` with `password` a `secret://` reference |
+| `tls` | the system CA pool | `{ca_file, cert_file, key_file, server_name}`, all optional; mutual TLS needs `cert_file` and `key_file` together. There is no option to skip the certificate check. Refused with `mqtt://`. |
+| `format` | `json` | `json`, which covers plain payloads too. `sparkplug_b` and `rebirth` are refused by this build (see "What this build refuses"). |
+| `qos` | `1` | the QoS of the subscriptions, `0` or `1` |
+| `persistent_session` | `true` | a session the broker keeps (clean session false): with QoS 1 it holds the messages published while the agent is down and delivers them at the next start, so a restart loses nothing |
+| `keepalive` | `30s` | the MQTT keep alive, a positive duration |
+| `max_payload` | `256KiB` | the largest message accepted: a number of bytes, or a size written `<n>KiB` or `<n>MiB`, from 1 byte to 16 MiB. A larger message is dropped, before any parsing, and counted as `payload_too_large`. |
+| `timestamp` | reception | `{path, format}`: where the sample time is in a JSON payload, for every topic of the input. `format` is `rfc3339`, `unix_s` or `unix_ms`; both keys are required. |
+| `topics` | | per-topic overrides, keyed by the topic of a point (a key that no point of the input uses is refused, so a misspelt topic does not pass silently); only `timestamp` for now, with the same `{path, format}` |
+| `availability` | | `[{device, topic, online, offline}]`, at most one per device, all four keys required, `online` and `offline` different, `topic` not the topic of a point (see "Availability and death") |
+
+The password is resolved at every connect, as for `opcua`: a rotated `secret://file/` password takes
+effect at the next connect, and a password that does not resolve is a `connection` error with the usual
+backoff. Give the `tls` files as absolute paths: a relative one is read against the agent's working directory, not the document's. `Start`
+reads the TLS files and returns: a file that is missing or unreadable fails the start of the input (the
+document is `rolled_back`, with a message naming the field and not the path). A broker that cannot be
+reached never fails the start: the connection is tried in the background and, after `death_tolerance`, the
+devices are reported dead.
+
+**Points.** `read` is `subscribe`, in the short or the long form (the long form's settings are ignored);
+`poll` and `event` are refused. `type` is required, so the data type announced in the `birth` does not depend
+on the first message. `byte_order` is refused.
+
+**Address.** `<topic>[|<path>]`, split at the first `|`.
+
+- The topic is concrete: `+` and `#` are refused, since every sample belongs to one signal. A topic that
+  contains `|` cannot be addressed.
+- `path` is dot notation, as the backend's `mapped_json` reads with `data_get`: `force.kn`, `counters.0`, where a
+  numeric segment indexes a list. A key that contains `.` cannot be addressed.
+- Without a path the value is the whole payload, read as plain text.
+
+The agent subscribes once to each distinct topic. Several points on one topic with different paths make
+several samples from one message, with the same timestamp. A retained message gives the point its initial
+value at once.
+
+**Conversion to the point's `type`**, lossless or `bad`:
+
+| Value | Result |
+|---|---|
+| JSON number | the integer types take it only when it is an integer inside the type's range: `3.5`, `3.0`, `1e3` and `70000` for `int16` are `bad`, never rounded. `uint64` above 2^63-1 is `bad` (the model's integers are signed 64-bit, as for `modbus`). `float32` and `float64` take the value; a number that is not finite (`1e400`) is `bad` |
+| JSON boolean | `bool` |
+| JSON string | `string`; for any other type it is `bad` (the text `"12"` is not converted to a number) |
+| Plain payload | parsed by `type`: `bool` accepts `true`/`false`, `1`/`0` and `on`/`off` in any case, around optional white space; numbers go through the standard parser with the same integer rule; `string` is the text as it is (it must be valid UTF-8) |
+| Anything else: `null`, an object or a list at the path | `bad`, read error `conversion` |
+
+A `bad` sample carries the zero of the point's kind, as in the other drivers.
+
+**Message outcomes.**
+
+| Case | Result |
+|---|---|
+| The path is missing from the message | no sample for that point (devices send partial updates) |
+| The payload is not valid JSON | `bad` samples for the points of that topic that have a path (a plain point of the topic reads it as text); read error `malformed_json`, once per message |
+| A `timestamp` is set for the topic and the message has none, it is unreadable, or it is before 1970-01-01T00:00:00Z or after the end of year 9999 (after applying an `rfc3339` offset) | `bad` samples for every point of that topic, plain ones included; read error `bad_timestamp` (and `malformed_json` too for a payload that is not JSON). So set a `timestamp` only on JSON topics, per topic through `topics`, not for an input that also has plain topics |
+| A value does not convert | `bad` sample for that point; read error `conversion`, per point |
+| The payload is above `max_payload` | dropped, no sample; read error `payload_too_large` |
+| A message on a topic no point subscribes to | dropped; read error `unmapped`. It happens with a persistent session after a configuration change that removed the topic (see below) |
+
+**Timestamp.** Without a `timestamp` the sample time is the agent's clock at the arrival of the message.
+`rfc3339` reads a JSON string, `unix_s` and `unix_ms` a JSON number (fractions are kept). A time before the Unix
+epoch (a negative number) or after year 9999 is `bad_timestamp`: the backend would refuse it, and with it the
+whole batch. **A retained message
+is an ordinary message: with the reception time as timestamp, a value retained days ago takes the time of the
+connection.** Give the topic a payload timestamp, or know that the first sample after each connection can be old
+data stamped now.
+
+**Availability and death.** The broker connection and an optional availability topic per device decide when a
+device is alive.
+
+- While the broker is connected every device is alive, whether it publishes or not: the input renews it when the
+  connection is made and then every half `death_tolerance`. Silence never kills a device, since MQTT devices
+  often publish on change only, and the reconnection gives the `birth` at once.
+- The broker missing for longer than `death_tolerance` (an unreachable broker at start included) is the death
+  of every device of the input, and `laraplate_edge_input_connected` is 0 meanwhile. A connection lost and
+  restored sooner is invisible to the backend.
+- A device with an `availability` entry also follows its topic. A message whose payload is exactly the
+  `offline` string is the death of that device at once, for that device only, and the keep-alive does not
+  revive it. The `online` string, or the first sample of the device, is its `birth`. A retained `offline` (a
+  Last Will that the broker keeps) is seen at start and gives the death right after the birth. A payload that is
+  neither of the two strings is ignored and counted as `availability`. One availability topic may serve
+  several devices. An availability topic is not also the topic of a point: such a document is refused, since a
+  message on it would only ever be read as availability. A device that publishes values on its status topic
+  needs them on another topic.
+
+**Persistent session and configuration changes.** With `persistent_session: true` (and QoS 1) the broker keeps
+the messages published while the agent is down, and the input receives them as samples, in order, when it
+connects again. Stopping an input for a reload disconnects without unsubscribing, so the session keeps the
+messages. The set of topics the input subscribed to is kept in `data_dir/mqtt/topics/<input id>.json` (a
+sorted JSON list, written after the broker acknowledged the subscriptions). At every connection the input
+unsubscribes the topics of that file that its document no longer uses, then subscribes its own: so a topic
+removed by a reload is dropped from the session at the next connection, and a message of it still queued in the
+session is dropped and counted as `unmapped`, never emitted. The file is outside `data_dir/inputs/<input id>`,
+which the agent removes on a rollback and when an input leaves the document, so a rollback also unsubscribes
+the topics only the failed document used. The subscriptions are made again at every connection, whether or not
+the broker kept the session. A message is acknowledged to the broker only after the input has handled it
+(emitted its samples, or counted it as a read error), so one that arrives while the input is stopping stays in the
+session and comes again at the next connection.
+
+**Removing an input.** An input removed from the document leaves its persistent session on the broker, which goes
+on queuing the QoS 1 messages of its topics until the broker expires the session or it is cleared. To avoid it,
+apply once a document with `persistent_session: false` for that input before removing it (a clean session
+discards the broker's session), or clear the session of its client id on the broker.
+
+**Read errors.** `read_errors` of `/status` and `laraplate_edge_input_read_errors_total{input, kind}` use the
+kinds below. Like every input that reports its health, an `mqtt` input shows `timeout`, `connection`,
+`exception` and `decode` from the start, at 0; this driver counts only `connection` among them and never
+`timeout`, `exception` or `decode`. The kinds specific to `mqtt` (`payload_too_large`, `malformed_json`,
+`bad_timestamp`, `conversion`, `availability`, `unmapped`) appear at their first count.
+
+| Kind | Counts |
+|---|---|
+| `connection` | any failure of the broker connection: a refused or reset connection, a failed TLS handshake, bad credentials, a password that does not resolve, a lost connection. A subscription the broker refuses (an ACL that forbids the topic) is shown only this way, by repeated `connection` errors and the death of the devices; nothing else names the topic |
+| `payload_too_large` | a message above `max_payload`, dropped |
+| `malformed_json` | a message that is not valid JSON where a path or a timestamp needs it, once per message |
+| `bad_timestamp` | a message whose `timestamp` is missing, unreadable, before 1970 or after year 9999, once per message |
+| `conversion` | a value that does not convert to the point's `type`, per point |
+| `availability` | an availability payload that is neither `online` nor `offline` |
+| `unmapped` | a message on a topic no point subscribes to |
+
+Payload values, user names, passwords and broker addresses are never written to the logs at `info` and above.
+
+**Declared limits.**
+
+- The sample time of a message is the agent's clock unless a payload timestamp is configured; retained and
+  replayed messages are stamped with the time they arrive (see "Timestamp").
+- A broker that refuses a subscription is retried at every reconnection and reported only through the
+  `connection` kind (above); the logs carry the details at `debug`.
+- `connected` turns true when the broker accepts the connection, a little before the subscriptions are
+  acknowledged.
+- A broker that does not keep the session (a restarted broker with no persistence, or one that drops sessions
+  by policy) loses the messages published while the agent was down: the agent subscribes again but cannot
+  recover them. Retained messages still arrive.
+- A device with a Last Will that is not retained is seen only when the broker publishes it: an agent that was
+  down at that moment misses the death until the device publishes `online` or data.
+- Only MQTT 3.1.1 over TCP and TLS: no MQTT 5, no WebSockets. The automated tests run the agent against an
+  in-process broker only; try a new broker with `probe` before relying on it.
 
 ## Transforms
 
@@ -656,7 +841,7 @@ written atomically (directory mode `0700`, file `0600`) on every count:
 | `route.include` | no | `["*"]` | patterns matched against `device/signal` (Go `path.Match`: `*`, `?`, `[...]`). `*` alone matches everything; a pattern without `/` means `<pattern>/*`. A device's `birth` and `death` go to every output routing at least one of its signals, and the `birth` lists only those. |
 | `batch.max_samples` | no | `1000` | records per batch, 1 to 5000 (the backend default of `mes.machine.max_samples`) |
 | `batch.max_body` | no | `1024KiB` | bytes per request body, at most `1024KiB` (`mes.machine.max_body_kb`) |
-| `batch.max_wait` | no | `2s` | how long a batch waits to fill, from its first record |
+| `batch.max_wait` | no | `2s` | how long a batch waits to fill, from the moment its first record entered the buffer |
 | `buffer.max_size` | no | `1GiB` | bytes both queues of the output may use on disk, at least `32MiB` (two segments of 16 MiB) |
 | `buffer.min_free_percent` | no | `5` | share of the disk kept free, above 0 and at most 50 |
 | `buffer.fsync_interval` | no | `200ms` | group sync period of written records |
@@ -810,9 +995,9 @@ What the agent does with it:
   of the declared `type`, is routed to the outputs like a machine sample: it keeps the plugin's `ts` and
   quality and takes the declared `priority`. Anything else is refused, never routed, and counted
   (`refused` in `/status`), checked in this order: an invalid sample (a missing or malformed `ts`, an
-  unspecified quality or priority, no value or a float that is not finite, an empty device or signal),
-  then a device it did not declare or an undeclared signal of a declared device, then a declared signal
-  with a value of another kind.
+  unspecified quality or priority, no value, a float that is not finite or a string that is not valid
+  UTF-8, an empty device or signal), then a device it did not declare or an undeclared signal of a
+  declared device, then a declared signal with a value of another kind.
 - **Births and deaths.** The agent, not the plugin, sends the `birth` of the derived devices, within a
   second of the processor's stream to the plugin opening. A derived device is alive while that stream
   is up, whether or not it sends samples. When the stream goes down (the plugin died, restarts, or
@@ -924,7 +1109,8 @@ Outcomes, as reported to Laraplate:
 
 | Part | Comes with |
 |---|---|
-| drivers other than `simulated`, `modbus` and `opcua` | the driver plans, in the design's order: `mqtt`, `serial` and `file` |
+| drivers other than `simulated`, `modbus`, `opcua` and `mqtt` | the driver plans, in the design's order: `serial` and `file` |
+| `connection.format: sparkplug_b` and `connection.rebirth` of an `mqtt` input | the Sparkplug B plan (the second plan of the `mqtt` driver); refused as `connection.format: not available in this build` |
 | output types other than `laraplate-http` and `plugin:<id>` | the MQTT output plan (`laraplate-mqtt`) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references, `outputs[].config` and `processors[].config` included | a later plan with the OS keystore |
@@ -1005,6 +1191,11 @@ is exact, but its `ts` range can span records that are still in the buffer.
   served on the agent's clock: a device clock far from the agent's shifts them, and a backward step of
   the agent's clock delays a `heartbeat` by the size of the step.
 - `valid_range` compares integers as floats, exactly up to 2^53 in magnitude.
+- After a corrupt record is found while the agent runs, the buffer counts its records again. A segment
+  file it cannot open at that moment (an I/O error, too many open files) keeps its records, which are
+  still sent, but they are left out of the `records` count of `/status` and of the metrics until the
+  next count or restart; with the count at 0 the output seals the next batch only on the next incoming
+  record. The `ERROR` "cannot open a segment to count its records" names the queue and the segment.
 - Every counted edge of an `edge_counter` writes and syncs the input's state file while the input's
   transform processor holds its lock: the other signals of that input wait for the write, tens of
   milliseconds on an SD card. A fast pulse train on a slow disk delays the input's samples accordingly.

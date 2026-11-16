@@ -7,6 +7,7 @@ package status
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -26,7 +27,11 @@ const (
 	// readHeaderTimeout bounds how long a client may take to send its
 	// request headers.
 	readHeaderTimeout = 5 * time.Second
-	// writeTimeout bounds one response.
+	// readTimeout bounds the whole request; the endpoint is read-only and
+	// takes no body, so it is only a stricter bound on a slow client.
+	readTimeout = 10 * time.Second
+	// writeTimeout bounds one response, /metrics of a large agent included
+	// (thousands of series are a few hundred kilobytes, built in memory).
 	writeTimeout = 10 * time.Second
 	// idleTimeout closes idle keep-alive connections.
 	idleTimeout = 60 * time.Second
@@ -66,6 +71,9 @@ type Config struct {
 	Clock clock.Clock
 	// Logger receives the logs; nil means slog.Default().
 	Logger *slog.Logger
+	// Started is when the process started; the uptime counts from it. The
+	// zero value means the time of Listen.
+	Started time.Time
 }
 
 // Server is a bound status endpoint. Serve answers the requests until its
@@ -127,7 +135,7 @@ func Listen(ctx context.Context, cfg Config) (*Server, error) {
 
 	s := &Server{
 		ln:      ln,
-		token:   []byte(token),
+		token:   digestOf(token),
 		agentID: cfg.AgentID,
 		version: cfg.Version,
 		source:  cfg.Source,
@@ -140,10 +148,14 @@ func Listen(ctx context.Context, cfg Config) (*Server, error) {
 	if s.log == nil {
 		s.log = slog.Default()
 	}
-	s.started = s.clk.Now()
+	s.started = cfg.Started
+	if s.started.IsZero() {
+		s.started = s.clk.Now()
+	}
 	s.http = &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
@@ -151,6 +163,16 @@ func Listen(ctx context.Context, cfg Config) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// digestOf returns the SHA-256 digest of token, empty for no token.
+func digestOf(token string) []byte {
+	if token == "" {
+		return nil
+	}
+	digest := sha256.Sum256([]byte(token))
+
+	return digest[:]
 }
 
 // isLoopbackHost reports whether host names the loopback interface: a
@@ -231,12 +253,13 @@ func readOnly(next http.Handler) http.Handler {
 }
 
 // authorized asks for the bearer token, when one is configured, before
-// next. The comparison takes the same time whatever the presented token.
+// next. The Bearer scheme is matched without regard to case (RFC 9110). The
+// comparison takes the same time whatever the presented token.
 func (s *Server) authorized(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if len(s.token) > 0 {
-			presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !ok || subtle.ConstantTimeCompare([]byte(presented), s.token) != 1 {
+			scheme, presented, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+			if !strings.EqualFold(scheme, "Bearer") || !s.tokenMatches(presented) {
 				w.Header().Set("WWW-Authenticate", "Bearer")
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 
@@ -245,6 +268,15 @@ func (s *Server) authorized(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// tokenMatches compares the SHA-256 digests of the presented and the
+// configured token, so that the time taken depends on neither the content nor
+// the length of the presented one.
+func (s *Server) tokenMatches(presented string) bool {
+	digest := sha256.Sum256([]byte(presented))
+
+	return subtle.ConstantTimeCompare(digest[:], s.token) == 1
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -355,6 +387,11 @@ type queueDoc struct {
 }
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
+	s.writeJSON(w, http.StatusOK, s.statusDoc())
+}
+
+// statusDoc is the body of /status.
+func (s *Server) statusDoc() statusDoc {
 	st := s.source.Status()
 	now := s.clk.Now()
 
@@ -419,7 +456,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 
-	s.writeJSON(w, http.StatusOK, doc)
+	return doc
 }
 
 func queueOf(q buffer.QueueStats, now time.Time) queueDoc {

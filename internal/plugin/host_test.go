@@ -211,22 +211,20 @@ func (h *harness) stop() {
 	done := make(chan error, 1)
 	go func() { done <- h.host.Stop(context.Background()) }()
 
-	deadline := time.Now().Add(guard)
+	deadline := time.After(guard)
 	for {
 		select {
 		case <-done:
 			return
-		default:
-		}
-		if time.Now().After(deadline) {
+		case <-deadline:
 			h.t.Error("Stop did not return")
 
 			return
+		case <-time.After(time.Millisecond):
 		}
 		if h.clk.PendingTimers() > 0 {
 			h.clk.Advance(time.Second)
 		}
-		runtime.Gosched()
 	}
 }
 
@@ -238,7 +236,7 @@ func (h *harness) waitFor(what string, cond func() bool) {
 		if time.Now().After(deadline) {
 			h.t.Fatalf("%s not reached; status %+v; log:\n%s", what, h.host.Status(), h.log.String())
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 

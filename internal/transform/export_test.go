@@ -21,3 +21,6 @@ func ArmedDeadline(p *Processor) (time.Time, bool) {
 
 // DeviceDown tells the chain's steps that their device died.
 func DeviceDown(c *Chain) ([]model.Sample, []error) { return c.deviceDown() }
+
+// ClockSteppedBack tells the chain's steps the wall clock went back to now.
+func ClockSteppedBack(c *Chain, now time.Time) { c.clockSteppedBack(now) }

@@ -220,6 +220,19 @@ func (h *heartbeat) observeNow(now time.Time) {
 	}
 }
 
+// clockSteppedBack is told by the processor that the wall clock now reads now,
+// before a reading it saw earlier. A deadline armed from the old reading
+// would wait out the step, so it is clamped to now+period; one that was
+// already due at the step is moved there too (one resend is skipped). A
+// sample ts ahead of the clock still arms from its ts, as before.
+func (h *heartbeat) clockSteppedBack(now time.Time) {
+	h.lastNow = now
+
+	if limit := now.Add(h.period); h.has && h.deadline.After(limit) {
+		h.deadline = limit
+	}
+}
+
 // leave records s as the last sample that left and arms the deadline.
 func (h *heartbeat) leave(s model.Sample) {
 	from := s.TS
@@ -294,6 +307,13 @@ func (m *minInterval) Apply(s model.Sample) ([]model.Sample, error) {
 // holding nothing closes on the next sample or Fire; it needs no wake-up.
 func (m *minInterval) Deadline() (time.Time, bool) { return m.end, m.open && m.held != nil }
 
+// clockSteppedBack clamps the end of a window holding a sample to now+interval.
+func (m *minInterval) clockSteppedBack(now time.Time) {
+	if limit := now.Add(m.interval); m.open && m.held != nil && m.end.After(limit) {
+		m.end = limit
+	}
+}
+
 func (m *minInterval) Fire(now time.Time) []model.Sample { return m.advance(now) }
 
 func (m *minInterval) observeBad(s model.Sample) []model.Sample {
@@ -361,6 +381,27 @@ type debounce struct {
 	pending *model.Sample
 	sent    bool
 	last    model.Value
+	// capped, with limit, moves the deadline of pending earlier after a
+	// backward clock step; a new pending value clears it.
+	capped bool
+	limit  time.Time
+}
+
+// deadline is when the waiting value is due; pending must not be nil.
+func (d *debounce) deadline() time.Time {
+	due := d.pending.TS.Add(d.delay)
+	if d.capped && d.limit.Before(due) {
+		return d.limit
+	}
+
+	return due
+}
+
+// clockSteppedBack clamps the deadline of the waiting value to now+delay.
+func (d *debounce) clockSteppedBack(now time.Time) {
+	if limit := now.Add(d.delay); d.pending != nil && d.deadline().After(limit) {
+		d.capped, d.limit = true, limit
+	}
 }
 
 func (d *debounce) OutKind() model.ValueKind { return d.kind }
@@ -373,7 +414,7 @@ func (d *debounce) Apply(s model.Sample) ([]model.Sample, error) {
 	case d.sent && s.Value == d.last:
 		d.pending = nil
 	default:
-		d.pending = &s
+		d.pending, d.capped = &s, false
 	}
 
 	return out, nil
@@ -384,7 +425,7 @@ func (d *debounce) Deadline() (time.Time, bool) {
 		return time.Time{}, false
 	}
 
-	return d.pending.TS.Add(d.delay), true
+	return d.deadline(), true
 }
 
 func (d *debounce) Fire(now time.Time) []model.Sample { return d.due(now) }
@@ -406,7 +447,7 @@ func (d *debounce) deviceDown() []model.Sample {
 // at or after the deadline therefore sends the waiting value first, whether
 // or not Fire ran in time.
 func (d *debounce) due(t time.Time) []model.Sample {
-	if d.pending == nil || t.Before(d.pending.TS.Add(d.delay)) {
+	if d.pending == nil || t.Before(d.deadline()) {
 		return nil
 	}
 

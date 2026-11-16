@@ -111,6 +111,13 @@ type clockObserver interface {
 	observeNow(now time.Time)
 }
 
+// clockStepObserver is implemented by a step whose deadline was armed from a
+// clock reading (heartbeat, min_interval, debounce): after a backward wall
+// clock step it clamps the deadline to now plus its own period.
+type clockStepObserver interface {
+	clockSteppedBack(now time.Time)
+}
+
 // deviceObserver is implemented by a step that must know its device died
 // (ruling R14): heartbeat stops resending, min_interval releases its held
 // sample, debounce drops its waiting value; deadband and debounce forget their
@@ -200,6 +207,16 @@ func (c *Chain) Fire(now time.Time) ([]model.Sample, []error) {
 	}
 
 	return c.exit(out, &errs), errs
+}
+
+// clockSteppedBack tells every step that holds a deadline that the wall clock
+// now reads now, before a reading seen earlier, without firing anything.
+func (c *Chain) clockSteppedBack(now time.Time) {
+	for _, st := range c.stages {
+		if o, ok := st.step.(clockStepObserver); ok {
+			o.clockSteppedBack(now)
+		}
+	}
 }
 
 // deviceDown tells every step, in chain order, that the chain's device died;
@@ -498,7 +515,12 @@ func finiteFloat(v any) (float64, bool) {
 	return f, true
 }
 
-// integerIn converts a decoded JSON number to an integer within [lo, hi].
+// integerIn converts a decoded JSON number to an integer within [lo, hi]. A
+// literal with an integer value (3.0, 1e1) is accepted on purpose: the JSON
+// Schema calls it an integer, and the configuration parser already writes it
+// as 3 and 10 in the canonical form Compile receives, so refusing it here
+// would only make Compile disagree with the schema for a direct caller (the
+// agreement is pinned in check_test.go, round with 2.0).
 func integerIn(v any, lo, hi int64) (int64, bool) {
 	n, ok := v.(json.Number)
 	if !ok {

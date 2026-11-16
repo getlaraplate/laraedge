@@ -28,6 +28,12 @@ import (
 	"github.com/getlaraplate/laraedge/internal/version"
 )
 
+// MaxStalePollInterval caps the poll interval while the backend keeps
+// answering the version last attempted and not applied (rejected, such as
+// one older than the applied one, or rolled back) instead of 304 (C44). A
+// configured poll interval above it is kept.
+const MaxStalePollInterval = 30 * time.Minute
+
 // Backend limits of a configuration report (MachineAgentConfigService).
 const (
 	// MaxReportErrors is the most error messages a report carries.
@@ -94,6 +100,13 @@ type LaraplateConfig struct {
 // again; an undelivered report is sent at every poll, from the first one
 // after a restart, until the backend records it (2xx) or refuses it (422).
 // An apply cut short by the shutdown is not an attempt and records nothing.
+//
+// A backend that answers again the version last attempted and not applied
+// (rejected, such as one older than the applied version, or rolled back)
+// instead of 304 is misbehaving: the document is not applied again, the
+// provider warns once and the poll interval doubles at each such answer, up
+// to MaxStalePollInterval; any other answer brings the configured interval
+// back.
 type Laraplate struct {
 	configURL string
 	reportURL string
@@ -110,6 +123,11 @@ type Laraplate struct {
 	// Owned by Run.
 	lastAttempt attempt
 	pending     []report
+	// wait is the interval before the next poll; staleVersion is the
+	// already attempted version the backend answered at the last poll, 0
+	// when it answered anything else.
+	wait         time.Duration
+	staleVersion int64
 }
 
 // attempt is the last version the provider tried to apply and its outcome.
@@ -205,7 +223,7 @@ func (l *Laraplate) Run(ctx context.Context) error {
 			attempted = nil
 		}
 
-		timer := l.clk.NewTimer(l.interval)
+		timer := l.clk.NewTimer(l.nextWait())
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -216,7 +234,23 @@ func (l *Laraplate) Run(ctx context.Context) error {
 	}
 }
 
-// poll sends the pending reports, then asks for the configuration.
+// nextWait returns the interval before the next poll: doubled from the last
+// one, up to MaxStalePollInterval, while the backend answers an already
+// attempted document (staleVersion), the configured interval otherwise.
+func (l *Laraplate) nextWait() time.Duration {
+	if l.staleVersion == 0 || l.wait == 0 {
+		l.wait = l.interval
+
+		return l.wait
+	}
+
+	l.wait = max(min(2*l.wait, MaxStalePollInterval), l.interval)
+
+	return l.wait
+}
+
+// poll sends the pending reports, then asks for the configuration. A poll
+// that got no answer leaves staleVersion as it was.
 func (l *Laraplate) poll(ctx context.Context) {
 	token, err := l.resolver.Resolve(ctx, l.tokenRef)
 	if err != nil {
@@ -252,11 +286,13 @@ func (l *Laraplate) poll(ctx context.Context) {
 		return
 	}
 
+	stale := l.staleVersion
+	l.staleVersion = 0
 	switch {
 	case status == http.StatusNotModified:
 		l.log.Debug("provider: configuration unchanged")
 	case status == http.StatusOK:
-		l.handle(ctx, token, body)
+		l.handle(ctx, token, body, stale)
 	case status == http.StatusNotFound:
 		l.log.Info("provider: the backend has no active configuration for this agent")
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
@@ -267,8 +303,9 @@ func (l *Laraplate) poll(ctx context.Context) {
 }
 
 // handle applies a downloaded document and reports the outcome, unless its
-// version is the one last attempted.
-func (l *Laraplate) handle(ctx context.Context, token string, body []byte) {
+// version is the one last attempted: then it records it as stale, warning
+// once per version (stale is the one of the previous poll).
+func (l *Laraplate) handle(ctx context.Context, token string, body []byte, stale int64) {
 	var answer struct {
 		Version  int64           `json:"version"`
 		Document json.RawMessage `json:"document"`
@@ -280,7 +317,13 @@ func (l *Laraplate) handle(ctx context.Context, token string, body []byte) {
 	}
 
 	if answer.Version == l.lastAttempt.Version && l.lastAttempt.Outcome != supervisor.ResultApplied {
-		l.log.Debug("provider: configuration version already attempted", "version", answer.Version, "outcome", l.lastAttempt.Outcome)
+		l.staleVersion = answer.Version
+		if stale == answer.Version {
+			l.log.Debug("provider: configuration version already attempted", "version", answer.Version, "outcome", l.lastAttempt.Outcome)
+		} else {
+			l.log.Warn("provider: the backend answered again the configuration version last attempted and not applied, instead of 304; polling less often until it changes",
+				"version", answer.Version, "outcome", l.lastAttempt.Outcome, "applied_version", l.applier.AppliedVersion(), "max_interval", MaxStalePollInterval.String())
+		}
 
 		return
 	}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/docrules"
 )
 
 // Transports of the connection (spec section 5).
@@ -105,7 +106,7 @@ func ParseConnection(raw json.RawMessage) (Connection, error) {
 	}
 	for _, key := range sortedKeys(fields) {
 		if !slices.Contains(connectionFields, key) {
-			return Connection{}, errors.New("connection." + key + ": unknown field")
+			return Connection{}, docrules.UnknownKey("connection.", key)
 		}
 	}
 
@@ -369,25 +370,48 @@ func digits(s string, limit uint64) (uint64, bool) {
 	return n, true
 }
 
-// Point types of spec section 5.
-var pointTypes = []string{
-	"bool", "int16", "uint16", "int32", "uint32", "float32", "int64", "uint64", "float64", "string",
+// pointType is a point type of spec section 5 and the registers it occupies
+// (one bit for bool, which sits on a bit area); registers is 0 for string,
+// whose size is the `#n` count of its address.
+type pointType struct {
+	name      string
+	registers uint16
 }
+
+// pointTypes is the one table of the point types: it drives the accepted
+// types, the refusal text listing them and Size.
+var pointTypes = []pointType{
+	{"bool", 1}, {"int16", 1}, {"uint16", 1},
+	{"int32", 2}, {"uint32", 2}, {"float32", 2},
+	{"int64", 4}, {"uint64", 4}, {"float64", 4},
+	{"string", 0},
+}
+
+// unknownTypeText is the refusal of an unknown type, listing pointTypes.
+var unknownTypeText = func() string {
+	names := make([]string, len(pointTypes))
+	for i, t := range pointTypes {
+		names[i] = t.name
+	}
+
+	return "type: want " + strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}()
 
 // Size returns the number of registers the point occupies (one bit for bool,
 // which sits on a bit area): 1 for bool, int16 and uint16, 2 for int32, uint32
 // and float32, 4 for int64, uint64 and float64, the `#n` count for string.
 func Size(p config.Point, a Address) (uint16, error) {
-	switch p.Type {
-	case "bool", "int16", "uint16":
-		return 1, nil
-	case "int32", "uint32", "float32":
-		return 2, nil
-	case "int64", "uint64", "float64":
-		return 4, nil
-	case "string":
-		return a.Registers, nil
+	for _, t := range pointTypes {
+		if t.name != p.Type {
+			continue
+		}
+		if t.registers == 0 {
+			return a.Registers, nil
+		}
+
+		return t.registers, nil
 	}
+
 	return 0, errors.New("type: unknown")
 }
 
@@ -398,15 +422,15 @@ func CheckPoint(p config.Point, a Address) error {
 	if p.Read.Mode != config.ReadPoll {
 		return errors.New("read: only poll is supported")
 	}
-	if !slices.Contains(pointTypes, p.Type) {
-		return errors.New("type: want bool, int16, uint16, int32, uint32, float32, int64, uint64, float64 or string")
+	if !slices.ContainsFunc(pointTypes, func(t pointType) bool { return t.name == p.Type }) {
+		return errors.New(unknownTypeText)
 	}
 
 	switch {
 	case p.Type == "bool" && a.Area.IsRegister():
-		return errors.New("type bool: only on co or di")
+		return errors.New("type: bool only on co or di")
 	case p.Type != "bool" && !a.Area.IsRegister():
-		return errors.New("type " + p.Type + ": only on hr or ir")
+		return errors.New("type: " + p.Type + " only on hr or ir")
 	}
 
 	if p.Type == "string" {

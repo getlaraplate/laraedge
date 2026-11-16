@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// proxy forwards TCP connections to a target. Drop closes every live
+// proxy forwards TCP connections to a target. drop closes every live
 // connection and keeps listening, as a network loss does; a target that
 // refuses connections makes the server unreachable, as a stopped one is.
 // The library's server does not drop live connections on Close, so a loss

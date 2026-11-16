@@ -314,6 +314,8 @@ func TestNegativeZeroIsNormalised(t *testing.T) {
 		{"offset", "offset", "0", model.Value{Kind: model.KindFloat, Float: negZero}},
 		{"round towards zero", "round", "0", model.Value{Kind: model.KindFloat, Float: -0.4}},
 		{"round a negative tiny value", "round", "2", model.Value{Kind: model.KindFloat, Float: -1e-9}},
+		{"regex_extract of -0", "regex_extract", `{"pattern":"n=(.*)","as":"float"}`, model.StringValue("n=-0")},
+		{"map float literal -0", "map", `{"table":{"a":-0.0}}`, model.StringValue("a")},
 	}
 
 	for _, tc := range tests {

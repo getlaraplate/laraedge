@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"io"
 	"log"
 	"math/big"
@@ -20,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"encoding/hex"
 	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/server"
 	"github.com/gopcua/opcua/server/attrs"
@@ -38,7 +38,7 @@ type Options struct {
 	// Bulk is the number of Int32 variables in the folder Bulk (none when 0).
 	Bulk int
 	// Proxied puts a TCP proxy in front of the server: URL is then the
-	// proxy's address, and Down, Up and Drop simulate a lost network. The
+	// proxy's address, and Down and Up simulate a lost network. The
 	// server advertises the proxy's URL among its endpoints, as a server
 	// behind a NAT does: it answers endpoint discovery only for the URL the
 	// client dialled.
@@ -47,9 +47,8 @@ type Options struct {
 
 // Server is a running test server with the policies None and Basic256Sha256
 // (Sign and SignAndEncrypt) and anonymous authentication. SetValue changes a
-// variable; with Options.Proxied, Drop, Down and Up simulate a lost network.
-// Its nodes, in
-// Namespace below the namespace's Objects folder:
+// variable; with Options.Proxied, Down and Up simulate a lost network. Its
+// nodes, in Namespace below the namespace's Objects folder:
 //
 //	temp   Double variable
 //	count  Int32 variable
@@ -110,7 +109,15 @@ func loadKeys() error {
 }
 
 func certificate(key *rsa.PrivateKey, notBefore, notAfter time.Time) ([]byte, error) {
-	appURI, err := url.Parse("urn:laraplate:opcuatest:server")
+	return ServerCertificate(key, "urn:laraplate:opcuatest:server", notBefore, notAfter)
+}
+
+// ServerCertificate is a self-signed server certificate (DER) for key, with
+// the application URI uri, the IP 127.0.0.1 and the key usages an OPC UA
+// application certificate needs. The package-internal test server of
+// internal/input/opcua builds its certificates with it too.
+func ServerCertificate(key *rsa.PrivateKey, uri string, notBefore, notAfter time.Time) ([]byte, error) {
+	appURI, err := url.Parse(uri)
 	if err != nil {
 		return nil, err
 	}
@@ -223,18 +230,6 @@ func (s *Server) SetValue(t testing.TB, name string, value any) {
 	if status := s.ns.SetAttribute(id, ua.AttributeIDValue, server.DataValueFromValue(value)); status != ua.StatusOK {
 		t.Fatalf("opcuatest: set %s: %v", name, status)
 	}
-}
-
-// Drop closes every live connection through the proxy; new ones are still
-// accepted. It needs Options.Proxied.
-func (s *Server) Drop(t testing.TB) {
-	t.Helper()
-
-	if s.proxy == nil {
-		t.Fatal("opcuatest: Drop needs Options.Proxied")
-	}
-
-	s.proxy.drop()
 }
 
 // Down makes the server unreachable through the proxy: the live connections

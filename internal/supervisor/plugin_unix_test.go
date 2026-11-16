@@ -3,11 +3,12 @@
 package supervisor
 
 import (
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/getlaraplate/laraedge/internal/plugin/plugintest"
 )
 
 // alive reports whether a process with pid exists (an exited child the
@@ -32,10 +33,10 @@ func TestCloseStopsPluginsWithinTheStopDeadline(t *testing.T) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
+	// A plugin not yet stopped when Close sends Shutdown would answer it and
+	// exit (C64).
 	for _, pid := range pids {
-		if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
-			t.Fatal(err)
-		}
+		plugintest.StopProcess(t, pid)
 	}
 
 	closed := make(chan error, 1)
@@ -46,13 +47,7 @@ func TestCloseStopsPluginsWithinTheStopDeadline(t *testing.T) {
 	f.clk.Advance(5 * time.Second)
 
 	f.waitLogCount("sending SIGTERM", 2)
-	deadline := time.Now().Add(guard)
-	for f.clk.PendingTimers() < pending {
-		if time.Now().After(deadline) {
-			t.Fatalf("the kill timers were not armed: %d pending, want %d", f.clk.PendingTimers(), pending)
-		}
-		runtime.Gosched()
-	}
+	f.clk.BlockUntil(t, pending)
 	f.clk.Advance(5 * time.Second)
 
 	select {

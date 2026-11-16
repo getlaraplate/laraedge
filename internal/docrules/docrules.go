@@ -24,6 +24,17 @@ func IsSafeKey(key string) bool {
 	return safeKey.MatchString(key)
 }
 
+// UnknownKey refuses an unknown key of a document object under prefix (such
+// as "connection."): `<prefix><key>: unknown field`, the key named only when
+// IsSafeKey, `*` otherwise, so a secret written as a key never reaches a log.
+func UnknownKey(prefix, key string) error {
+	if !IsSafeKey(key) {
+		key = "*"
+	}
+
+	return errors.New(prefix + key + ": unknown field")
+}
+
 // CheckURL validates a backend base URL: absolute, without credentials, https,
 // or http for a loopback host only. The error never echoes raw.
 func CheckURL(raw string) error {

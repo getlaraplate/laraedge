@@ -3,7 +3,6 @@ package provider_test
 import (
 	"bytes"
 	"context"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -130,7 +129,7 @@ func (r *runner) stop(t *testing.T) {
 // the provider is waiting for its next poll.
 func waitTimers(t *testing.T, clk *clock.Fake, n int) {
 	t.Helper()
-	waitFor(t, "pending timers", func() bool { return clk.PendingTimers() >= n })
+	clk.BlockUntil(t, n)
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -141,7 +140,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatalf("%s not reached", what)
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 

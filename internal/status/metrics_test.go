@@ -2,12 +2,15 @@ package status
 
 import (
 	"bufio"
+	"fmt"
 	"maps"
 	"net/http"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +23,14 @@ var (
 	metricType = map[string]bool{"counter": true, "gauge": true, "histogram": true, "summary": true, "untyped": true}
 )
 
+// reporter is what the validator needs of a *testing.T, so that its own test
+// can watch it refuse a malformed exposition.
+type reporter interface {
+	Helper()
+	Fatal(args ...any)
+	Fatalf(format string, args ...any)
+}
+
 // family is one metric family as the validator read it.
 type family struct {
 	help, typ string
@@ -31,7 +42,7 @@ type family struct {
 // HELP, TYPE and sample lines, that HELP and TYPE come once and before the
 // samples of their family, that the samples of a family are contiguous, that
 // a series is not repeated, and that the text ends with a newline.
-func parseExposition(t *testing.T, text string) map[string]*family {
+func parseExposition(t reporter, text string) map[string]*family {
 	t.Helper()
 
 	if !strings.HasSuffix(text, "\n") {
@@ -114,7 +125,7 @@ func parseExposition(t *testing.T, text string) map[string]*family {
 
 // parseSample parses `name{l="v",...} value` and returns the label set as
 // written, "{}" without labels.
-func parseSample(t *testing.T, n int, line string) (name, labels string, value float64) {
+func parseSample(t reporter, n int, line string) (name, labels string, value float64) {
 	t.Helper()
 
 	rest := line
@@ -152,7 +163,7 @@ func parseSample(t *testing.T, n int, line string) (name, labels string, value f
 
 // scanLabels validates the label set at the start of s and returns its
 // length, closing brace included.
-func scanLabels(t *testing.T, n int, s string) int {
+func scanLabels(t reporter, n int, s string) int {
 	t.Helper()
 
 	i := 1
@@ -209,6 +220,75 @@ func scanLabels(t *testing.T, n int, s string) int {
 	}
 }
 
+// refusal records the first Fatal of the validator and stops its goroutine,
+// as testing.T does.
+type refusal struct {
+	mu  sync.Mutex
+	msg string
+}
+
+func (r *refusal) Helper() {}
+
+func (r *refusal) Fatal(args ...any) { r.Fatalf("%s", fmt.Sprint(args...)) }
+
+func (r *refusal) Fatalf(format string, args ...any) {
+	r.mu.Lock()
+	r.msg = fmt.Sprintf(format, args...)
+	r.mu.Unlock()
+	runtime.Goexit()
+}
+
+// TestExpositionValidatorRefusesMalformedFamilies is the negative self-test
+// of the validator: a validator that accepts anything would let every
+// metrics test pass.
+func TestExpositionValidatorRefusesMalformedFamilies(t *testing.T) {
+	const good = "# HELP laraplate_edge_up Up.\n# TYPE laraplate_edge_up gauge\nlaraplate_edge_up{input=\"a\"} 1\n"
+
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"no final newline", strings.TrimSuffix(good, "\n"), "does not end with a newline"},
+		{"HELP without text", "# HELP laraplate_edge_up\n", "bad HELP line"},
+		{"unknown type", "# HELP laraplate_edge_up Up.\n# TYPE laraplate_edge_up gaugee\n", "bad TYPE line"},
+		{"sample before its TYPE", "# HELP laraplate_edge_up Up.\nlaraplate_edge_up 1\n", "before its TYPE"},
+		{"TYPE twice", "# TYPE laraplate_edge_up gauge\n# TYPE laraplate_edge_up gauge\n", "after its samples, or twice"},
+		{"series repeated", good + "laraplate_edge_up{input=\"a\"} 2\n", "repeated"},
+		{"family split by another", good + "# HELP laraplate_edge_b B.\n# TYPE laraplate_edge_b gauge\nlaraplate_edge_b 1\nlaraplate_edge_up{input=\"b\"} 1\n", "appears again"},
+		{"bad value", "# TYPE laraplate_edge_up gauge\nlaraplate_edge_up one\n", "bad value"},
+		{"unquoted label", "# TYPE laraplate_edge_up gauge\nlaraplate_edge_up{input=a} 1\n", "not quoted"},
+		{"bad escape in a label", "# TYPE laraplate_edge_up gauge\nlaraplate_edge_up{input=\"a\\t\"} 1\n", "bad escape"},
+		{"repeated label name", "# TYPE laraplate_edge_up gauge\nlaraplate_edge_up{a=\"1\",a=\"2\"} 1\n", "repeated label name"},
+		{"blank line", good + "\n", "unexpected line"},
+	}
+
+	if got := parseExposition(t, good); len(got["laraplate_edge_up"].samples) != 1 {
+		t.Fatalf("the validator does not read a good family: %v", got)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &refusal{}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				parseExposition(r, tt.text)
+			}()
+			<-done
+
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if r.msg == "" {
+				t.Fatalf("the validator accepted %q", tt.text)
+			}
+			if !strings.Contains(r.msg, tt.want) {
+				t.Errorf("the validator refused with %q, want %q", r.msg, tt.want)
+			}
+		})
+	}
+}
+
 func TestMetrics(t *testing.T) {
 	h := start(t, "127.0.0.1:0", "", nil)
 
@@ -236,6 +316,7 @@ func TestMetrics(t *testing.T) {
 		"laraplate_edge_output_state":                        "gauge",
 		"laraplate_edge_clock_offset_seconds":                "gauge",
 		"laraplate_edge_last_error_timestamp_seconds":        "gauge",
+		"laraplate_edge_output_settle_failures_total":        "counter",
 	}
 	for name, typ := range types {
 		f := families[name]
@@ -292,6 +373,7 @@ func TestMetrics(t *testing.T) {
 			`{output="main"}`:  float64(epoch.Add(-10 * time.Second).Unix()),
 			`{output="spare"}`: 0,
 		},
+		"laraplate_edge_output_settle_failures_total": {`{output="main"}`: 4},
 	}
 	for name, series := range want {
 		f := families[name]
@@ -434,6 +516,36 @@ func TestMetricsExposeHealthOfReportingInputsOnly(t *testing.T) {
 	}
 	if !maps.Equal(errs.samples, wantErrs) {
 		t.Errorf("input_read_errors_total = %v, want %v", errs.samples, wantErrs)
+	}
+}
+
+// TestMetricsHealthSeriesEndWithTheRunningInput pins the decision of C30 and
+// C31: an input that failed to start has no health, its health series end and
+// input_up says 0; a running input whose connection is down keeps its series
+// at 0.
+func TestMetricsHealthSeriesEndWithTheRunningInput(t *testing.T) {
+	down := false
+	st := supervisor.Status{Inputs: []supervisor.InputStatus{
+		{ID: "oven", Driver: "modbus", State: supervisor.InputRunning, Connected: &down, ReadErrors: map[string]uint64{"timeout": 2}},
+		{ID: "press", Driver: "modbus", State: supervisor.StateFailed, LastError: "start: refused"},
+	}}
+	h := start(t, "127.0.0.1:0", "", nil)
+	h.src.set(st)
+
+	_, _, body := h.get(t, http.MethodGet, "/metrics", "")
+	families := parseExposition(t, body)
+
+	if got := families["laraplate_edge_input_up"].samples; !maps.Equal(got, map[string]float64{`{input="oven"}`: 1, `{input="press"}`: 0}) {
+		t.Errorf("input_up = %v", got)
+	}
+	connected := families["laraplate_edge_input_connected"].samples
+	if !maps.Equal(connected, map[string]float64{`{input="oven"}`: 0}) {
+		t.Errorf("input_connected = %v, want only the running input, at 0", connected)
+	}
+	for labels := range families["laraplate_edge_input_read_errors_total"].samples {
+		if strings.Contains(labels, `"press"`) {
+			t.Errorf("input_read_errors_total has the series %s of a failed input", labels)
+		}
 	}
 }
 

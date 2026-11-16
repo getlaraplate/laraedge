@@ -9,6 +9,8 @@ only), its Delivery status and rulings R7, R12, R13 and R19 describe the shipped
 `opcua` delivered (2026-10-22) by `../plans/2026-10-21-opcua.md`: its Delivery status and rulings describe how the
 shipped driver handles the library's limits (explicit trust, request chunking, subscription lifetime) and the
 fixed timing section 6 leaves open.
+Amended 2026-11-04 by `../plans/2026-11-04-deferred-minors-cleanup.md` (C52): D6 now says the serial port is
+exclusive on Windows only.
 
 **Date:** 2026-10-19
 
@@ -40,7 +42,7 @@ hardware.
 | D3 | Libraries | `github.com/simonvetter/modbus` v1.6.4 (MIT; brings `github.com/goburrow/serial`, MIT) and `github.com/gopcua/opcua` v0.9.1 (MIT; brings `google/uuid`, `golang.org/x/exp`, `golang.org/x/term`, BSD, and `testify`, MIT, test-only). Both are pure Go and ship a server usable in tests. Licences read from the module files on 2026-10-19; each adoption is approved by the user in its plan. |
 | D4 | Delivery | One spec, three plans in order: transforms, `modbus`, `opcua`. |
 | D5 | Birth data type | The `data_type` of a birth comes from the output type of the point's transform chain, no longer from the point's decoding `type`. |
-| D6 | Network drivers start | `Start` opens local resources only (serial port, certificates) synchronously and connects to the machine in the background, so it returns at once; an unreachable machine is death after `death_tolerance`, never a failing `Start` (core ruling R47). This also removes, for these drivers, the core's open issue of an abandoned start closing an exclusive resource while the rollback reopens it. |
+| D6 | Network drivers start | `Start` opens local resources only (serial port, certificates) synchronously and connects to the machine in the background, so it returns at once; an unreachable machine is death after `death_tolerance`, never a failing `Start` (core ruling R47). This also removes, for these drivers, the core's open issue of an abandoned start closing an exclusive resource while the rollback reopens it. Amended 2026-11-04 (plan `../plans/2026-11-04-deferred-minors-cleanup.md`, item C52): the serial port is an exclusive resource on Windows only. On Linux two processes can open the same port and interleave their frames, so a second open does not fail; the agent's advice stands: stop the agent before probing an `rtu` input. |
 
 ## 3. Transform engine
 

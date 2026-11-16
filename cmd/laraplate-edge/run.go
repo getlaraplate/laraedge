@@ -18,6 +18,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/input/modbus"
+	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/input/opcua"
 	"github.com/getlaraplate/laraedge/internal/input/simulated"
 	"github.com/getlaraplate/laraedge/internal/logging"
@@ -71,6 +72,11 @@ func productionDeps() agentDeps {
 // in use) stops the agent at start. logs receives the JSON logs when
 // deps.logger is nil; run passes stdout (spec 10.5).
 func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload <-chan struct{}, logs io.Writer) (err error) {
+	var processStart time.Time
+	if deps.clock != nil {
+		processStart = deps.clock.Now()
+	}
+
 	boot, err := bootstrap.Load(bootstrapPath)
 	if err != nil {
 		return err
@@ -134,6 +140,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 		Version:  version.String(),
 		Source:   sup,
 		Clock:    deps.clock,
+		Started:  processStart,
 		Logger:   log,
 	})
 	if err != nil {
@@ -178,12 +185,20 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 // the configuration file, which only the file provider has. The opcua driver
 // keeps its PKI under the bootstrap's data_dir, forms its application URI
 // from the agent id, resolves its passwords through resolver and warns
-// through log (decision O13).
+// through log (decision O13). The mqtt driver keeps its subscription set
+// under data_dir, forms its default client id from the agent id and resolves
+// its passwords through resolver.
 func inputDrivers(boot bootstrap.File, resolver opcua.SecretResolver, log *slog.Logger, extra map[string]input.Factory) map[string]input.Factory {
 	drivers := map[string]input.Factory{
 		config.DriverSimulated: simulated.Factory(configBaseDir(boot)),
 		config.DriverModbus:    modbus.Factory(),
 		config.DriverOPCUA: opcua.Factory(opcua.Options{
+			DataDir:  boot.DataDir,
+			AgentID:  boot.AgentID,
+			Resolver: resolver,
+			Logger:   log,
+		}),
+		config.DriverMQTT: mqtt.Factory(mqtt.Options{
 			DataDir:  boot.DataDir,
 			AgentID:  boot.AgentID,
 			Resolver: resolver,

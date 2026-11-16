@@ -128,6 +128,8 @@ func TestParseConnectionRefusals(t *testing.T) {
 		{"interval below a millisecond", `{"endpoint":"opc.tcp://plc","publishing_interval":"500us"}`, "connection.publishing_interval: must be at least 1ms"},
 		{"unknown field", `{"endpoint":"opc.tcp://plc","timeout":"5s"}`, "connection.timeout: unknown field"},
 		{"unknown field is named before other checks", `{"endpoint":"x","retries":3}`, "connection.retries: unknown field"},
+		{"unknown field with an unsafe key", `{"endpoint":"opc.tcp://plc","Token-Abc123":1}`, "connection.*: unknown field"},
+		{"auth unknown field with an unsafe key", `{"endpoint":"opc.tcp://plc","auth":{"user":"mes","password":"secret://env/P","hunter2!":"x"}}`, "connection.auth.*: unknown field"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,6 +159,7 @@ func TestParseConnectionErrorsNeverEchoValues(t *testing.T) {
 		`{"endpoint":"opc.tcp://SECRET-HOST","publishing_interval":"SECRET-INTERVAL"}`,
 		`{"endpoint":"opc.tcp://SECRET-HOST","publishing_interval":"-1s"}`,
 		`{"endpoint":"opc.tcp://SECRET-HOST","auth":{"SECRET-USER":"x"}}`,
+		`{"endpoint":"opc.tcp://SECRET-HOST","SECRET-PASSWORD":"x"}`,
 	}
 	for _, raw := range raws {
 		_, err := ParseConnection(json.RawMessage(raw))
@@ -164,9 +167,7 @@ func TestParseConnectionErrorsNeverEchoValues(t *testing.T) {
 			t.Fatalf("%s: expected an error", raw)
 		}
 		for _, s := range secrets {
-			// An unknown field names its key by contract; the key of the last case is a
-			// field name, not a value.
-			if strings.Contains(err.Error(), s) && !strings.HasSuffix(err.Error(), ": unknown field") {
+			if strings.Contains(err.Error(), s) {
 				t.Fatalf("%s: error %q echoes a value", raw, err.Error())
 			}
 		}

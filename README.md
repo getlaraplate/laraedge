@@ -15,7 +15,8 @@ measurement files, and delivers their samples to Laraplate over the `laraplate-m
 (HTTP or MQTT) without losing data across network outages, restarts or power loss.
 
 The agent core is built: the `simulated`, `modbus` (TCP, RTU, RTU over TCP) and `opcua` (subscribe or poll, signed and
-encrypted sessions with explicitly trusted server certificates) input drivers, the
+encrypted sessions with explicitly trusted server certificates) and `mqtt` (JSON and plain payloads over MQTT 3.1.1, TCP or
+TLS) input drivers, the
 `laraplate-http` output, a durable disk buffer per output with loss markers, versioned configuration from a local file or from Laraplate, a
 local status endpoint with Prometheus metrics, JSON logs and the systemd watchdog. The level-1
 transforms of points are built too, with `probe` and `config test` to try them offline. The other real

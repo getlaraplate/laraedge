@@ -1,0 +1,120 @@
+package mqtt
+
+import (
+	"slices"
+	"sync"
+
+	edgeinput "github.com/getlaraplate/laraedge/internal/input"
+)
+
+// ErrKindAvailability is the read error kind of an availability payload that is
+// neither the configured online nor the offline string.
+const ErrKindAvailability = "availability"
+
+// Tracker turns the availability topics of an input into device lifecycle
+// calls (spec section 5). A device is held dead from its offline payload until
+// its online payload or a sample of it, so KeepAlive, which keeps the devices
+// of the input alive while the broker is connected, does not revive it. It is
+// safe for concurrent use: the mutex is cheap and keeps a death and the birth
+// that follows it in the order they were decided.
+type Tracker struct {
+	life    *edgeinput.Lifecycle
+	devices []string
+	topics  map[string][]availabilityRule
+
+	mu   sync.Mutex
+	held map[string]bool
+}
+
+type availabilityRule struct {
+	device  string
+	online  string
+	offline string
+}
+
+// NewTracker returns the tracker of devices, whose availability topics are
+// given by availability (keyed by device). One topic may serve several devices.
+func NewTracker(life *edgeinput.Lifecycle, availability map[string]Availability, devices []string) *Tracker {
+	t := &Tracker{
+		life:    life,
+		devices: slices.Clone(devices),
+		topics:  make(map[string][]availabilityRule, len(availability)),
+		held:    make(map[string]bool),
+	}
+
+	names := make([]string, 0, len(availability))
+	for device := range availability {
+		names = append(names, device)
+	}
+	slices.Sort(names)
+
+	for _, device := range names {
+		a := availability[device]
+		t.topics[a.Topic] = append(t.topics[a.Topic], availabilityRule{device: device, online: a.Online, offline: a.Offline})
+	}
+
+	return t
+}
+
+// Message handles a message of topic. handled is false when topic is not an
+// availability topic, so the caller routes it to the decoder. Payloads are
+// compared byte for byte with the configured strings, without trimming. A
+// payload that is neither state changes nothing and returns ErrKindAvailability.
+func (t *Tracker) Message(topic string, payload []byte) (handled bool, errKind string) {
+	rules, ok := t.topics[topic]
+	if !ok {
+		return false, ""
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	value := string(payload)
+	for _, r := range rules {
+		switch value {
+		case r.offline:
+			t.held[r.device] = true
+			t.life.Die(r.device)
+		case r.online:
+			t.held[r.device] = false
+			t.life.Read(r.device)
+		default:
+			errKind = ErrKindAvailability
+		}
+	}
+
+	return true, errKind
+}
+
+// Sample records a sample of device: it is alive, whatever its availability
+// last said.
+func (t *Tracker) Sample(device string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.held, device)
+	t.life.Read(device)
+}
+
+// KeepAlive reads every device of the input that is not held dead.
+func (t *Tracker) KeepAlive() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, device := range t.devices {
+		if !t.held[device] {
+			t.life.Read(device)
+		}
+	}
+}
+
+// Topics returns the availability topics, sorted and without duplicates.
+func (t *Tracker) Topics() []string {
+	topics := make([]string, 0, len(t.topics))
+	for topic := range t.topics {
+		topics = append(topics, topic)
+	}
+	slices.Sort(topics)
+
+	return topics
+}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 )
 
@@ -115,10 +116,15 @@ type Value struct {
 }
 
 // FloatValue returns a float Value. NaN and infinities are refused so that
-// such values never reach the buffer or the wire.
+// such values never reach the buffer or the wire; negative zero becomes zero,
+// so that -0 and 0 put the same value on the wire.
 func FloatValue(f float64) (Value, error) {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return Value{}, fmt.Errorf("float value %v is not finite", f)
+	}
+
+	if f == 0 {
+		f = 0
 	}
 
 	return Value{Kind: KindFloat, Float: f}, nil
@@ -130,7 +136,10 @@ func IntValue(i int64) Value { return Value{Kind: KindInt, Int: i} }
 // BoolValue returns a boolean Value.
 func BoolValue(b bool) Value { return Value{Kind: KindBool, Bool: b} }
 
-// StringValue returns a string Value.
+// StringValue returns a string Value. It does not check the encoding: every
+// entry point checks that the string is valid UTF-8 before it builds a value
+// (config decoding, the OPC UA and Modbus decoders, the plugin wire
+// conversion), and the transforms only cut valid strings at rune boundaries.
 func StringValue(s string) Value { return Value{Kind: KindString, Str: s} }
 
 // Validate reports whether the value has a known kind and, for floats, is finite.
@@ -283,8 +292,13 @@ type Record struct {
 // SampleRecord wraps a copy of s in a Record.
 func SampleRecord(s Sample) Record { return Record{Sample: &s} }
 
-// EventRecord wraps a copy of e in a Record.
-func EventRecord(e DeviceEvent) Record { return Record{Event: &e} }
+// EventRecord wraps a copy of e in a Record. The signal list is copied too, so
+// that the caller can reuse its slice.
+func EventRecord(e DeviceEvent) Record {
+	e.Signals = slices.Clone(e.Signals)
+
+	return Record{Event: &e}
+}
 
 // Device returns the device the record belongs to, or "" for an empty record.
 func (r Record) Device() string {

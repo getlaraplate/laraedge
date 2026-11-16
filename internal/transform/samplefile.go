@@ -18,6 +18,11 @@ import (
 // bytes. A longer line is an error naming its number.
 const MaxSampleLine = 1 << 20
 
+// MaxSampleFile is the most bytes ReadSamples reads from one sample file,
+// blank lines included. A larger file is an error: the whole file is held in
+// memory as samples.
+const MaxSampleFile = 64 << 20
+
 // sampleTimeLayout is the timestamp of a sample file: RFC 3339, UTC, with
 // milliseconds.
 const sampleTimeLayout = "2006-01-02T15:04:05.000Z"
@@ -29,6 +34,7 @@ var (
 	errSampleTime    = errors.New("ts is not an RFC 3339 timestamp")
 	errSampleQuality = errors.New("quality must be good, uncertain or bad")
 	errSampleTooLong = errors.New("line is too long")
+	errSampleFile    = errors.New("file is too large")
 )
 
 // sampleLine is one line of a sample file (decision P7).
@@ -129,7 +135,9 @@ func encodeSample(s model.Sample) (writtenLine, error) {
 // is the kind the line's value must have: a JSON number for an integer point
 // must be integral, a boolean and a string must match, a number for a float
 // point must be finite. A device and signal kindOf does not know are an
-// error. Samples get priority critical, which the file does not carry.
+// error. Samples get priority critical, which the file does not carry. Keys
+// are matched without regard to letter case, as encoding/json does and
+// docs/USAGE.md says; a file of more than MaxSampleFile bytes is refused.
 //
 // The first bad line stops the read: the error names its number and says
 // what is wrong, never the device, the signal or the value, and no samples
@@ -137,7 +145,7 @@ func encodeSample(s model.Sample) (writtenLine, error) {
 func ReadSamples(r io.Reader, kindOf func(device, signal string) (model.ValueKind, bool)) ([]model.Sample, error) {
 	var out []model.Sample
 
-	sc := bufio.NewScanner(r)
+	sc := bufio.NewScanner(&cappedReader{r: r, left: MaxSampleFile})
 	sc.Buffer(nil, MaxSampleLine)
 
 	n := 0
@@ -158,6 +166,10 @@ func ReadSamples(r io.Reader, kindOf func(device, signal string) (model.ValueKin
 	}
 
 	if err := sc.Err(); err != nil {
+		if errors.Is(err, errSampleFile) {
+			return nil, fmt.Errorf("line %d: %w", n+1, errSampleFile)
+		}
+
 		if errors.Is(err, bufio.ErrTooLong) {
 			return nil, fmt.Errorf("line %d: %w", n+1, errSampleTooLong)
 		}
@@ -166,6 +178,23 @@ func ReadSamples(r io.Reader, kindOf func(device, signal string) (model.ValueKin
 	}
 
 	return out, nil
+}
+
+// cappedReader fails with errSampleFile once more than left bytes were read.
+type cappedReader struct {
+	r    io.Reader
+	left int
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+
+	c.left -= n
+	if c.left < 0 {
+		return 0, errSampleFile
+	}
+
+	return n, err
 }
 
 func decodeSample(line []byte, kindOf func(device, signal string) (model.ValueKind, bool)) (model.Sample, error) {

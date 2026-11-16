@@ -162,9 +162,12 @@ func TestCloseDoesNotWaitForAConnectionAttempt(t *testing.T) {
 		Points: []config.Point{pollPoint("speed", "hr:0", "int16", time.Second)},
 	}))
 	h.in.newClient = link.newClient
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(gate) }) })
 	if err := h.in.Start(t.Context(), h.emit); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(h.close)
 	select {
 	case <-link.opening:
 	case <-time.After(guard):
@@ -179,13 +182,12 @@ func TestCloseDoesNotWaitForAConnectionAttempt(t *testing.T) {
 			t.Fatalf("Close: %v", err)
 		}
 	case <-time.After(guard):
-		close(gate)
 		t.Fatal("Close waited for the connection attempt")
 	}
 	h.closed.Store(true)
 
 	// The attempt succeeds after Close: the client is closed, nothing read.
-	close(gate)
+	release.Do(func() { close(gate) })
 	clients := link.built()
 	if len(clients) != 1 {
 		t.Fatalf("clients built = %d, want 1", len(clients))

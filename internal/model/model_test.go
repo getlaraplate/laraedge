@@ -215,6 +215,27 @@ func TestSampleRecordCopiesItsInput(t *testing.T) {
 	}
 }
 
+func TestEventRecordCopiesItsSignals(t *testing.T) {
+	signals := []model.SignalInfo{{Signal: "temp", DataType: model.DataTypeNumber}}
+	r := model.EventRecord(model.DeviceEvent{Kind: model.Birth, Device: "a", Signals: signals, TS: time.Unix(1, 0)})
+	signals[0].Signal = "changed"
+
+	if got := r.Event.Signals[0].Signal; got != "temp" {
+		t.Fatalf("record aliases the caller's signals: %q", got)
+	}
+}
+
+func TestFloatValueNormalisesNegativeZero(t *testing.T) {
+	v, err := model.FloatValue(math.Copysign(0, -1))
+	if err != nil {
+		t.Fatalf("FloatValue(-0) error = %v", err)
+	}
+
+	if math.Float64bits(v.Float) != 0 {
+		t.Fatalf("FloatValue(-0) bits = %#x, want +0", math.Float64bits(v.Float))
+	}
+}
+
 func TestEventKindString(t *testing.T) {
 	if model.Birth.String() != "birth" || model.Death.String() != "death" {
 		t.Fatalf("got %q, %q", model.Birth, model.Death)

@@ -27,6 +27,42 @@ func TestRun(t *testing.T) {
 			wantStdout: version.String() + "\n",
 		},
 		{
+			name:       "run refuses an extra argument with its own message",
+			args:       []string{"run", "--bootstrap", "b.yaml", "extra"},
+			wantCode:   2,
+			wantStderr: []string{"laraplate-edge run:", `unexpected argument "extra"`},
+		},
+		{
+			name:       "help prints the usage on stdout",
+			args:       []string{"help"},
+			wantCode:   0,
+			wantStdout: usageText,
+		},
+		{
+			name:       "--help prints the usage on stdout",
+			args:       []string{"--help"},
+			wantCode:   0,
+			wantStdout: usageText,
+		},
+		{
+			name:       "-h prints the usage on stdout",
+			args:       []string{"-h"},
+			wantCode:   0,
+			wantStdout: usageText,
+		},
+		{
+			name:       "a word after -- is a positional argument, not a flag",
+			args:       []string{"plugin", "hash", "--", "--no-such-dir"},
+			wantCode:   1,
+			wantStderr: []string{"laraplate-edge plugin hash:", "--no-such-dir"},
+		},
+		{
+			name:       "two positionals around -- get the usage",
+			args:       []string{"plugin", "hash", "d", "--", "--also", "--more"},
+			wantCode:   2,
+			wantStderr: []string{"usage:"},
+		},
+		{
 			name:       "no subcommand prints usage",
 			args:       nil,
 			wantCode:   2,
@@ -141,6 +177,8 @@ func TestConfigValidate(t *testing.T) {
 	writeFile(t, badAddress, driversDoc("hr:70000"))
 	opcuaOffline := filepath.Join(dir, "opcua.yaml")
 	writeFile(t, opcuaOffline, opcuaDoc)
+	mqttOffline := filepath.Join(dir, "mqtt.yaml")
+	writeFile(t, mqttOffline, mqttDoc)
 
 	tests := []struct {
 		name       string
@@ -195,6 +233,14 @@ func TestConfigValidate(t *testing.T) {
 			},
 		},
 		{
+			name:     "an MQTT address, offline",
+			file:     mqttOffline,
+			wantCode: 1,
+			wantStderr: []string{
+				mqttOffline + ": inputs.0: mqtt input \"line\": devices.0.points.1: address: topic: must not contain + or #\n",
+			},
+		},
+		{
 			name:     "the spec example refused by the build check",
 			file:     fixtures + "spec-5.3.yaml",
 			wantCode: 1,
@@ -237,8 +283,12 @@ func TestConfigValidate(t *testing.T) {
 					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 				}
 			}
+			// Each line starts with the document path, and t.TempDir() ends in
+			// random digits that can contain a value below: check the messages
+			// with the temporary directory removed.
+			messages := strings.ReplaceAll(stderr.String(), dir, "")
 			for _, value := range []string{"plain-token-value", "plc.example", "1502", "70000"} {
-				if strings.Contains(stderr.String(), value) {
+				if strings.Contains(messages, value) {
 					t.Errorf("stderr echoes a value: %q", stderr.String())
 				}
 			}
@@ -269,6 +319,23 @@ inputs:
       - device: oven-02
         points:
           - {signal: temp, address: "ns=2;i=7", type: float64, read: subscribe}
+outputs:
+  - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
+`
+
+// mqttDoc is a document with an MQTT input whose second point has a
+// wildcard topic, which the driver refuses offline. The broker host never
+// resolves.
+const mqttDoc = `schema: laraplate-edge-config/1
+inputs:
+  - id: line
+    driver: mqtt
+    connection: {broker: 'mqtt://broker.example'}
+    devices:
+      - device: press-07
+        points:
+          - {signal: state, address: "plant/press/state|mode", type: string, read: subscribe}
+          - {signal: temp, address: "plant/+/temp", type: float64, read: subscribe}
 outputs:
   - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
 `
@@ -485,5 +552,38 @@ func TestConfigValidateChecksPluginProcessorsAndOutputs(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want %q", stderr.String(), want)
 		}
+	}
+}
+
+func TestParseArgsStopsAtDoubleDash(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		want     []string
+		wantFlag string
+	}{
+		{"flags around positionals", []string{"x", "--input", "a", "y"}, []string{"x", "y"}, "a"},
+		{"dash-led words after the terminator stay positional", []string{"x", "--input", "a", "--", "--not-a-flag", "--also"}, []string{"x", "--not-a-flag", "--also"}, "a"},
+		{"terminator first", []string{"--", "--input", "a"}, []string{"--input", "a"}, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			fs := newFlagSet("test", &stderr)
+			input := fs.String("input", "", "")
+
+			got, code, ok := parseArgs(fs, tt.args)
+
+			if !ok || code != exitOK {
+				t.Fatalf("parseArgs: code %d ok %v (stderr: %q)", code, ok, stderr.String())
+			}
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("positional = %q, want %q", got, tt.want)
+			}
+			if *input != tt.wantFlag {
+				t.Errorf("--input = %q, want %q", *input, tt.wantFlag)
+			}
+		})
 	}
 }

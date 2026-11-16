@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -250,18 +249,11 @@ func (h *harness) nextAsync(ctx context.Context) <-chan nextResult {
 	return out
 }
 
-// waitTimers yields until n timers wait on clk: the batcher is then blocked
-// in its select.
+// waitTimers waits until at least n timers wait on clk: the batcher is then
+// blocked in its select.
 func waitTimers(t *testing.T, clk *clock.Fake, n int) {
 	t.Helper()
-
-	for i := 0; clk.PendingTimers() != n; i++ {
-		if i > 50_000_000 {
-			t.Fatalf("PendingTimers() = %d, want %d", clk.PendingTimers(), n)
-		}
-
-		runtime.Gosched()
-	}
+	clk.BlockUntil(t, n)
 }
 
 // bodySamples returns "signal=value" for every sample of the envelope, in
@@ -376,7 +368,7 @@ func TestNextWaitsMaxWaitForMoreRecords(t *testing.T) {
 	h.append(bulk(0))
 	waitTimers(t, h.clk, 1)
 
-	h.clk.Advance(maxWait - time.Millisecond)
+	h.clk.Advance(maxWait - time.Nanosecond)
 	select {
 	case r := <-res:
 		t.Fatalf("Next() returned before max_wait: %v, %v", r.batch, r.err)
@@ -384,7 +376,7 @@ func TestNextWaitsMaxWaitForMoreRecords(t *testing.T) {
 	}
 
 	h.append(bulk(1), crit(0))
-	h.clk.Advance(time.Millisecond)
+	h.clk.Advance(time.Nanosecond)
 
 	r := <-res
 	if r.err != nil {
@@ -393,6 +385,43 @@ func TestNextWaitsMaxWaitForMoreRecords(t *testing.T) {
 
 	if got, want := bodySamples(t, r.batch.Body), []string{"state=10", "temp=10", "temp=11"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("body samples %v, want %v", got, want)
+	}
+}
+
+// TestMaxWaitCountsFromTheFirstAppend: max_wait runs from the append of the
+// first record waiting, not from the Next call that finds it.
+func TestMaxWaitCountsFromTheFirstAppend(t *testing.T) {
+	h := newHarness(t, output.BatchLimits{MaxSamples: 10, MaxBody: 1 << 20, MaxWait: time.Second}).open()
+	bufClk, ok := h.opts.Clock.(*clock.Fake)
+	if !ok {
+		t.Fatal("test setup: the buffer clock is not a fake")
+	}
+
+	h.append(bulk(0))
+	bufClk.Advance(800 * time.Millisecond)
+	h.clk.Advance(800 * time.Millisecond)
+
+	res := h.nextAsync(context.Background())
+	waitTimers(t, h.clk, 1)
+	h.clk.Advance(200*time.Millisecond - time.Nanosecond)
+	if n := h.clk.PendingTimers(); n != 1 {
+		t.Fatalf("PendingTimers() = %d 1 ns before max_wait, want the batcher's timer still pending", n)
+	}
+
+	select {
+	case r := <-res:
+		t.Fatalf("Next() returned before max_wait: %v, %v", r.batch, r.err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	h.clk.Advance(time.Nanosecond)
+	select {
+	case r := <-res:
+		if r.err != nil || r.batch.Len() != 1 {
+			t.Fatalf("Next() = %v, %v; want one record", r.batch, r.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Next() did not seal at max_wait after the append")
 	}
 }
 

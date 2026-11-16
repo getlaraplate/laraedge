@@ -793,3 +793,79 @@ func TestDeviceDownFlowsThroughTheChain(t *testing.T) {
 		t.Errorf("Deadline() = %s, %v, want +9s: the next sample re-arms the heartbeat", d.Sub(t0), ok)
 	}
 }
+
+// stepBackSample is a sample of the step-back tests, with ts at.
+func stepBackSample(at time.Time, v int64) model.Sample {
+	return model.Sample{Device: "press1", Signal: "x", TS: at, Value: i64(v), Quality: model.Good}
+}
+
+// TestStepsAfterABackwardClockStep checks that a deadline armed from the old
+// reading is clamped to the new time plus the step's own period: the step
+// fires at its interval from the new time, not after the hour it went back.
+// The heartbeat has not fired since before the step.
+func TestStepsAfterABackwardClockStep(t *testing.T) {
+	back := t0.Add(-time.Hour)
+
+	tests := []struct {
+		name   string
+		step   config.Transform
+		period time.Duration
+		feed   []model.Sample
+		// emits is the ts of the sample the Fire at the new deadline returns.
+		emits time.Time
+	}{
+		{"heartbeat", step("heartbeat", `"10s"`), 10 * time.Second, []model.Sample{stepBackSample(t0, 1)}, back.Add(10 * time.Second)},
+		{"min_interval", step("min_interval", `"10s"`), 10 * time.Second, []model.Sample{stepBackSample(t0, 1), stepBackSample(t0.Add(time.Second), 2)}, t0.Add(time.Second)},
+		{"debounce", step("debounce", `"2s"`), 2 * time.Second, []model.Sample{stepBackSample(t0, 1)}, t0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			chain, err := transform.Compile([]config.Transform{tc.step}, model.KindInt, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, s := range tc.feed {
+				chain.Apply(s)
+			}
+
+			transform.ClockSteppedBack(chain, back)
+
+			want := back.Add(tc.period)
+			if d, ok := chain.Deadline(); !ok || !d.Equal(want) {
+				t.Fatalf("Deadline() = %s, %v, want the period after the new time", d.Sub(back), ok)
+			}
+
+			if out, _ := chain.Fire(want.Add(-time.Millisecond)); len(out) != 0 {
+				t.Fatalf("Fire() before the new deadline = %+v, want nothing", out)
+			}
+
+			got, _ := chain.Fire(want)
+			if len(got) != 1 || !got[0].TS.Equal(tc.emits) {
+				t.Errorf("Fire() at the new deadline = %+v, want one sample with ts %s", got, tc.emits)
+			}
+		})
+	}
+}
+
+// TestDebounceDeadlineCapEndsWithTheWaitingValue checks that the clamp of a
+// backward step does not stick to the next waiting value.
+func TestDebounceDeadlineCapEndsWithTheWaitingValue(t *testing.T) {
+	chain, err := transform.Compile([]config.Transform{step("debounce", `"2s"`)}, model.KindInt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	back := t0.Add(-time.Hour)
+	chain.Apply(stepBackSample(t0, 1))
+	transform.ClockSteppedBack(chain, back)
+	chain.Fire(back.Add(2 * time.Second))
+
+	next := stepBackSample(back.Add(30*time.Second), 2)
+	chain.Apply(next)
+
+	if d, ok := chain.Deadline(); !ok || !d.Equal(next.TS.Add(2*time.Second)) {
+		t.Errorf("Deadline() = %s, %v, want 2s after the new value's ts", d.Sub(next.TS), ok)
+	}
+}

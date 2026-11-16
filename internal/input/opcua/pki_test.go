@@ -10,10 +10,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -433,4 +436,501 @@ func TestTrustStore(t *testing.T) {
 			t.Errorf("the good certificates must still be listed: %v", infos)
 		}
 	})
+}
+
+func TestEnsureOwnCertificateRefusesAKeyWiderThan0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no POSIX file modes on Windows")
+	}
+
+	dataDir := t.TempDir()
+	if _, _, err := EnsureOwnCertificate(dataDir, "agent-42", pkiNow); err != nil {
+		t.Fatal(err)
+	}
+
+	keyPath := filepath.Join(ownDir(dataDir), "key.pem")
+	before := readFile(t, keyPath)
+
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o700, 0o666} {
+		t.Run(mode.String(), func(t *testing.T) {
+			if err := os.Chmod(keyPath, mode); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := EnsureOwnCertificate(dataDir, "agent-42", pkiNow)
+			if err == nil {
+				t.Fatal("expected an error for a key readable beyond its owner")
+			}
+
+			if !strings.Contains(err.Error(), keyPath) || !strings.Contains(err.Error(), "0600") {
+				t.Errorf("error = %q, want it to name %s and the wanted mode 0600", err, keyPath)
+			}
+
+			if string(readFile(t, keyPath)) != string(before) {
+				t.Error("key.pem was rewritten")
+			}
+		})
+	}
+
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		if err := os.Chmod(keyPath, mode); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, _, err := EnsureOwnCertificate(dataDir, "agent-42", pkiNow); err != nil {
+			t.Errorf("mode %v: %v", mode, err)
+		}
+	}
+}
+
+func TestTrustedComparesTheStoredFileWithItsName(t *testing.T) {
+	store := TrustStore{Dir: PKIDir(t.TempDir())}
+
+	a := selfSigned(t, "server-a")
+	b := selfSigned(t, "server-b")
+
+	path := filepath.Join(store.Dir, "trusted", Thumbprint(a)+".der")
+	writeFile(t, path, b)
+
+	if store.Trusted(Thumbprint(a)) {
+		t.Fatal("a file named after a but holding b is trusted for a")
+	}
+
+	if string(readFile(t, path)) != string(b) {
+		t.Error("the mismatching file was changed or removed")
+	}
+
+	writeFile(t, path, []byte("not a certificate"))
+
+	if store.Trusted(Thumbprint(a)) {
+		t.Fatal("a file that is not a certificate is trusted")
+	}
+
+	writeFile(t, path, a)
+
+	if !store.Trusted(Thumbprint(a)) {
+		t.Fatal("the matching file is not trusted")
+	}
+}
+
+func TestSweepStaleOwnRemovesOnlyOldTemporaryOwnDirectories(t *testing.T) {
+	dataDir := t.TempDir()
+	pki := PKIDir(dataDir)
+	now := time.Now().Add(48 * time.Hour)
+
+	mkdir := func(name string) string {
+		t.Helper()
+
+		dir := filepath.Join(pki, name)
+		writeFile(t, filepath.Join(dir, "key.pem"), []byte("KEY"))
+
+		return dir
+	}
+
+	stale := mkdir("own-123456.tmp")
+	staleEmpty := filepath.Join(pki, "own-42.tmp")
+	if err := os.MkdirAll(staleEmpty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := mkdir("own-777.tmp")
+	if err := os.Chtimes(fresh, now, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	kept := []string{
+		mkdir("own"),
+		mkdir("own-abc.tmp"),
+		mkdir("xown-1.tmp"),
+		mkdir("own-1.tmp.bak"),
+		mkdir(filepath.Join("trusted", "own-9.tmp")),
+		fresh,
+	}
+
+	aFile := filepath.Join(pki, "own-55.tmp")
+	writeFile(t, aFile, []byte("a file, not a directory"))
+
+	kept = append(kept, aFile)
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	writeFile(t, filepath.Join(outside, "key.pem"), []byte("OUTSIDE"))
+
+	link := filepath.Join(pki, "own-66.tmp")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+
+	removed, err := SweepStaleOwn(dataDir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// In name order: own-123456.tmp sorts before own-42.tmp.
+	if len(removed) != 2 || removed[0] != stale || removed[1] != staleEmpty {
+		t.Errorf("removed = %v, want [%s %s]", removed, stale, staleEmpty)
+	}
+
+	for _, dir := range []string{stale, staleEmpty} {
+		if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s still exists (%v)", dir, err)
+		}
+	}
+
+	for _, path := range kept {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("%s was removed: %v", path, err)
+		}
+	}
+
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink was removed or replaced: %v", err)
+	}
+
+	if string(readFile(t, filepath.Join(outside, "key.pem"))) != "OUTSIDE" {
+		t.Error("a file outside the PKI directory was touched")
+	}
+}
+
+func TestSweepStaleOwnWithoutAPKIDirectory(t *testing.T) {
+	removed, err := SweepStaleOwn(t.TempDir(), time.Now())
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("SweepStaleOwn = %v, %v, want nothing", removed, err)
+	}
+}
+
+// Windows has no POSIX modes: the key is never refused for its mode there.
+func TestCheckKeyModeIsUnixOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "key.pem")
+	writeFile(t, path, []byte("KEY"))
+
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := checkKeyMode(path, "windows"); err != nil {
+		t.Errorf("windows: %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		if err := checkKeyMode(path, "linux"); err == nil {
+			t.Error("linux: a 0644 key is accepted")
+		}
+	}
+}
+
+// Only a plain directory is swept: a symlink, and on Windows a junction or a
+// mount point (a directory that is also irregular), is never entered.
+func TestIsPlainDir(t *testing.T) {
+	tests := []struct {
+		mode os.FileMode
+		want bool
+	}{
+		{os.ModeDir | 0o700, true},
+		{os.ModeDir | os.ModeIrregular, false},
+		{os.ModeDir | os.ModeSymlink, false},
+		{os.ModeSymlink, false},
+		{os.ModeIrregular, false},
+		{0o600, false},
+	}
+	for _, tt := range tests {
+		if got := isPlainDir(tt.mode); got != tt.want {
+			t.Errorf("isPlainDir(%v) = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// Sweeps running together (two inputs starting at once, or the agent and a
+// command) claim each directory by renaming it: exactly one of them removes
+// and reports it.
+func TestConcurrentSweepsRemoveEachDirectoryOnce(t *testing.T) {
+	dataDir := t.TempDir()
+	pki := PKIDir(dataDir)
+	now := time.Now().Add(48 * time.Hour)
+
+	var want []string
+
+	for _, name := range []string{"own-1.tmp", "own-2.tmp", "own-3.tmp", "own-4.tmp"} {
+		dir := filepath.Join(pki, name)
+		writeFile(t, filepath.Join(dir, "key.pem"), []byte("KEY"))
+		want = append(want, dir)
+	}
+
+	const sweeps = 8
+
+	results := make([][]string, sweeps)
+
+	var wg sync.WaitGroup
+	for i := range sweeps {
+		wg.Go(func() {
+			removed, err := SweepStaleOwn(dataDir, now)
+			if err != nil {
+				t.Error(err)
+			}
+			results[i] = removed
+		})
+	}
+	wg.Wait()
+
+	var all []string
+	for _, r := range results {
+		all = append(all, r...)
+	}
+	slices.Sort(all)
+
+	if !slices.Equal(all, want) {
+		t.Errorf("removed by all sweeps = %v, want each of %v once", all, want)
+	}
+
+	entries, err := os.ReadDir(pki)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("left in the PKI directory: %v", entries)
+	}
+}
+
+// A sweep that crashed between its claim and the removal leaves
+// own-<n>.tmp.sweep-<claim time>-<random>: the next sweep handles it with the
+// same checks once the claim is an hour old, and reports it by its own-<n>.tmp
+// name. A younger claim may be a sweep still removing it.
+func TestSweepStaleOwnRemovesAnInterruptedClaim(t *testing.T) {
+	dataDir := t.TempDir()
+	pki := PKIDir(dataDir)
+	now := time.Now().Add(48 * time.Hour)
+
+	claimName := func(base string, at time.Time) string {
+		return filepath.Join(pki, fmt.Sprintf("%s.sweep-%016x-0123456789abcdef", base, at.Unix()))
+	}
+
+	claimed := claimName("own-9.tmp", now.Add(-2*time.Hour))
+	writeFile(t, filepath.Join(claimed, "key.pem"), []byte("KEY"))
+
+	fresh := claimName("own-8.tmp", now.Add(-2*time.Hour))
+	writeFile(t, filepath.Join(fresh, "key.pem"), []byte("KEY"))
+	if err := os.Chtimes(fresh, now, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	inFlight := claimName("own-6.tmp", now.Add(-time.Minute))
+	writeFile(t, filepath.Join(inFlight, "key.pem"), []byte("KEY"))
+
+	odd := filepath.Join(pki, "own-7.tmp.sweep-XYZ")
+	writeFile(t, filepath.Join(odd, "key.pem"), []byte("KEY"))
+
+	removed, err := SweepStaleOwn(dataDir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := filepath.Join(pki, "own-9.tmp"); !slices.Equal(removed, []string{want}) {
+		t.Errorf("removed = %v, want [%s]", removed, want)
+	}
+
+	for _, kept := range []string{fresh, inFlight, odd} {
+		if _, err := os.Lstat(kept); err != nil {
+			t.Errorf("%s was removed: %v", kept, err)
+		}
+	}
+
+	entries, _ := os.ReadDir(pki)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "own-9.") {
+			t.Errorf("the claim left %s", e.Name())
+		}
+	}
+}
+
+// A directory replaced after the sweep looked at it (a symlink to a directory
+// outside, or another directory) is refused once claimed: nothing is removed
+// and the outside target is untouched. The other directory is swapped in by
+// moving the claimed one aside, as a real swapper must to keep it: deleting
+// it instead lets the filesystem give the new directory the same inode
+// number (ext4 does at once), and the two are then the same file to
+// os.SameFile. The symlink is refused for its type whatever its number.
+func TestSweepRefusesADirectorySwappedDuringTheClaim(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need a privilege on Windows")
+	}
+
+	tests := []struct {
+		name string
+		swap func(t *testing.T, claimed, outside string)
+	}{
+		{"a symlink to a directory outside", func(t *testing.T, claimed, outside string) {
+			if err := os.RemoveAll(claimed); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, claimed); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"another plain directory", func(t *testing.T, claimed, _ string) {
+			if err := os.Rename(claimed, filepath.Join(filepath.Dir(claimed), "aside")); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(claimed, "other"), []byte("OTHER"))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			pki := PKIDir(dataDir)
+			now := time.Now().Add(48 * time.Hour)
+
+			writeFile(t, filepath.Join(pki, "own-1.tmp", "key.pem"), []byte("KEY"))
+
+			outside := filepath.Join(t.TempDir(), "outside")
+			writeFile(t, filepath.Join(outside, "precious"), []byte("OUTSIDE"))
+
+			var claimed string
+
+			rename := func(oldPath, newPath string) error {
+				if err := os.Rename(oldPath, newPath); err != nil {
+					return err
+				}
+				claimed = newPath
+				tt.swap(t, newPath, outside)
+
+				return nil
+			}
+
+			removed, err := sweepStaleOwnWith(dataDir, now, rename, settleClaim)
+			if len(removed) != 0 {
+				t.Errorf("removed = %v, want nothing", removed)
+			}
+			if err == nil || !strings.Contains(err.Error(), "changed while it was claimed") {
+				t.Errorf("err = %v, want the refusal", err)
+			}
+
+			if string(readFile(t, filepath.Join(outside, "precious"))) != "OUTSIDE" {
+				t.Error("the outside target was touched")
+			}
+			if _, err := os.Lstat(claimed); err != nil {
+				t.Errorf("the swapped entry was removed: %v", err)
+			}
+		})
+	}
+}
+
+// A claim that the system refuses (on Windows, another sweep still holds a
+// handle inside the directory) is skipped like a claim lost to another sweep.
+func TestSweepSkipsAClaimRefusedForPermission(t *testing.T) {
+	dataDir := t.TempDir()
+	dir := filepath.Join(PKIDir(dataDir), "own-1.tmp")
+	writeFile(t, filepath.Join(dir, "key.pem"), []byte("KEY"))
+
+	refuse := func(oldPath, newPath string) error {
+		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: os.ErrPermission}
+	}
+
+	removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), refuse, settleClaim)
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("sweep = %v, %v; want nothing and no error", removed, err)
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		t.Fatalf("the directory was removed: %v", err)
+	}
+}
+
+// A claim time beyond any real clock (a malformed or huge value) is never
+// stale, however old the directory: time.Unix would wrap it into the past.
+func TestSweepKeepsAClaimWithAnOutOfRangeTime(t *testing.T) {
+	dataDir := t.TempDir()
+	pki := PKIDir(dataDir)
+
+	var kept []string
+	for _, at := range []string{"7fffffffffffffff", "8000000000000000", "ffffffffffffffff", "7ffffff1886e0900"} {
+		dir := filepath.Join(pki, "own-1.tmp.sweep-"+at+"-0123456789abcdef")
+		writeFile(t, filepath.Join(dir, "key.pem"), []byte("KEY"))
+		kept = append(kept, dir)
+	}
+
+	removed, err := SweepStaleOwn(dataDir, time.Now().Add(48*time.Hour))
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("sweep = %v, %v; want nothing and no error", removed, err)
+	}
+
+	for _, dir := range kept {
+		if _, err := os.Lstat(dir); err != nil {
+			t.Errorf("%s was removed: %v", dir, err)
+		}
+	}
+}
+
+// A claimed directory that is gone before the sweep looks at it again was
+// removed by someone else: it is not reported, and it is no error.
+func TestSweepSkipsAClaimThatVanished(t *testing.T) {
+	dataDir := t.TempDir()
+	writeFile(t, filepath.Join(PKIDir(dataDir), "own-1.tmp", "key.pem"), []byte("KEY"))
+
+	rename := func(oldPath, newPath string) error {
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return err
+		}
+
+		return os.RemoveAll(newPath)
+	}
+
+	removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), rename, settleClaim)
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("sweep = %v, %v; want nothing and no error", removed, err)
+	}
+}
+
+// On Windows a rename that opened own-<n>.tmp before this sweep claimed it
+// can still move the directory to its own claim. A claim moved away while the
+// sweep waits for such renames belongs to that other sweep: this one neither
+// removes nor reports it, and it is no error. A wait that fails, or that
+// finds the claim gone while it is still there (on Windows a path it could
+// not name), leaves the claim for a later sweep and says so.
+func TestSweepLeavesAClaimToARenameInFlight(t *testing.T) {
+	tests := []struct {
+		name    string
+		settle  func(t *testing.T, claimed string) (bool, error)
+		wantErr string
+	}{
+		{"moved to another claim", func(t *testing.T, claimed string) (bool, error) {
+			other := strings.Replace(claimed, ".sweep-", ".sweep-other-", 1)
+			if err := os.Rename(claimed, other); err != nil {
+				t.Fatal(err)
+			}
+
+			return false, nil
+		}, ""},
+		{"the wait fails", func(*testing.T, string) (bool, error) {
+			return false, errors.New("another handle stays open on it")
+		}, "left for a later sweep"},
+		{"found gone but still there", func(*testing.T, string) (bool, error) {
+			return false, nil
+		}, "still there; left for a later sweep"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			pki := PKIDir(dataDir)
+			writeFile(t, filepath.Join(pki, "own-1.tmp", "key.pem"), []byte("KEY"))
+
+			removed, err := sweepStaleOwnWith(dataDir, time.Now().Add(48*time.Hour), os.Rename, func(claimed string) (bool, error) {
+				return tt.settle(t, claimed)
+			})
+			if len(removed) != 0 {
+				t.Errorf("removed = %v, want nothing", removed)
+			}
+			if tt.wantErr == "" && err != nil {
+				t.Errorf("err = %v, want none", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Errorf("err = %v, want %q", err, tt.wantErr)
+			}
+
+			entries, err := os.ReadDir(pki)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || string(readFile(t, filepath.Join(pki, entries[0].Name(), "key.pem"))) != "KEY" {
+				t.Errorf("PKI directory = %v, want the claimed directory left whole", entries)
+			}
+		})
+	}
 }

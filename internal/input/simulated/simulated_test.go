@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -119,13 +118,7 @@ func inputOf(conn json.RawMessage, devices ...config.Device) config.Input {
 func waitArmed(t *testing.T, clk *clock.Fake) {
 	t.Helper()
 
-	deadline := time.Now().Add(guard)
-	for clk.PendingTimers() != 1 {
-		if time.Now().After(deadline) {
-			t.Fatal("the input did not arm its timer")
-		}
-		runtime.Gosched()
-	}
+	clk.BlockUntil(t, 1)
 }
 
 // drive starts in on a fake clock, advances it by step n times, closes the
@@ -514,7 +507,7 @@ func TestCancellingTheStartContextStopsTheGoroutine(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("the goroutine kept its timer after the context was cancelled")
 		}
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 	if err := in.Close(); err != nil {
 		t.Fatal(err)
@@ -726,12 +719,42 @@ func TestScenarioFileLargerThanTheLimitIsRefused(t *testing.T) {
 	writeScenario(t, dir, "big.yaml", "# "+strings.Repeat("x", maxScenarioSize)+"\n")
 	cfg := inputOf(json.RawMessage(`{"scenario_file":"big.yaml"}`), press("press-07"))
 
-	in, err := Factory(dir)(cfg, clock.NewFake(t0))
-	if err != nil {
-		t.Fatal(err)
+	// An oversize file is a configuration error, not a local resource one:
+	// the factory refuses it, with its path (C46).
+	_, err := Factory(dir)(cfg, clock.NewFake(t0))
+	if err == nil || !strings.Contains(err.Error(), "larger than 1 MiB") || !strings.Contains(err.Error(), filepath.Join(dir, "big.yaml")) {
+		t.Fatalf("factory = %v, want a size refusal naming the file", err)
 	}
-	if err := in.Start(t.Context(), func(model.Record) {}); err == nil || !strings.Contains(err.Error(), "larger") {
-		t.Fatalf("Start = %v, want a size refusal", err)
+}
+
+// TestCancellingStopsTheEmitsAtTheNextSample is C46: once ctx is done, the
+// samples left of a step are not emitted.
+func TestCancellingStopsTheEmitsAtTheNextSample(t *testing.T) {
+	in, _ := mustNew(t, inputOf(inline(certain), press("press-07")), 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	c := &collector{}
+	first := make(chan struct{})
+	var once sync.Once
+	emit := func(rec model.Record) {
+		c.emit(rec)
+		cancel()
+		once.Do(func() { close(first) })
 	}
-	_ = in.Close()
+	if err := in.Start(ctx, emit); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-first:
+	case <-time.After(guard):
+		t.Fatal("nothing was emitted")
+	}
+	if err := in.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if got := c.samples(""); len(got) != 1 {
+		t.Fatalf("emitted %q after the context was cancelled at the first sample, want only that one", got)
+	}
 }

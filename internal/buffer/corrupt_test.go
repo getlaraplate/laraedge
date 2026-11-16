@@ -109,6 +109,28 @@ func TestAckAcrossARuntimeCorruptFrame(t *testing.T) {
 	}
 }
 
+// TestAckInsideARegionCutByACorruptFrame: a frame corrupted after the
+// batcher read past it is cut with the rest of its segment when Ack counts
+// the records; an Ack position inside the cut region holds no record any
+// more, so Ack succeeds at once instead of failing once.
+func TestAckInsideARegionCutByACorruptFrame(t *testing.T) {
+	dir := t.TempDir()
+	b := openBuffer(t, dir, testOptions(t, clock.NewFake(epoch)), hooks{})
+	mustAppend(t, b, bulkRange(0, 5)...)
+	entries := readAll(t, b, model.Bulk)
+
+	corruptFrameAt(t, nonEmptySegments(t, filepath.Join(dir, "bulk"))[1], 0)
+	if err := b.Ack(model.Bulk, entries[2].Next); err != nil {
+		t.Fatalf("Ack() inside the cut region = %v, want nil", err)
+	}
+
+	if s := b.Stats(); s.Bulk.Records != 2 || s.CorruptRecords != 1 {
+		t.Fatalf("Stats() = %+v, want 2 bulk records and one corrupt", s)
+	}
+
+	assertRecords(t, b, model.Bulk, bulkRange(4, 5))
+}
+
 // TestEvictionDeletesASegmentWithARuntimeCorruptFrame: eviction treats a
 // segment holding a corrupt frame normally. The marker counts the samples
 // read before the corruption; the rest is counted as corrupt.
@@ -136,5 +158,48 @@ func TestEvictionDeletesASegmentWithARuntimeCorruptFrame(t *testing.T) {
 	mustAppend(t, b, bulk(7))
 	if errors.Is(b.Append(bulk(8)), ErrDropped) {
 		t.Fatal("eviction stays wedged after the corrupt segment")
+	}
+}
+
+// TestAckAtTheEndOfARegionCutByACorruptFrame: an Ack position at the old end
+// of a segment cut by a corrupt frame is the base of the next segment; it is
+// a frame boundary, so Ack succeeds instead of failing on every call, while
+// the buffer runs and after a restart.
+func TestAckAtTheEndOfARegionCutByACorruptFrame(t *testing.T) {
+	tests := []struct {
+		name   string
+		record int
+		reopen bool
+	}{
+		{"first frame, at runtime", 0, false},
+		{"second frame, at runtime", 1, false},
+		{"first frame, after a restart", 0, true},
+		{"second frame, after a restart", 1, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := testOptions(t, clock.NewFake(epoch))
+			b := openBuffer(t, dir, opts, hooks{})
+			mustAppend(t, b, bulkRange(0, 5)...)
+			entries := readAll(t, b, model.Bulk)
+
+			corruptFrameAt(t, nonEmptySegments(t, filepath.Join(dir, "bulk"))[1], tc.record)
+			if tc.reopen {
+				mustClose(t, b)
+				b = openBuffer(t, dir, opts, hooks{})
+			}
+
+			if err := b.Ack(model.Bulk, entries[3].Next); err != nil {
+				t.Fatalf("Ack() at the end of the cut region = %v, want nil", err)
+			}
+
+			if s := b.Stats(); s.Bulk.Records != 2 {
+				t.Fatalf("Stats() = %+v, want 2 bulk records", s)
+			}
+
+			assertRecords(t, b, model.Bulk, bulkRange(4, 5))
+		})
 	}
 }

@@ -258,6 +258,8 @@ func TestBrowseOfAPluginInput(t *testing.T) {
 		{"default depth", nil, "/1  n1  int32  read\n"},
 		{"children only", []string{"--depth", "1"}, "/0  n1  int32  read\n"},
 		{"a node and a depth", []string{"--node", "a/b", "--depth", "3"}, "a/b/2  n1  int32  read\n"},
+		// Nothing below the node: the same note as OPC UA browse.
+		{"a leaf", []string{"--node", "leaf"}, "(no node below the start node)\n"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

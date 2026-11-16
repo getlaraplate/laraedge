@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +92,7 @@ func sampleStatus() supervisor.Status {
 				LastConfirmation: epoch.Add(-time.Minute),
 				LastError:        "HTTP 503",
 				LastErrorAt:      epoch.Add(-10 * time.Second),
+				SettleFailures:   4,
 			},
 			{ID: "spare", Type: "laraplate-http", State: supervisor.StateFailed, LastError: "open buffer: permission denied"},
 		},
@@ -301,6 +304,24 @@ func TestAuthorization(t *testing.T) {
 			ref:      tokenRef,
 			auth:     "Bearer " + testToken,
 			wantCode: map[string]int{"/healthz": 200, "/readyz": 503, "/status": 200, "/metrics": 200},
+		},
+		{
+			name:     "token configured, scheme in lower case (RFC 9110: case-insensitive)",
+			ref:      tokenRef,
+			auth:     "bearer " + testToken,
+			wantCode: map[string]int{"/healthz": 200, "/readyz": 503, "/status": 200, "/metrics": 200},
+		},
+		{
+			name:     "token configured, scheme in upper case",
+			ref:      tokenRef,
+			auth:     "BEARER " + testToken,
+			wantCode: map[string]int{"/healthz": 200, "/readyz": 503, "/status": 200, "/metrics": 200},
+		},
+		{
+			name:     "token configured, token of another length",
+			ref:      tokenRef,
+			auth:     "Bearer " + testToken[:5],
+			wantCode: map[string]int{"/healthz": 200, "/readyz": 401, "/status": 401, "/metrics": 401},
 		},
 	}
 
@@ -661,5 +682,83 @@ func TestClockOffsetFollowsWhatTheOutputReports(t *testing.T) {
 	}
 	if _, ok := got.Outputs[1]["clock_offset_seconds"]; ok {
 		t.Errorf("silent output has a clock offset: %v", got.Outputs[1])
+	}
+}
+
+func TestTokenIsComparedAsDigests(t *testing.T) {
+	h := start(t, "127.0.0.1:0", tokenRef, fakeResolver{tokenRef: testToken})
+
+	for _, tt := range []struct {
+		presented string
+		want      bool
+	}{
+		{testToken, true},
+		{"", false},
+		{testToken[:1], false},
+		{testToken + "x", false},
+		{strings.Repeat("a", 1<<16), false},
+	} {
+		if got := h.srv.tokenMatches(tt.presented); got != tt.want {
+			t.Errorf("tokenMatches(%d bytes) = %v, want %v", len(tt.presented), got, tt.want)
+		}
+	}
+	if len(h.srv.token) != sha256.Size {
+		t.Errorf("the server keeps %d bytes of the token, want its %d-byte digest", len(h.srv.token), sha256.Size)
+	}
+}
+
+func TestServerSetsReadAndWriteTimeouts(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+
+	hs := h.srv.http
+	if hs.ReadTimeout <= 0 || hs.WriteTimeout <= 0 || hs.ReadHeaderTimeout <= 0 {
+		t.Fatalf("timeouts read %v, write %v, read header %v: each must be set", hs.ReadTimeout, hs.WriteTimeout, hs.ReadHeaderTimeout)
+	}
+	if hs.ReadTimeout < hs.ReadHeaderTimeout {
+		t.Errorf("ReadTimeout %v is below ReadHeaderTimeout %v", hs.ReadTimeout, hs.ReadHeaderTimeout)
+	}
+}
+
+// TestLargeMetricsAnswerIsComplete checks that /metrics of an agent with
+// thousands of series is answered whole through the real server. It does not
+// exercise the write deadline itself, which net/http enforces; the timeouts'
+// values are checked by TestServerSetsReadAndWriteTimeouts.
+func TestLargeMetricsAnswerIsComplete(t *testing.T) {
+	h := start(t, "127.0.0.1:0", "", nil)
+	st := sampleStatus()
+	for i := range 3000 {
+		st.Inputs = append(st.Inputs, supervisor.InputStatus{ID: "line-" + strconv.Itoa(i), Driver: "simulated", State: supervisor.InputRunning})
+	}
+	h.src.set(st)
+
+	code, _, body := h.get(t, http.MethodGet, "/metrics", "")
+
+	if code != http.StatusOK {
+		t.Fatalf("GET /metrics = %d", code)
+	}
+	families := parseExposition(t, body)
+	if got := len(families["laraplate_edge_input_up"].samples); got != 3002 {
+		t.Errorf("input_up has %d series, want 3002: the answer was cut", got)
+	}
+}
+
+func TestUptimeCountsFromTheProcessStart(t *testing.T) {
+	clk := clock.NewFake(epoch)
+	srv, err := Listen(t.Context(), Config{
+		Listen:  "127.0.0.1:0",
+		Source:  &fakeSource{st: sampleStatus()},
+		Clock:   clk,
+		Started: epoch.Add(-10 * time.Minute),
+		Logger:  slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	doc := srv.statusDoc()
+
+	if doc.UptimeSeconds != 600 {
+		t.Errorf("uptime = %v s, want 600 from the process start", doc.UptimeSeconds)
 	}
 }

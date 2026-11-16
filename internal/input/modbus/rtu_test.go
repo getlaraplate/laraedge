@@ -1,11 +1,14 @@
 package modbus
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"math"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -161,7 +164,8 @@ func TestRTUOverTCPBadCRCIsNeverData(t *testing.T) {
 
 // TestRTUMissingSerialPortFailsStart (ruling R2, core R47): a serial port
 // that cannot be opened is a local resource error, so Start fails, with a
-// fixed text that does not name the device.
+// fixed text that does not name the device; a missing path reads "it does
+// not exist".
 func TestRTUMissingSerialPortFailsStart(t *testing.T) {
 	device := filepath.Join(t.TempDir(), "ttyMISSING9")
 	conn := `{"transport":"rtu","device":"` + filepath.ToSlash(device) + `","baud":9600}`
@@ -175,7 +179,7 @@ func TestRTUMissingSerialPortFailsStart(t *testing.T) {
 	}
 
 	err = in.Start(t.Context(), func(model.Record) { t.Error("a failed Start emitted") })
-	const want = `modbus input "line": start: cannot open the serial port`
+	const want = `modbus input "line": start: cannot open the serial port: it does not exist`
 	if err == nil || err.Error() != want {
 		t.Fatalf("Start error = %v, want %q", err, want)
 	}
@@ -228,6 +232,41 @@ func TestClientConfiguration(t *testing.T) {
 			got.Logger = nil
 			if *got != tt.want {
 				t.Errorf("configuration\n got %+v\nwant %+v", *got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRTUSerialOpenErrorTexts (C50): the error of the serial open picks one
+// of three fixed texts, none of which carries the library's error (it names
+// the device).
+func TestRTUSerialOpenErrorTexts(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"missing", &fs.PathError{Op: "open", Path: "/dev/ttySECRET", Err: syscall.ENOENT}, "cannot open the serial port: it does not exist"},
+		{"permission denied", &fs.PathError{Op: "open", Path: "/dev/ttySECRET", Err: fs.ErrPermission}, "cannot open the serial port: permission denied"},
+		{"other", errors.New("device /dev/ttySECRET is busy"), "cannot open the serial port"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			link := newFakeLink()
+			link.openErr = tt.err
+			h := newHarness(t, modbusInput([]byte(`{"transport":"rtu","device":"/dev/ttySECRET","baud":9600}`), 30*time.Second, config.Device{
+				Device: "press-07",
+				Points: []config.Point{pollPoint("speed", "hr:0", "int16", time.Second)},
+			}))
+			h.in.newClient = link.newClient
+
+			err := h.in.Start(t.Context(), h.emit)
+			want := `modbus input "line": start: ` + tt.want
+			if err == nil || err.Error() != want {
+				t.Fatalf("Start error = %v, want %q", err, want)
+			}
+			if strings.Contains(err.Error(), "ttySECRET") {
+				t.Errorf("Start error %q names the device", err)
 			}
 		})
 	}

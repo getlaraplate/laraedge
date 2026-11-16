@@ -4,7 +4,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -240,16 +239,10 @@ func (s *testServer) connection(extra string) []byte {
 	return []byte(conn + "}")
 }
 
-// waitPending yields until at least n timers wait on clk, so a test knows the
-// goroutines of an input are blocked on the clock; guard bounds the wait.
+// waitPending waits until at least n timers wait on clk, so a test knows the
+// goroutines of an input are blocked on the clock.
 func waitPending(t *testing.T, clk *clock.Fake, n int) {
 	t.Helper()
 
-	deadline := time.Now().Add(guard)
-	for clk.PendingTimers() < n {
-		if time.Now().After(deadline) {
-			t.Fatalf("PendingTimers() = %d, want %d", clk.PendingTimers(), n)
-		}
-		runtime.Gosched()
-	}
+	clk.BlockUntil(t, n)
 }

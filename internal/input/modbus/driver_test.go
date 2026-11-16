@@ -717,7 +717,7 @@ func TestNewRefusesInvalidConfiguration(t *testing.T) {
 		{"connection", `{"transport":"tcp"}`, []config.Point{good}, `modbus input "line": connection.host: required for tcp`},
 		{"unknown connection field", `{"transport":"tcp","host":"h","secret_token":"hunter2"}`, []config.Point{good}, `modbus input "line": connection.secret_token: unknown field`},
 		{"address", conn, []config.Point{good, pollPoint("x", "zz:secret-9", "int16", time.Second)}, `modbus input "line": devices.0.points.1: address: area: want hr, ir, co or di`},
-		{"type against area", conn, []config.Point{pollPoint("x", "hr:3", "bool", time.Second)}, `modbus input "line": devices.0.points.0: type bool: only on co or di`},
+		{"type against area", conn, []config.Point{pollPoint("x", "hr:3", "bool", time.Second)}, `modbus input "line": devices.0.points.0: type: bool only on co or di`},
 		{"read mode", conn, []config.Point{subscribe}, `modbus input "line": devices.0.points.0: read: only poll is supported`},
 		{"end of the address space", conn, []config.Point{pollPoint("x", "hr:65535", "int32", time.Second)}, `modbus input "line": devices.0.points.0: address: offset and size go beyond 65535`},
 	}

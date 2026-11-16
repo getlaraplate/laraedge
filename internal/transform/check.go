@@ -67,6 +67,11 @@ func shownOrStar(name string) string {
 // its transform chain produces (boolean for a boolean, string for a string,
 // number for an integer or a float). With no chain, or a chain that does not
 // compile (CheckDocument refuses that document), it is p.DataType().
+//
+// The chain is compiled on every call, on purpose: the only caller is the
+// router building the birth signals of a device (input.Signals), once per
+// birth or death of a device, never in the path of a sample event, so a
+// per-input cache would only add state to invalidate on a reload.
 func OutputDataType(p config.Point) string {
 	if len(p.Transforms) == 0 {
 		return p.DataType()

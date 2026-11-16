@@ -844,6 +844,42 @@ func TestFreeDiskFloor(t *testing.T) {
 	}
 }
 
+// TestALastingFloorBreachRotatesTheBulkSegmentOnce: under a breach that
+// lasts, the first Append rotates and evicts the bulk active segment; the
+// Appends after it drop their records without rotating it again.
+func TestALastingFloorBreachRotatesTheBulkSegmentOnce(t *testing.T) {
+	f := frameSize(t)
+	clk := clock.NewFake(epoch)
+	opts := testOptions(t, clk)
+	opts.SegmentSize = 10*f + f/2
+	opts.DiskUsage = newFakeDisk(50, 4).usage
+	b := openBuffer(t, t.TempDir(), opts, hooks{})
+	mustAppend(t, b, bulkRange(0, 1)...)
+	clk.Advance(time.Second)
+
+	before := b.bulk.active().base
+	var bases []Position
+	for i := 2; i <= 4; i++ {
+		if err := b.Append(bulk(i)); !errors.Is(err, ErrDropped) {
+			t.Fatalf("Append(bulk(%d)) = %v, want ErrDropped", i, err)
+		}
+
+		bases = append(bases, b.bulk.active().base)
+	}
+
+	if bases[0] == before {
+		t.Fatalf("the first Append under the breach did not rotate the bulk active segment (base %d)", before)
+	}
+
+	if bases[1] != bases[0] || bases[2] != bases[0] {
+		t.Fatalf("bulk active segment bases %v after the first rotation from %d, want one rotation", bases, before)
+	}
+
+	if got := len(segmentFiles(t, filepath.Join(b.dir, "bulk"))); got != 1 {
+		t.Fatalf("%d bulk segment files, want only the active one", got)
+	}
+}
+
 // failingWriter fails the next failures segment writes, optionally after
 // writing half of the frame, like a disk that fills up mid-write.
 type failingWriter struct {
@@ -1761,4 +1797,44 @@ func TestPinnedSegmentSizeIsValidated(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUnsealedAgeRunsFromTheOldestAppendNotSealed(t *testing.T) {
+	clk := clock.NewFake(epoch)
+	dir := t.TempDir()
+	opts := testOptions(t, clk)
+	b := openBuffer(t, dir, opts, hooks{})
+	assertAge := func(want time.Duration) {
+		t.Helper()
+		if got := b.UnsealedAge(); got != want {
+			t.Fatalf("UnsealedAge() = %v, want %v", got, want)
+		}
+	}
+
+	assertAge(0)
+	mustAppend(t, b, bulk(0))
+	clk.Advance(time.Second)
+	mustAppend(t, b, bulk(1))
+	clk.Advance(time.Second)
+	assertAge(2 * time.Second)
+
+	entries := readAll(t, b, model.Bulk)
+	if err := b.MarkSealed(model.Bulk, entries[0].Next); err != nil {
+		t.Fatal(err)
+	}
+	assertAge(2 * time.Second) // bulk(1) is left: it waited at least that long
+
+	if err := b.MarkSealed(model.Bulk, entries[1].Next); err != nil {
+		t.Fatal(err)
+	}
+	assertAge(0)
+
+	mustAppend(t, b, crit(0))
+	clk.Advance(time.Second)
+	assertAge(time.Second)
+
+	mustClose(t, b)
+	b = openBuffer(t, dir, opts, hooks{})
+	clk.Advance(time.Second)
+	assertAge(time.Second) // the records found at Open count from Open
 }

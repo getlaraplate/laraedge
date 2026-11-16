@@ -117,9 +117,9 @@ func TestIDGeneratorFollowsAdvancingClock(t *testing.T) {
 	}
 }
 
-func TestIDGeneratorClockGoingBackwardsStaysMonotonic(t *testing.T) {
-	// The fake clock cannot go back; a generator that already advanced its
-	// timestamp past the clock on counter overflow behaves the same way.
+func TestIDGeneratorAheadOfAFrozenClockStaysMonotonic(t *testing.T) {
+	// 5000 ids overflow the counter, so the generator's timestamp runs ahead
+	// of the frozen clock; the ids that follow must keep increasing.
 	fake := clock.NewFake(testStart)
 	gen := envelope.NewIDGenerator(fake)
 
@@ -134,6 +134,45 @@ func TestIDGeneratorClockGoingBackwardsStaysMonotonic(t *testing.T) {
 			t.Fatalf("%q not greater than %q", next, prev)
 		}
 		prev = next
+	}
+}
+
+// idCounter returns the 12-bit rand_a counter of an id.
+func idCounter(b [16]byte) uint16 { return uint16(b[6]&0x0f)<<8 | uint16(b[7]) }
+
+func TestIDGeneratorCounterLayoutAndMillisecondRoll(t *testing.T) {
+	gen := envelope.NewIDGenerator(clock.NewFake(testStart))
+	startMS := testStart.UnixMilli()
+
+	first := idParts(t, gen.New())
+	if got := embeddedMillis(first); got != startMS {
+		t.Fatalf("embedded ms = %d, want %d", got, startMS)
+	}
+
+	if c := idCounter(first); c >= 1<<11 {
+		t.Fatalf("seeded counter %#x has its top bit set", c)
+	}
+
+	prev := first
+	for idCounter(prev) != 1<<12-1 {
+		b := idParts(t, gen.New())
+		if got := embeddedMillis(b); got != startMS {
+			t.Fatalf("embedded ms moved to %d before the counter overflowed", got)
+		}
+
+		if idCounter(b) != idCounter(prev)+1 {
+			t.Fatalf("counter %#x after %#x, want +1", idCounter(b), idCounter(prev))
+		}
+		prev = b
+	}
+
+	rolled := idParts(t, gen.New())
+	if got := embeddedMillis(rolled); got != startMS+1 {
+		t.Fatalf("embedded ms after overflow = %d, want %d", got, startMS+1)
+	}
+
+	if c := idCounter(rolled); c >= 1<<11 {
+		t.Fatalf("counter reseeded to %#x with its top bit set", c)
 	}
 }
 

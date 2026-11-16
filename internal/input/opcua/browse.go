@@ -50,6 +50,11 @@ type BrowseEntry struct {
 	// (CurrentRead), "w" (CurrentWrite), "rw", or "-" for neither; empty for
 	// other nodes and when unreadable.
 	Access string
+	// Status is the status the server answered when asked for the node's
+	// children (BadUserAccessDenied, or the hexadecimal code of a status the
+	// library does not name); empty when the node was browsed or not asked.
+	// Such a node is printed and not expanded, and the walk goes on.
+	Status string
 }
 
 // Browse connects like Probe (own certificate, trust check included: an
@@ -121,19 +126,23 @@ type candidate struct {
 }
 
 // visit prints the children of node, found at level, and recurses into
-// them. It returns when the walk is done or the node cap was reached. A
-// node below the start node that the server refuses to browse stays
-// unexpanded; any other error ends the walk.
+// them. It returns when the walk is done or the node cap was reached. The
+// start node (level 0) refused by the server is an error; a node below it
+// that the server refuses to browse is printed with that status and not
+// expanded (children). Any other error ends the walk.
 func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 	refs, err := w.s.Browse(ctx, node)
 	if err != nil {
-		if level > 0 && errors.Is(err, errBrowse) {
-			return nil
-		}
-
 		return err
 	}
 
+	return w.children(ctx, refs, level)
+}
+
+// children prints refs, found at level, and recurses into each one the depth
+// allows. A child is browsed before it is printed, so its line can carry the
+// status of a refusal.
+func (w *walker) children(ctx context.Context, refs []*ua.ReferenceDescription, level int) error {
 	remaining := BrowseMaxNodes - w.count
 	cands := make([]*candidate, 0, min(len(refs), remaining+1))
 	seen := map[string]bool{}
@@ -173,10 +182,31 @@ func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 
 		w.printed[c.key] = true
 		w.count++
-		w.emit(w.entry(c, level))
 
-		if level+1 < w.depth && !c.foreign {
-			if err := w.visit(ctx, c.ref.NodeID.NodeID, level+1); err != nil {
+		var (
+			grandchildren []*ua.ReferenceDescription
+			status        string
+		)
+
+		expand := level+1 < w.depth && !c.foreign
+		if expand {
+			var err error
+
+			grandchildren, err = w.s.Browse(ctx, c.ref.NodeID.NodeID)
+			switch {
+			case errors.Is(err, errBrowse):
+				status, expand = browseStatus(err), false
+			case err != nil:
+				return err
+			}
+		}
+
+		e := w.entry(c, level)
+		e.Status = status
+		w.emit(e)
+
+		if expand {
+			if err := w.children(ctx, grandchildren, level+1); err != nil {
 				return err
 			}
 
@@ -187,6 +217,24 @@ func (w *walker) visit(ctx context.Context, node *ua.NodeID, level int) error {
 	}
 
 	return nil
+}
+
+// browseStatus names the status of a refused browse with its OPC UA standard
+// name (BadNodeIdUnknown): the library's name without its Status prefix and
+// with ID spelled Id as the specification spells it (the library writes ID in
+// every name that holds it); the hexadecimal code of a status the library does
+// not name.
+func browseStatus(err error) string {
+	var code ua.StatusCode
+	if !errors.As(err, &code) {
+		return "Bad"
+	}
+
+	if d, ok := ua.StatusCodes[code]; ok && d.Name != "" {
+		return strings.ReplaceAll(strings.TrimPrefix(d.Name, "Status"), "ID", "Id")
+	}
+
+	return fmt.Sprintf("0x%08X", uint32(code))
 }
 
 // readAttributes sets the data type and the access level of the variables
@@ -236,21 +284,36 @@ func (w *walker) entry(c *candidate, level int) BrowseEntry {
 	return e
 }
 
-// dataTypeName names the DataType attribute of a variable: the standard name
-// of a namespace 0 type, the NodeId of any other, empty when unreadable.
+// dataTypeName names the DataType attribute of a variable, a NodeId or an
+// ExpandedNodeId: the standard name of a namespace 0 type, the NodeId of any
+// other (in the nsu= form with the URI an ExpandedNodeId carries), empty when
+// unreadable.
 func (w *walker) dataTypeName(dv *ua.DataValue) string {
 	if dv == nil || uint32(dv.Status)>>30 != 0 || dv.Value == nil {
 		return ""
 	}
 
-	nodeID, ok := dv.Value.Value().(*ua.NodeID)
-	if !ok || nodeID == nil {
+	var (
+		nodeID *ua.NodeID
+		uri    string
+	)
+
+	switch v := dv.Value.Value().(type) {
+	case *ua.NodeID:
+		nodeID = v
+	case *ua.ExpandedNodeID:
+		if v != nil {
+			nodeID, uri = v.NodeID, v.NamespaceURI
+		}
+	}
+
+	if nodeID == nil {
 		return ""
 	}
 
 	switch nodeID.Type() {
 	case ua.NodeIDTypeTwoByte, ua.NodeIDTypeFourByte, ua.NodeIDTypeNumeric:
-		if nodeID.Namespace() == 0 {
+		if nodeID.Namespace() == 0 && uri == "" {
 			// id.Name gives the number itself for a NodeId it does not know.
 			if name := id.Name(nodeID.IntID()); name != strconv.FormatUint(uint64(nodeID.IntID()), 10) {
 				return name
@@ -258,7 +321,7 @@ func (w *walker) dataTypeName(dv *ua.DataValue) string {
 		}
 	}
 
-	return formatNodeID(nodeID, "", w.namespaces)
+	return formatNodeID(nodeID, uri, w.namespaces)
 }
 
 // accessText renders an AccessLevel attribute as r, w, rw or -; empty when

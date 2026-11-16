@@ -23,7 +23,6 @@ import (
 // line, and the requests of the other units are still answered. Held
 // requests of the device are not supported: stop waits for the connections.
 type rtuServer struct {
-	t    *testing.T
 	dev  *testDevice
 	l    net.Listener
 	host string
@@ -68,7 +67,6 @@ func startRawServer(t *testing.T, dev *testDevice, mbap bool) *rtuServer {
 		t.Fatal(err)
 	}
 	s := &rtuServer{
-		t:      t,
 		dev:    dev,
 		l:      l,
 		host:   "127.0.0.1",

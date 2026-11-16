@@ -30,7 +30,8 @@ type BatchLimits struct {
 	// MaxBody is the most bytes of an envelope. At least 1.
 	MaxBody int
 	// MaxWait is how long a batch with fewer than MaxSamples records waits
-	// for more, from the first record seen. Zero seals at once.
+	// for more, from the append of its first record (Buffer.UnsealedAge).
+	// Zero seals at once.
 	MaxWait time.Duration
 }
 
@@ -168,6 +169,7 @@ type Buffer interface {
 	Head(p model.Priority) buffer.Position
 	Changed() <-chan struct{}
 	Records() uint64
+	UnsealedAge() time.Duration
 	AddLoss(l model.Loss) error
 	SyncLosses() error
 	PendingLosses() []model.Loss
@@ -233,7 +235,7 @@ func NewBatcher(buf Buffer, inflight *Inflight, ids MessageIDs, clk clock.Clock,
 // Next returns the batch to send: the sealed batch not yet settled, unchanged,
 // or a new one. A new batch waits until the buffer holds a record, then until
 // it holds MaxSamples records or MaxWait has passed since the first record
-// was seen, whichever comes first. It takes critical records first, then
+// waiting was appended, whichever comes first. It takes critical records first, then
 // bulk, up to MaxSamples, drops records from the tail until the envelope
 // fits MaxBody, and carries the pending loss markers. A record whose envelope
 // alone exceeds MaxBody can never be sent: it is dropped with a
@@ -312,11 +314,12 @@ func (bt *Batcher) wait(ctx context.Context, idle bool) error {
 		}
 
 		if n > 0 && timer == nil {
-			if bt.limits.MaxWait <= 0 {
+			rest := bt.limits.MaxWait - bt.buf.UnsealedAge()
+			if rest <= 0 {
 				return nil
 			}
 
-			timer = bt.clk.NewTimer(bt.limits.MaxWait)
+			timer = bt.clk.NewTimer(rest)
 			fired = timer.C()
 		}
 

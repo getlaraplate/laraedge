@@ -4,13 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"io"
 	"log"
-	"math/big"
 	"net"
-	"net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -20,6 +16,8 @@ import (
 	"github.com/gopcua/opcua/id"
 	"github.com/gopcua/opcua/server"
 	"github.com/gopcua/opcua/ua"
+
+	"github.com/getlaraplate/laraedge/internal/input/opcua/opcuatest"
 )
 
 // guard bounds a wait for a goroutine or a network exchange; it is a deadlock
@@ -99,32 +97,14 @@ func loadFixtures(t *testing.T) {
 }
 
 // serverCertificate is a self-signed RSA 2048 server certificate with the
-// application URI uri and the IP 127.0.0.1.
+// application URI uri and the IP 127.0.0.1 (opcuatest.ServerCertificate).
 func serverCertificate(uri string) ([]byte, *rsa.PrivateKey, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	appURI, err := url.Parse(uri)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "laraplate test server"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageContentCommitment |
-			x509.KeyUsageKeyEncipherment | x509.KeyUsageDataEncipherment | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		BasicConstraintsValid: true,
-		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
-		URIs:                  []*url.URL{appURI},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	der, err := opcuatest.ServerCertificate(key, uri, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
 	if err != nil {
 		return nil, nil, err
 	}

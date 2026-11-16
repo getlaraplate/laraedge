@@ -52,14 +52,25 @@ commands:
                              last valid one in the bootstrap's data_dir;
                              --record writes the raw samples as JSON Lines;
                              a plugin:<id> input starts its plugin for the
-                             probe
+                             probe; an mqtt input waits up to 30 s for a
+                             message on every topic and prints "no message"
+                             for a point whose topic stayed silent
   browse <input> (--config <file> | --bootstrap <path>) [--node <nodeid>] [--depth <n>]
+         [--filter <topic filter>] [--duration <1s-5m>]
                              list the nodes of an OPC UA server, or of a
                              plugin:<id> input whose plugin.json declares
                              browse, indented by depth, from the Objects
                              folder or --node (nsu=<uri>;<id> works);
                              --depth 1 to 10, default 2; stops after 1000
                              nodes; reads no value
+                             an mqtt input takes --filter (default #) and
+                             --duration (default 10s) instead of --node and
+                             --depth: it collects messages for that long and
+                             prints, per topic sorted, "<topic>  <n> msg
+                             <size> B  <retained|->" with a preview of a plain
+                             payload, or one "  <topic>|<path>  <value>" line
+                             per JSON leaf; previews are 40 characters at
+                             most; stops after 1000 topics
   opcua trust <input> (--config <file> | --bootstrap <path>) [--thumbprint <hex>]
                              show the certificate an OPC UA server presents and
                              trust it after a yes on stdin, or without asking
@@ -142,7 +153,11 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 	if code, ok := parse(fs, args); !ok {
 		return code
 	}
-	if *bootstrap == "" || fs.NArg() != 0 {
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "laraplate-edge run: unexpected argument %q\n", fs.Arg(0))
+		return exitUsage
+	}
+	if *bootstrap == "" {
 		fmt.Fprintf(stderr, "laraplate-edge run: --bootstrap <path> is required\n")
 		return exitUsage
 	}
@@ -343,7 +358,9 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 // parseArgs parses args like parse, but accepts flags before, between and
-// after the positional arguments, which it returns.
+// after the positional arguments, which it returns. A "--" ends the flags:
+// everything after it is positional, even when it starts with a dash. (A "--"
+// given as the value of a flag, "--input --", is read as the terminator too.)
 func parseArgs(fs *flag.FlagSet, args []string) (positional []string, code int, ok bool) {
 	for {
 		if code, ok := parse(fs, args); !ok {
@@ -351,6 +368,10 @@ func parseArgs(fs *flag.FlagSet, args []string) (positional []string, code int, 
 		}
 		if fs.NArg() == 0 {
 			return positional, exitOK, true
+		}
+
+		if rest := fs.Args(); len(args) > len(rest) && args[len(args)-len(rest)-1] == "--" {
+			return append(positional, rest...), exitOK, true
 		}
 
 		positional = append(positional, fs.Arg(0))
