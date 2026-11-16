@@ -150,6 +150,10 @@ func TestPahoClientUnhandledMessageIsRedelivered(t *testing.T) {
 	if got := receive(t, handled); got.payload != "1" {
 		t.Fatalf("redelivered message = %+v, want the unacknowledged one", got)
 	}
+	// The receiver saw the message before its handler returned and the
+	// client acknowledged it: a disconnect now could leave the broker
+	// without the PUBACK, and the redelivery would be right. Wait for it.
+	b.WaitAcknowledged("unacked", 1)
 	// Acknowledged now: after a new connection the next message is the
 	// first one received, nothing comes again before it.
 	handling.Disconnect()

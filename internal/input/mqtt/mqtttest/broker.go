@@ -36,6 +36,9 @@ import (
 // listenerID names the front listener on the mochi server.
 const listenerID = "mqtttest"
 
+// waitTimeout bounds WaitAcknowledged; reaching it fails the test.
+const waitTimeout = 5 * time.Second
+
 // Options configure a test broker.
 type Options struct {
 	// TLS serves TLS with a certificate for 127.0.0.1 and localhost, signed by
@@ -58,6 +61,11 @@ type Broker struct {
 	ln      net.Listener
 	conns   map[net.Conn]struct{}
 	running sync.WaitGroup
+
+	// acks counts, by client id, the QoS flows the broker completed; acked
+	// is closed and replaced at every count.
+	acks  map[string]int
+	acked chan struct{}
 }
 
 // Start starts a broker on a free port of 127.0.0.1 and stops it at the end
@@ -69,14 +77,23 @@ func Start(t testing.TB, opts Options) *Broker {
 		InlineClient: true,
 		Logger:       slog.New(slog.DiscardHandler),
 	})
+	b := &Broker{
+		t:      t,
+		server: server,
+		conns:  map[net.Conn]struct{}{},
+		acks:   map[string]int{},
+		acked:  make(chan struct{}),
+	}
 	if err := server.AddHook(&authHook{users: opts.Users}, nil); err != nil {
 		t.Fatalf("mqtttest: auth hook: %v", err)
+	}
+	if err := server.AddHook(&ackHook{broker: b}, nil); err != nil {
+		t.Fatalf("mqtttest: ack hook: %v", err)
 	}
 	if err := server.Serve(); err != nil {
 		t.Fatalf("mqtttest: serve: %v", err)
 	}
 
-	b := &Broker{t: t, server: server, conns: map[net.Conn]struct{}{}}
 	if opts.TLS {
 		b.tlsConf, b.caFile = newTLS(t)
 	}
@@ -113,6 +130,48 @@ func (b *Broker) Publish(topic string, payload []byte, retain bool, qos byte) {
 	if err := b.server.Publish(topic, payload, retain, qos); err != nil {
 		b.t.Fatalf("mqtttest: publish: %v", err)
 	}
+}
+
+// WaitAcknowledged waits until the broker has completed n QoS flows with the
+// client clientID since the start of the test: for a client that only
+// receives, n messages it was sent at QoS 1 or 2 and acknowledged. A client
+// acknowledges on its own goroutine, so a test that saw a message handled
+// and wants the acknowledgement to have reached the broker (before a
+// disconnect would drop it) waits here. It fails the test after a timeout,
+// so call it from the test goroutine.
+func (b *Broker) WaitAcknowledged(clientID string, n int) {
+	b.t.Helper()
+
+	timeout := time.NewTimer(waitTimeout)
+	defer timeout.Stop()
+
+	for {
+		b.mu.Lock()
+		count, acked := b.acks[clientID], b.acked
+		b.mu.Unlock()
+
+		if count >= n {
+			return
+		}
+
+		select {
+		case <-acked:
+		case <-timeout.C:
+			b.t.Fatalf("mqtttest: %d of %d acknowledgements from %q within the timeout", count, n, clientID)
+
+			return
+		}
+	}
+}
+
+// acknowledged counts a QoS flow the broker completed with clientID.
+func (b *Broker) acknowledged(clientID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.acks[clientID]++
+	close(b.acked)
+	b.acked = make(chan struct{})
 }
 
 // Stop closes every client connection and stops accepting new ones: a
@@ -235,6 +294,22 @@ func (h *authHook) OnConnectAuthenticate(_ *mochi.Client, pk packets.Packet) boo
 }
 
 func (h *authHook) OnACLCheck(_ *mochi.Client, _ string, _ bool) bool { return true }
+
+// ackHook tells the broker of every QoS flow completed: a PUBACK or PUBCOMP
+// received for a message the broker sent, or the acknowledgement the broker
+// sent for one it received.
+type ackHook struct {
+	mochi.HookBase
+	broker *Broker
+}
+
+func (h *ackHook) ID() string { return "mqtttest-ack" }
+
+func (h *ackHook) Provides(b byte) bool { return b == mochi.OnQosComplete }
+
+func (h *ackHook) OnQosComplete(cl *mochi.Client, _ packets.Packet) {
+	h.broker.acknowledged(cl.ID)
+}
 
 // newTLS generates a CA and a server certificate for 127.0.0.1 and localhost
 // signed by it; it returns the server configuration and the CA PEM file.
