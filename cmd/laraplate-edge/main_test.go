@@ -283,8 +283,12 @@ func TestConfigValidate(t *testing.T) {
 					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 				}
 			}
+			// Each line starts with the document path, and t.TempDir() ends in
+			// random digits that can contain a value below: check the messages
+			// with the temporary directory removed.
+			messages := strings.ReplaceAll(stderr.String(), dir, "")
 			for _, value := range []string{"plain-token-value", "plc.example", "1502", "70000"} {
-				if strings.Contains(stderr.String(), value) {
+				if strings.Contains(messages, value) {
 					t.Errorf("stderr echoes a value: %q", stderr.String())
 				}
 			}
