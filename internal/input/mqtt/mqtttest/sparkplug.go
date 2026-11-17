@@ -86,11 +86,11 @@ func (m SparkplugMetric) encode() []byte {
 	}
 	if m.Float != nil {
 		b = protowire.AppendTag(b, 12, protowire.Fixed32Type)
-		b = protowire.AppendFixed32(b, float32bits(*m.Float))
+		b = protowire.AppendFixed32(b, math.Float32bits(*m.Float))
 	}
 	if m.Double != nil {
 		b = protowire.AppendTag(b, 13, protowire.Fixed64Type)
-		b = protowire.AppendFixed64(b, float64bits(*m.Double))
+		b = protowire.AppendFixed64(b, math.Float64bits(*m.Double))
 	}
 	if m.Bool != nil {
 		v := uint64(0)
@@ -135,6 +135,3 @@ func BdSeq(v uint64) SparkplugMetric {
 	dt := uint32(4)
 	return SparkplugMetric{Name: &name, Datatype: &dt, Long: &v}
 }
-
-func float32bits(f float32) uint32 { return math.Float32bits(f) }
-func float64bits(f float64) uint64 { return math.Float64bits(f) }
