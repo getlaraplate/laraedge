@@ -109,6 +109,33 @@ func TestPahoClientReceivesAPublishedMessage(t *testing.T) {
 	}
 }
 
+// TestPahoClientPublish: the only publish of the driver, the Sparkplug
+// rebirth request, leaves at the given QoS and never retained; an ended
+// context returns its error without publishing.
+func TestPahoClientPublish(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{})
+	c, _ := newTestClient(t, testConnection(b, SchemePlain), "publisher", "", true)
+	ctx := testContext(t)
+
+	if _, err := c.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.Publish(ctx, "spBv1.0/g/NCMD/n", []byte{1, 2, 3}, 0); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	got := b.WaitPublished("publisher", 1)
+	if len(got) != 1 || got[0].Topic != "spBv1.0/g/NCMD/n" || string(got[0].Payload) != "\x01\x02\x03" || got[0].QoS != 0 || got[0].Retain {
+		t.Errorf("published = %+v, want one QoS 0 message, not retained", got)
+	}
+
+	ended, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := c.Publish(ended, "spBv1.0/g/NCMD/n", []byte{1}, 0); !errors.Is(err, context.Canceled) {
+		t.Errorf("Publish with an ended context = %v, want context.Canceled", err)
+	}
+}
+
 // TestPahoClientUnhandledMessageIsRedelivered: a QoS 1 message the receiver
 // did not handle (the router stopped by Close) is not acknowledged, so the
 // persistent session gives it to the next connection; a handled one is

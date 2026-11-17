@@ -268,11 +268,7 @@ func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 	in.started = true
 
 	life := edgeinput.NewLifecycle(in.cfg, in.clk, emit)
-	in.router = &router{
-		in:      in,
-		emit:    emit,
-		tracker: NewTracker(life, in.conn.Availability, in.devices),
-	}
+	in.router = newRouter(in, emit, NewTracker(life, in.conn.Availability, in.devices))
 
 	in.wg.Go(func() { life.Run(runCtx) })
 	in.wg.Go(func() { in.run(runCtx, in.router) })
@@ -313,7 +309,8 @@ func (in *Input) Health() edgeinput.Health {
 }
 
 // topics returns the subscription set of the input: the topics of the plan
-// and the availability topics, sorted and without duplicates.
+// (json) or the node filters (sparkplug_b) and the availability topics,
+// sorted and without duplicates.
 func (in *Input) topics(tracker *Tracker) []string {
 	topics := slices.Collect(maps.Keys(in.plan))
 	if in.sparkplug != nil {

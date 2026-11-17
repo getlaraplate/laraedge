@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/config"
 	edgeinput "github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/input/driverkit"
 	"github.com/getlaraplate/laraedge/internal/input/mqtt/mqtttest"
@@ -214,41 +215,99 @@ func TestInputKeepsASilentDeviceAlive(t *testing.T) {
 	}
 }
 
+// formatScenario drives a plan 1 scenario under one payload format: the
+// press device reads count, the oven device temp, each on its own topic
+// (json) or edge node (sparkplug_b).
+type formatScenario struct {
+	name string
+	// input is the document of the given devices.
+	input func(t *testing.T, b *mqtttest.Broker, devices ...config.Device) config.Input
+	// press and oven are the devices.
+	press, oven config.Device
+	// count publishes a count of the press, temp a temp of the oven.
+	count, temp func(b *mqtttest.Broker, v int)
+	// both and pressOnly are the subscription sets of the documents with
+	// both devices and with the press only.
+	both, pressOnly []string
+}
+
+// formatScenarios are the scenarios of both formats.
+func formatScenarios() []formatScenario {
+	countMetric := func(v int) mqtttest.SparkplugMetric {
+		return mqtttest.SparkplugMetric{Name: ptr("count"), Datatype: ptr(dtInt32), Int: ptr(uint32(v))}
+	}
+	tempMetric := func(v int) mqtttest.SparkplugMetric {
+		return mqtttest.SparkplugMetric{Name: ptr("temp"), Datatype: ptr(dtDouble), Double: ptr(float64(v))}
+	}
+
+	return []formatScenario{
+		{
+			name: FormatJSON,
+			input: func(t *testing.T, b *mqtttest.Broker, devices ...config.Device) config.Input {
+				return mqttInput(t, "line", b, nil, devices...)
+			},
+			press:     device("press", subscribePoint("count", "plant/press/count", "int32")),
+			oven:      device("oven", subscribePoint("temp", "plant/oven/temp", "float64")),
+			count:     func(b *mqtttest.Broker, v int) { b.Publish("plant/press/count", []byte(strconv.Itoa(v)), false, 1) },
+			temp:      func(b *mqtttest.Broker, v int) { b.Publish("plant/oven/temp", []byte(strconv.Itoa(v)), false, 1) },
+			both:      []string{"plant/oven/temp", "plant/press/count"},
+			pressOnly: []string{"plant/press/count"},
+		},
+		{
+			name: FormatSparkplugB,
+			input: func(t *testing.T, b *mqtttest.Broker, devices ...config.Device) config.Input {
+				return sparkplugInput(t, "line", b, nil, devices...)
+			},
+			press: device("press", subscribePoint("count", "g/press|count", "int32")),
+			oven:  device("oven", subscribePoint("temp", "g/oven|temp", "float64")),
+			count: func(b *mqtttest.Broker, v int) {
+				b.Publish("spBv1.0/g/NDATA/press", payload(nil, countMetric(v)), false, 1)
+			},
+			temp: func(b *mqtttest.Broker, v int) {
+				b.Publish("spBv1.0/g/NDATA/oven", payload(nil, tempMetric(v)), false, 1)
+			},
+			both:      []string{"spBv1.0/g/+/oven/#", "spBv1.0/g/+/press/#"},
+			pressOnly: []string{"spBv1.0/g/+/press/#"},
+		},
+	}
+}
+
 // TestInputPersistentSessionReplay closes an input, publishes while no
 // client is connected and starts the next input of the same document: the
 // broker kept the session of the client id, so the message reaches the new
 // input and not the closed one, which emits nothing after Close.
 func TestInputPersistentSessionReplay(t *testing.T) {
-	b := mqtttest.Start(t, mqtttest.Options{})
-	dataDir := t.TempDir()
-	cfg := mqttInput(t, "line", b, nil, device("press", subscribePoint("count", "plant/press/count", "int32")))
-	opts := Options{DataDir: dataDir, AgentID: "agent"}
+	for _, sc := range formatScenarios() {
+		t.Run(sc.name, func(t *testing.T) {
+			b := mqtttest.Start(t, mqtttest.Options{})
+			cfg := sc.input(t, b, sc.press)
+			opts := Options{DataDir: t.TempDir(), AgentID: "agent"}
 
-	first := newHarness(t, cfg, opts)
-	first.start()
-	first.serving()
-	warmUp(t, b, first, "plant/press/count", "count")
-	first.close()
-	if first.in.Health().Connected {
-		t.Fatal("Connected after Close")
-	}
+			first := newHarness(t, cfg, opts)
+			first.start()
+			first.serving()
+			warmUpWith(t, first, func(i int) { sc.count(b, i) }, "count")
+			first.close()
+			if first.in.Health().Connected {
+				t.Fatal("Connected after Close")
+			}
 
-	b.Publish("plant/press/count", []byte("11"), false, 1)
+			sc.count(b, 11)
 
-	next := newHarness(t, cfg, opts)
-	next.start()
-	// QoS 1 is at least once: a warm-up message whose acknowledgement the
-	// close cut short comes again before the replayed one.
-	next.waitValue("count", model.IntValue(11))
+			next := newHarness(t, cfg, opts)
+			next.start()
+			// QoS 1 is at least once: a warm-up message whose acknowledgement
+			// the close cut short comes again before the replayed one.
+			next.waitValue("count", model.IntValue(11))
 
-	// The closed input saw only the warm-up samples.
-	h := first
-
-	if n := h.late.Load(); n != 0 {
-		t.Errorf("the closed input emitted %d records after Close", n)
-	}
-	if got := samplesOf(h.snapshot(), "count"); len(got) != warmUpMessages {
-		t.Errorf("the closed input emitted %d samples, want the %d of the warm-up", len(got), warmUpMessages)
+			// The closed input saw only the warm-up samples.
+			if n := first.late.Load(); n != 0 {
+				t.Errorf("the closed input emitted %d records after Close", n)
+			}
+			if got := samplesOf(first.snapshot(), "count"); len(got) != warmUpMessages {
+				t.Errorf("the closed input emitted %d samples, want the %d of the warm-up", len(got), warmUpMessages)
+			}
+		})
 	}
 }
 
@@ -294,48 +353,48 @@ func TestInputRetainedOfflineAtStart(t *testing.T) {
 }
 
 // TestInputReloadDropsATopic restarts an input with a document that no
-// longer reads a topic: the message queued for it in the persistent session
-// is counted unmapped and not emitted, the topic is unsubscribed and the
-// subscription set rewritten.
+// longer reads a device: the message queued for it in the persistent session
+// is counted unmapped and not emitted, its topic (json) or node filter
+// (sparkplug_b) is unsubscribed and the subscription set rewritten.
 func TestInputReloadDropsATopic(t *testing.T) {
-	b := mqtttest.Start(t, mqtttest.Options{})
-	dataDir := t.TempDir()
-	opts := Options{DataDir: dataDir, AgentID: "agent"}
+	for _, sc := range formatScenarios() {
+		t.Run(sc.name, func(t *testing.T) {
+			b := mqtttest.Start(t, mqtttest.Options{})
+			dataDir := t.TempDir()
+			opts := Options{DataDir: dataDir, AgentID: "agent"}
 
-	before := mqttInput(t, "line", b, nil, device("press",
-		subscribePoint("count", "plant/press/count", "int32"),
-		subscribePoint("temp", "plant/press/temp", "float64"),
-	))
-	first := newHarness(t, before, opts)
-	first.start()
-	first.serving()
-	warmUp(t, b, first, "plant/press/count", "count")
-	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count", "plant/press/temp"}) {
-		t.Fatalf("subscription set = %q, %v", got, err)
-	}
-	first.close()
+			first := newHarness(t, sc.input(t, b, sc.press, sc.oven), opts)
+			first.start()
+			first.serving()
+			warmUpWith(t, first, func(i int) { sc.count(b, i) }, "count")
+			if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, sc.both) {
+				t.Fatalf("subscription set = %q, %v", got, err)
+			}
+			first.close()
 
-	b.Publish("plant/press/temp", []byte("20.5"), false, 1)
+			sc.temp(b, 20)
 
-	after := mqttInput(t, "line", b, nil, device("press", subscribePoint("count", "plant/press/count", "int32")))
-	next := newHarness(t, after, opts)
-	next.start()
-	next.serving()
+			next := newHarness(t, sc.input(t, b, sc.press), opts)
+			next.start()
+			next.serving()
 
-	// Published in this order on one connection: had temp still been
-	// subscribed, its message would arrive before the count sample.
-	b.Publish("plant/press/temp", []byte("21.5"), false, 1)
-	b.Publish("plant/press/count", []byte("103"), false, 1)
-	next.waitValue("count", model.IntValue(103))
+			// Published in this order on one connection: had the oven still
+			// been subscribed, its message would arrive before the count
+			// sample.
+			sc.temp(b, 21)
+			sc.count(b, 103)
+			next.waitValue("count", model.IntValue(103))
 
-	if n := next.in.Health().ReadErrors[KindUnmapped]; n != 1 {
-		t.Errorf("unmapped = %d, want 1 (the queued message only)", n)
-	}
-	if got := samplesOf(next.snapshot(), "temp"); len(got) != 0 {
-		t.Errorf("temp samples emitted: %+v", got)
-	}
-	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count"}) {
-		t.Errorf("subscription set = %q, %v", got, err)
+			if n := next.in.Health().ReadErrors[KindUnmapped]; n != 1 {
+				t.Errorf("unmapped = %d, want 1 (the queued message only)", n)
+			}
+			if got := samplesOf(next.snapshot(), "temp"); len(got) != 0 {
+				t.Errorf("temp samples emitted: %+v", got)
+			}
+			if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, sc.pressOnly) {
+				t.Errorf("subscription set = %q, %v", got, err)
+			}
+		})
 	}
 }
 
@@ -478,8 +537,15 @@ const warmUpMessages = 3
 func warmUp(t *testing.T, b *mqtttest.Broker, h *harness, topic, signal string) {
 	t.Helper()
 
+	warmUpWith(t, h, func(i int) { b.Publish(topic, []byte(strconv.Itoa(i)), false, 1) }, signal)
+}
+
+// warmUpWith is warmUp with the messages published by publish.
+func warmUpWith(t *testing.T, h *harness, publish func(i int), signal string) {
+	t.Helper()
+
 	for i := range warmUpMessages {
-		b.Publish(topic, []byte(strconv.Itoa(i)), false, 1)
+		publish(i)
 	}
 	h.waitSamples(signal, warmUpMessages)
 }
