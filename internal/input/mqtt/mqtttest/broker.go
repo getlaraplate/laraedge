@@ -84,6 +84,9 @@ type Broker struct {
 	// subscribed counts, by client id, the SUBSCRIBE packets the broker
 	// processed; changed is closed and replaced at every one too.
 	subscribed map[string]int
+	// granted holds, by topic filter, the client id that last subscribed to
+	// it with the subscription granted.
+	granted map[string]string
 }
 
 // Message is a PUBLISH packet the broker received from a client.
@@ -128,6 +131,7 @@ func Start(t testing.TB, opts Options) *Broker {
 		changed: make(chan struct{}),
 
 		subscribed: map[string]int{},
+		granted:    map[string]string{},
 	}
 	b.SetRefused(opts.Refuse...)
 	if err := server.AddHook(&authHook{users: opts.Users, broker: b}, nil); err != nil {
@@ -283,6 +287,35 @@ func (b *Broker) WaitSubscribed(clientID string, n int) {
 			b.t.Fatalf("mqtttest: %d of %d subscriptions from %q within the timeout", count, n, clientID)
 
 			return
+		}
+	}
+}
+
+// WaitSubscribedTo waits until the broker has granted a client's
+// subscription to filter, so a message published afterwards on a matching
+// topic reaches it, and returns that client's id. It fails the test after a
+// timeout, so call it from the test goroutine.
+func (b *Broker) WaitSubscribedTo(filter string) string {
+	b.t.Helper()
+
+	timeout := time.NewTimer(waitTimeout)
+	defer timeout.Stop()
+
+	for {
+		b.mu.Lock()
+		clientID, changed := b.granted[filter], b.changed
+		b.mu.Unlock()
+
+		if clientID != "" {
+			return clientID
+		}
+
+		select {
+		case <-changed:
+		case <-timeout.C:
+			b.t.Fatalf("mqtttest: no subscription to %q granted within the timeout", filter)
+
+			return ""
 		}
 	}
 }
@@ -530,7 +563,7 @@ func (h *recordHook) OnConnect(_ *mochi.Client, pk packets.Packet) error {
 	return nil
 }
 
-func (h *recordHook) OnSubscribed(cl *mochi.Client, _ packets.Packet, _ []byte) {
+func (h *recordHook) OnSubscribed(cl *mochi.Client, pk packets.Packet, reasonCodes []byte) {
 	if cl.Net.Inline {
 		return
 	}
@@ -539,6 +572,11 @@ func (h *recordHook) OnSubscribed(cl *mochi.Client, _ packets.Packet, _ []byte) 
 	defer h.broker.mu.Unlock()
 
 	h.broker.subscribed[cl.ID]++
+	for i, sub := range pk.Filters {
+		if i < len(reasonCodes) && reasonCodes[i] < packets.ErrUnspecifiedError.Code {
+			h.broker.granted[sub.Filter] = cl.ID
+		}
+	}
 	close(h.broker.changed)
 	h.broker.changed = make(chan struct{})
 }
