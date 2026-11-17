@@ -30,7 +30,8 @@ import (
 )
 
 // probeTimeout bounds the one read of every point. A variable so the tests
-// can shorten the wait for a silent mqtt topic.
+// can shorten the wait for a silent mqtt topic; tests that change it must not
+// run in parallel.
 var probeTimeout = 30 * time.Second
 
 // runProbe runs "probe <input>" (decision P8): it builds the input the

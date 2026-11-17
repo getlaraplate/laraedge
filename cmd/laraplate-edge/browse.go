@@ -27,10 +27,11 @@ import (
 // browseTimeout bounds the connection and the whole walk.
 const browseTimeout = 2 * time.Minute
 
-// browseWait, when not zero, ends the collection of an mqtt browse after it
-// whatever --duration says. A variable so the tests can collect for less
-// than the 1 second --duration allows; zero for users.
-var browseWait time.Duration
+// mqttBrowseClock times the --duration of an mqtt browse, which starts once
+// the broker has answered the subscription. A variable so the tests can
+// collect for less than the 1 second --duration allows with a faster clock;
+// the real clock for users. Tests that change it must not run in parallel.
+var mqttBrowseClock = clock.Real()
 
 // runBrowse runs "browse <input>": it walks the hierarchical references of an
 // OPC UA server from the Objects folder, or from --node, and prints one line
@@ -211,7 +212,7 @@ func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, conf
 
 	log := logging.New(stderr, slog.LevelWarn)
 
-	in, err := mqtt.New(cfg, clock.Real(), mqtt.Options{
+	in, err := mqtt.New(cfg, mqttBrowseClock, mqtt.Options{
 		DataDir:  boot.DataDir,
 		AgentID:  boot.AgentID,
 		Resolver: secrets.NewResolver(),
@@ -228,12 +229,6 @@ func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, conf
 
 	ctx, cancel := context.WithTimeout(ctx, duration+browseTimeout)
 	defer cancel()
-
-	if browseWait > 0 {
-		var cancelWait context.CancelFunc
-		ctx, cancelWait = context.WithTimeout(ctx, browseWait)
-		defer cancelWait()
-	}
 
 	entries, truncated, err := in.Browse(ctx, filter, duration)
 	if err != nil {

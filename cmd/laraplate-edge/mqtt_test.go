@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/input/mqtt/mqtttest"
 	"github.com/getlaraplate/laraedge/internal/input/opcua/opcuatest"
@@ -72,27 +74,47 @@ func TestProbeAnMQTTInputPrintsNoMessageForASilentPoint(t *testing.T) {
 	}
 }
 
-// commandWait is how long the tests let probe and browse wait for messages:
-// the retained ones arrive at once, so it only bounds the silent ones.
-const commandWait = 300 * time.Millisecond
+// probeWait is how long the tests let probe wait for a silent point. It
+// bounds the whole command, the connection included, so it keeps a margin
+// for a slow runner; the retained messages answer at once.
+const probeWait = time.Second
 
-// shortProbe makes probe wait commandWait for a silent point.
+// shortProbe makes probe wait probeWait for a silent point.
 func shortProbe(t *testing.T) {
 	t.Helper()
 
 	old := probeTimeout
-	probeTimeout = commandWait
+	probeTimeout = probeWait
 	t.Cleanup(func() { probeTimeout = old })
 }
 
-// shortBrowse makes an mqtt browse collect for commandWait whatever its
+// browseSpeedUp is how much faster than real time the clock of an mqtt
+// browse runs in the tests: --duration 1s collects for 250 ms, counted from
+// the broker's answer to the subscription, so the connection is not part of
+// it.
+const browseSpeedUp = 4
+
+// shortBrowse makes an mqtt browse collect for 1/browseSpeedUp of its
 // --duration.
 func shortBrowse(t *testing.T) {
 	t.Helper()
 
-	old := browseWait
-	browseWait = commandWait
-	t.Cleanup(func() { browseWait = old })
+	old := mqttBrowseClock
+	mqttBrowseClock = fastClock{Clock: clock.Real(), speedUp: browseSpeedUp}
+	t.Cleanup(func() { mqttBrowseClock = old })
+}
+
+// fastClock is a real clock whose timers and sleeps last 1/speedUp of the
+// asked duration.
+type fastClock struct {
+	clock.Clock
+	speedUp time.Duration
+}
+
+func (c fastClock) NewTimer(d time.Duration) clock.Timer { return c.Clock.NewTimer(d / c.speedUp) }
+
+func (c fastClock) Sleep(ctx context.Context, d time.Duration) error {
+	return c.Clock.Sleep(ctx, d/c.speedUp)
 }
 
 func TestProbeAnMQTTInputPrintsWhyAPointHasNoGoodSample(t *testing.T) {
