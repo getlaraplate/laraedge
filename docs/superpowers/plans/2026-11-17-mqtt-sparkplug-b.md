@@ -167,7 +167,7 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - `mqtt.TargetPlan{Target SparkplugTarget; Device string /* the agent device */; Points map[string]PlannedPoint /* by metric name */}`.
   - `mqtt.PlanSparkplug(cfg config.Input) (*SparkplugPlan, error)`.
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - `format: sparkplug_b` is accepted; `rebirth: true|false` is accepted with it.
   - `rebirth` is refused with `json` (`connection.rebirth: needs format sparkplug_b`).
   - `timestamp`, `topics` and `availability` are refused with `sparkplug_b` (`connection.<field>: not with format sparkplug_b`).
@@ -184,11 +184,11 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
     - two points of one device on the same metric.
   - Filters for devices on `g/n` and `g/n/d`: `["spBv1.0/g/+/n", "spBv1.0/g/+/n/d"]`.
   - A device on `g/n/d` alone also subscribes its node: `["spBv1.0/g/+/n", "spBv1.0/g/+/n/d"]`. The node's NBIRTH carries the `bdSeq` and the alias table, and its NDEATH kills the devices under it (S1b).
-- [ ] **Step 2: Implement.**
+- [x] **Step 2: Implement.**
   - `newInput` builds `SparkplugPlan` instead of `Plan` under `sparkplug_b`.
   - `checkPoint` uses the address parser of the format.
   - `CheckClientIDs` is unchanged.
-- [ ] **Step 3: Run the checks; commit** `feat(mqtt): accept format sparkplug_b, its addresses and its plan`.
+- [x] **Step 3: Run the checks; commit** `feat(mqtt): accept format sparkplug_b, its addresses and its plan`.
 
 ### Task 2: Payload decoder, values and the rebirth encoder
 
