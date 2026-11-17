@@ -323,12 +323,19 @@ func (c *pahoClient) Disconnect() {
 func (c *pahoClient) Lost() <-chan error { return c.lost }
 
 // wait waits for token or ctx; it returns ctx.Err() when ctx ends first,
-// else the token's error.
+// else the token's error. A token that is done when ctx ends wins: select
+// picks at random among ready cases, and an answer the broker already gave
+// must not be reported as a cancelled wait.
 func wait(ctx context.Context, token paho.Token) error {
 	select {
 	case <-token.Done():
 		return token.Error()
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-token.Done():
+			return token.Error()
+		default:
+			return ctx.Err()
+		}
 	}
 }
