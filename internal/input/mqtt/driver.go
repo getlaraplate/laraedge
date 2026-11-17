@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -141,15 +142,12 @@ func newInput(cfg config.Input, clk clock.Clock, opts Options, d deps) (*Input, 
 		log:       log,
 		conn:      conn,
 		plan:      plan,
-		clientID:  conn.ClientID,
+		clientID:  clientID(conn, opts.AgentID, cfg.ID),
 		tolerance: cfg.DeathTolerance,
 		deps:      d,
 	}
 	if in.deps.jitter == nil {
 		in.deps.jitter = rand.Float64
-	}
-	if in.clientID == "" {
-		in.clientID = clientIDPrefix + opts.AgentID + "-" + cfg.ID
 	}
 	if in.tolerance <= 0 {
 		in.tolerance = config.DefaultDeathTolerance
@@ -161,6 +159,49 @@ func newInput(cfg config.Input, clk clock.Clock, opts Options, d deps) (*Input, 
 	}
 
 	return in, nil
+}
+
+// clientID is the effective client id of input id: the document's
+// client_id, else laraplate-edge-<agent_id>-<input_id>.
+func clientID(conn Connection, agentID, id string) string {
+	if conn.ClientID != "" {
+		return conn.ClientID
+	}
+
+	return clientIDPrefix + agentID + "-" + id
+}
+
+// CheckClientIDs refuses two mqtt inputs of doc that would connect to the
+// same broker (scheme, host and port, the default port filled in, the host
+// in any letter case) with the same effective client id: the broker would
+// drop one connection whenever the other connects. agentID forms the default
+// ids. An input whose connection does not parse is left to its factory. The
+// messages name the input ids and their positions, never a client id or a
+// broker.
+func CheckClientIDs(doc config.Document, agentID string) []string {
+	type identity struct{ scheme, host, clientID string }
+
+	first := map[identity]int{}
+	var msgs []string
+	for i, cfg := range doc.Inputs {
+		if cfg.Driver != config.DriverMQTT {
+			continue
+		}
+		conn, err := ParseConnection(cfg.Connection, cfg)
+		if err != nil {
+			continue
+		}
+
+		key := identity{conn.Broker.Scheme, strings.ToLower(conn.Broker.Host), clientID(conn, agentID, cfg.ID)}
+		if j, dup := first[key]; dup {
+			msgs = append(msgs, fmt.Sprintf("inputs.%d.connection.client_id: input %q has the same broker and client id as input %q (inputs.%d); every mqtt input needs its own client id on a broker", i, cfg.ID, doc.Inputs[j].ID, j))
+
+			continue
+		}
+		first[key] = i
+	}
+
+	return msgs
 }
 
 // checkPoint validates a point and its address.

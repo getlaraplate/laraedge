@@ -16,6 +16,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/bootstrap"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/secrets"
@@ -220,6 +221,7 @@ func runConfigValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(msgs) == 0 {
 		msgs = append(checkDocument(doc), checkInputs(doc, file)...)
+		msgs = append(msgs, mqtt.CheckClientIDs(doc, "")...)
 		msgs = append(msgs, checkPlugins(doc, file, *pluginsDir)...)
 	}
 	if len(msgs) > 0 {

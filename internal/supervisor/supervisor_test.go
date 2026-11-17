@@ -612,6 +612,25 @@ func TestApplyRefuses(t *testing.T) {
 			want: []string{"inputs.0.devices.0.derived: not available in this build"},
 		},
 		{
+			name: "what the document check refuses",
+			opts: []fixtureOption{func(c *Config) {
+				c.Check = func(doc config.Document) []string {
+					if len(doc.Inputs) > 1 {
+						return []string{"inputs.1: refused by the document check"}
+					}
+
+					return nil
+				}
+			}},
+			first: func(f *fixture) config.Document {
+				return f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, nil)
+			},
+			second: func(f *fixture) config.Document {
+				return f.document(2, []inSpec{{id: "a", devices: []string{"a1"}}, {id: "b", devices: []string{"b1"}}}, nil)
+			},
+			want: []string{"inputs.1: refused by the document check"},
+		},
+		{
 			name: "an input the driver cannot build",
 			first: func(f *fixture) config.Document {
 				return f.document(1, []inSpec{{id: "a", devices: []string{"a1"}}}, nil)
