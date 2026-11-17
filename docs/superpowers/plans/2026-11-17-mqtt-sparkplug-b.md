@@ -335,14 +335,14 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
 - add a second input, `format: sparkplug_b`, to `examples/mqtt/config.yaml` on the same broker (its default client id differs by input id), so `TestMQTTExampleValidates` in `cmd/laraplate-edge/mqtt_test.go` covers it;
 - modify `docs/CONFIGURATION.md`, `docs/USAGE.md`, the spec, this plan, `docs/superpowers/plans/INDEX.md` and `docs/superpowers/specs/INDEX.md`.
 
-- [ ] **Step 1: End to end.** Run the real binary against a broker started by the test, with a `sparkplug_b` input whose points cover a node and a device. The test publishes NBIRTH, DBIRTH, NDATA by alias, DDEATH and NDEATH. The backend fake receives:
+- [x] **Step 1: End to end.** Run the real binary against a broker started by the test, with a `sparkplug_b` input whose points cover a node and a device. The test publishes NBIRTH, DBIRTH, NDATA by alias, DDEATH and NDEATH. The backend fake receives:
   - births with the declared data types;
   - the samples;
   - the device death and then the node death.
 
   Run with `-tags e2e -race`.
-- [ ] **Step 2: Example.** The `sparkplug_b` input has a node point and a device point, and the header comment shows how to `browse` it; `TestMQTTExampleValidates` passes.
-- [ ] **Step 3: Documentation.**
+- [x] **Step 2: Example.** The `sparkplug_b` input has a node point and a device point, and the header comment shows how to `browse` it; `TestMQTTExampleValidates` passes.
+- [x] **Step 3: Documentation.**
   - `CONFIGURATION.md`, "The `mqtt` driver":
     - `format: sparkplug_b`, the address form, the S2 rules and `rebirth`;
     - what is refused with the format;
@@ -355,7 +355,7 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
       - no samples after an agent restart (aliases: enable `rebirth` or restart the node);
       - devices dying after an NDEATH;
       - a will with an old `bdSeq`.
-- [ ] **Step 4: Spec amendments**, dated 2026-11-17 and naming this plan:
+- [x] **Step 4: Spec amendments**, dated 2026-11-17 and naming this plan:
   - section 6 gains `malformed_payload` (S6);
   - section 7 gains the S3 rule that a Sparkplug death holds until the next birth, the S2 refusals, the node filter of S1b, the reset of `seq` at reconnection, and probe and browse publishing a rebirth only with `rebirth: true`;
   - the status line says plan 2 is delivered.
@@ -364,4 +364,4 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - Set `status: closed`, with a `## Delivery status (date)` section that holds every divergence from this plan and the rulings of the execution.
   - Add the `**Documented in:**` line.
   - Update both INDEX lines.
-- [ ] **Step 6: Run the checks, including `go test -tags e2e -race ./internal/e2e/...`; commit** `docs(mqtt): document Sparkplug B and close plan 2`.
+- [x] **Step 6: Run the checks, including `go test -tags e2e -race ./internal/e2e/...`; commit** `docs(mqtt): document Sparkplug B and close plan 2`.
