@@ -193,10 +193,6 @@ func TestTrackerTopics(t *testing.T) {
 	if got, want := tracker.Topics(), []string{"plant/a", "plant/z"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Topics = %q, want %q", got, want)
 	}
-
-	// One availability topic serves several devices.
-	tracker.Message("plant/z", []byte("off"))
-	tracker.Message("plant/z", []byte("on"))
 }
 
 func TestTrackerSharedTopicAppliesToEveryDevice(t *testing.T) {
