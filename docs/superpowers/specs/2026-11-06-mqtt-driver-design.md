@@ -192,6 +192,9 @@ S13 and S14 and the rulings of its execution). They refine what follows, which i
   publish a rebirth, one per addressed node, only with `rebirth: true`; with `false` nothing is published.
   `probe` shows `unknown_alias`, `malformed_payload`, `payload_too_large` or `subscribe_refused` for a point with
   no sample.
+- **Float and Double (ruling R9).** A whole, in-range Float or Double also converts to an integer point type, a fraction or
+  an out-of-range value is `conversion`: it is a typed binary number, so the value is lossless. JSON text `3.0` stays refused
+  for an integer type (plan 1, Q4).
 - **`browse` output (S14).** Default filter `spBv1.0/#`. One line per group, node and device seen,
   `<group>/<node>[/<device>]  <n> msg  born|-` with `  <m> malformed` when there were malformed payloads,
   followed by indented `  <address>  <type>` lines from the births, with the suggested point type (Int8 and Int16

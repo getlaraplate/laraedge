@@ -714,13 +714,12 @@ handled silently (the sequence number and the aliases are kept up to date) and g
   samples of a device held dead are dropped without a count, since after a death they can only be reordered
   messages.
 - The `bdSeq` metric ties a death to its birth. An NDEATH whose `bdSeq` differs from the last NBIRTH's is the
-  stale Last Will of an earlier session and is ignored. With no NBIRTH seen, or an NDEATH without `bdSeq`, the
-  NDEATH is honoured.
+  stale Last Will of an earlier session and is ignored. The NDEATH is honoured when no NBIRTH was seen, when the last NBIRTH carried no `bdSeq`, or when the NDEATH has none.
 
 **Aliases.** A birth declares each metric with its name, an alias (a number) and a data type; later data
 messages may carry only the alias. The agent keeps the names, aliases and data types of the births, per
 edge node and device, and resolves a metric by alias through them. An NBIRTH replaces the node's table, a
-DBIRTH replaces the aliases of its device. The tables survive deaths and reconnections. A data metric with an
+DBIRTH overwrites the aliases it declares. The tables survive deaths and reconnections. A data metric with an
 alias no birth declared is dropped and counted `unknown_alias`, once per metric: it happens when the agent
 starts after the node's birth (the births are not retained). The node publishes a new birth when asked or when
 it restarts; with `rebirth: true` the agent asks.
@@ -747,7 +746,7 @@ datatype, which is the one in the message or else the one learnt from the birth.
 | Sparkplug datatype | Point `type` that takes it |
 |---|---|
 | Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, DateTime (milliseconds, as an integer) | the integer types, when the value fits (`uint64` above 2^63-1 is `bad`) |
-| Float, Double | `float32` and `float64`, with the rules of `json` |
+| Float, Double | `float32` and `float64`, with the rules of `json`; the integer types too, when the value is whole and in range (a fraction or an out-of-range value is `conversion`) |
 | Boolean | `bool` |
 | String, Text, UUID | `string` |
 
@@ -756,6 +755,9 @@ error `conversion`: DataSet, Bytes, File, Template, PropertySet, PropertySetList
 metric with no datatype, and a value that does not fit the point's type. A metric with `is_null` is a `bad`
 sample and no read error, since it is the device's own report. A `bad` sample carries the zero of the point's
 kind. `is_historical` metrics are ordinary samples.
+
+A Float or Double is a typed binary number, so a whole value (`3.0`) is accepted by an integer point type, which
+differs from `json`, where the text `3.0` is refused for an integer type.
 
 **Quality.** The `Quality` property of a metric
 sets the sample's quality: 192 and above `good`, 64 to 191 `uncertain`, below 64 `bad`. A property of another
