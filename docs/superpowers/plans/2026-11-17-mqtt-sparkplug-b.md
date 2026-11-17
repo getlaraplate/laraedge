@@ -317,7 +317,7 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - The `browse` command picks `Browse` or `BrowseSparkplug` by the input's format. Its default `--filter` is `#` for `json` and `spBv1.0/#` for `sparkplug_b`.
   - Output: one line per entry, and below it one indented line per metric, `address` then `type`, sorted by address.
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - **probe, birth seen:** the probe gets samples when a retained NDATA by name or a birth arrives in the window.
   - **probe, aliases only:** a node using aliases shows `unknown_alias`.
   - **probe, rebirth:** with `rebirth: true` the probe publishes one NCMD per addressed node and gets the births. With `rebirth: false` it publishes nothing.
@@ -325,8 +325,8 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - **browse, rebirth:** with `rebirth: true` it publishes one NCMD per node seen.
   - **browse, filter default:** `spBv1.0/#` under `sparkplug_b`.
   - **cmd output:** the printed lines match the formats above. Wait times stay as plan 1's follow-up set them.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit** `feat(mqtt): probe and browse Sparkplug B inputs`.
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit** `feat(mqtt): probe and browse Sparkplug B inputs`.
 
 ### Task 6: End to end, example, documentation, closing
 
