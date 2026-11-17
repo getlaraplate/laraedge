@@ -433,7 +433,7 @@ plant/press-07/status  1 msg  6 B  retained  online
 ```
 
 - `--filter` is the topic filter to subscribe to, `#` (everything) by default; `+` and `#` must be whole
-  levels and `#` the last one. `--duration` is how long to collect messages, `10s` by default, from `1s` to
+  levels and `#` the last one. `--duration` is how long to collect messages once the broker has accepted the subscription, `10s` by default, from `1s` to
   `5m`. `--node` and `--depth` belong to OPC UA and plugin inputs and are a usage error here, as `--filter`
   and `--duration` are for any other input (exit 2).
 - One line per topic seen, sorted by topic: the topic, the number of messages, the size of the last message,
