@@ -1,11 +1,16 @@
 package mqtt
 
 import (
+	"encoding/json"
 	"maps"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/clock"
+	"github.com/getlaraplate/laraedge/internal/config"
+	edgeinput "github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/input/mqtt/mqtttest"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
@@ -341,5 +346,42 @@ func TestSparkplugInputReplayedNDEATHIsAMissedBirth(t *testing.T) {
 				t.Errorf("published = %+v, want %d NCMD", got, want)
 			}
 		})
+	}
+}
+
+// TestSparkplugRouterQueuesARebirthOncePerNode: a node already waiting in the
+// rebirth queue is not queued again, also when a reconnection and the 30 s
+// interval pass before the queue is published, so one node never gets two
+// NCMD back to back. The router is driven directly: nothing takes the queue.
+func TestSparkplugRouterQueuesARebirthOncePerNode(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{"broker": "mqtt://127.0.0.1:1883", "format": FormatSparkplugB, "rebirth": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Input{ID: "line", Driver: config.DriverMQTT, Connection: raw, DeathTolerance: testTolerance, Devices: twoNodeDevices()}
+	clk := clock.NewFake(driverEpoch)
+	in, err := newInput(cfg, clk, Options{AgentID: "agent"}, deps{})
+	if err != nil {
+		t.Fatalf("newInput: %v", err)
+	}
+	emit := func(model.Record) {}
+	r := newRouter(in, emit, NewTracker(edgeinput.NewLifecycle(cfg, clk, emit), nil, in.devices))
+
+	unknownAlias := func(topic string) { r.message(topic, payload(nil, byAlias(9, 1))) }
+	unknownAlias(tNDATA)
+	unknownAlias("spBv1.0/g/NDATA/n2")
+
+	// The connection is lost before the queue is published; the next one
+	// starts after the interval and the node asks again.
+	r.reset()
+	clk.Advance(rebirthInterval)
+	unknownAlias(tNDATA)
+
+	want := []SparkplugTarget{{Group: "g", Node: "n1"}, {Group: "g", Node: "n2"}}
+	if got := r.takeRebirths(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("rebirth queue = %+v, want %+v", got, want)
+	}
+	if got := r.takeRebirths(); got != nil {
+		t.Fatalf("rebirth queue after take = %+v, want empty", got)
 	}
 }
