@@ -1,6 +1,7 @@
 // Package mqtt is the MQTT input driver: the parsing and validation of the
 // connection, of the point addresses and of the points (this file). The driver
-// never publishes (spec section 1: the agent is a plain subscriber).
+// is a plain subscriber (spec section 1); its only publish is the Sparkplug B
+// rebirth request, and only with rebirth: true.
 //
 // Every error of this file is a fixed message: it names the field, never the
 // value, so a broker address, a user name, a topic or a rejected setting cannot
@@ -41,7 +42,7 @@ const (
 const (
 	// FormatJSON reads JSON and plain payloads; the default.
 	FormatJSON = "json"
-	// FormatSparkplugB is Sparkplug B, refused by this build (decision Q8).
+	// FormatSparkplugB is Sparkplug B (spec section 7).
 	FormatSparkplugB = "sparkplug_b"
 )
 
@@ -80,8 +81,11 @@ type Connection struct {
 	Auth *Auth
 	// TLS holds the TLS settings; nil for the system defaults.
 	TLS *TLS
-	// Format is FormatJSON in this build.
+	// Format is FormatJSON or FormatSparkplugB.
 	Format string
+	// Rebirth asks an edge node to publish its births again when the input
+	// misses a message (spec section 7); only with FormatSparkplugB.
+	Rebirth bool
 	// QoS is the QoS of the subscriptions, 0 or 1.
 	QoS byte
 	// PersistentSession is clean session false in 3.1.1 terms.
@@ -159,7 +163,7 @@ const (
 	maxPayloadShape = "connection.max_payload: want 1 byte to 16MiB, as bytes or a size such as 256KiB"
 	topicsKeyShape  = "connection.topics: topic must be non-empty without + or #"
 	topicsKeyUnused = "connection.topics: a key is not the topic of a point"
-	notInThisBuild  = ": not available in this build"
+	notSparkplug    = ": not with format sparkplug_b"
 )
 
 // ParseConnection validates the `connection` object of an MQTT input and
@@ -208,11 +212,20 @@ func ParseConnection(raw json.RawMessage, cfg config.Input) (Connection, error) 
 	if err := parseFormat(fields, &conn); err != nil {
 		return Connection{}, err
 	}
-	if _, ok := fields["rebirth"]; ok {
-		return Connection{}, errors.New("connection.rebirth" + notInThisBuild)
+	if err := parseRebirth(fields, &conn); err != nil {
+		return Connection{}, err
 	}
 	if err := parseSession(fields, &conn); err != nil {
 		return Connection{}, err
+	}
+
+	if conn.Format == FormatSparkplugB {
+		for _, key := range []string{"timestamp", "topics", "availability"} {
+			if _, ok := fields[key]; ok {
+				return Connection{}, errors.New("connection." + key + notSparkplug)
+			}
+		}
+		return conn, nil
 	}
 
 	if v, ok := fields["timestamp"]; ok {
@@ -359,8 +372,7 @@ func parseAuth(raw json.RawMessage) (*Auth, error) {
 	return &a, nil
 }
 
-// parseFormat decodes `format`. Sparkplug B is a known value this build does
-// not provide (decision Q8).
+// parseFormat decodes `format`: json, the default, or sparkplug_b.
 func parseFormat(fields map[string]json.RawMessage, conn *Connection) error {
 	conn.Format = FormatJSON
 	if _, ok := fields["format"]; !ok {
@@ -374,10 +386,26 @@ func parseFormat(fields map[string]json.RawMessage, conn *Connection) error {
 	case FormatJSON:
 		return nil
 	case FormatSparkplugB:
-		return errors.New("connection.format" + notInThisBuild)
+		conn.Format = FormatSparkplugB
+		return nil
 	default:
 		return errors.New("connection.format: want json or sparkplug_b")
 	}
+}
+
+// parseRebirth decodes `rebirth`, a boolean that needs format sparkplug_b.
+func parseRebirth(fields map[string]json.RawMessage, conn *Connection) error {
+	v, ok := fields["rebirth"]
+	if !ok {
+		return nil
+	}
+	if conn.Format != FormatSparkplugB {
+		return errors.New("connection.rebirth: needs format sparkplug_b")
+	}
+	if err := json.Unmarshal(v, &conn.Rebirth); err != nil || isNull(v) {
+		return errors.New("connection.rebirth: must be a boolean")
+	}
+	return nil
 }
 
 // parseSession decodes qos, persistent_session, keepalive and max_payload,

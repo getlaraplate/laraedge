@@ -13,10 +13,11 @@ import (
 )
 
 // client is what the driver needs of an MQTT client: connect, subscribe,
-// unsubscribe, disconnect and learn of a lost connection. It has no publish
-// function, so the driver cannot send one (spec section 1). The messages go to
-// the function given when the client is built, one at a time and in arrival
-// order. *pahoClient implements it.
+// unsubscribe, publish, disconnect and learn of a lost connection. The only
+// publish of the driver is the Sparkplug B rebirth request, with rebirth on
+// (decision S11); nothing else is ever sent (spec section 1). The messages go
+// to the function given when the client is built, one at a time and in
+// arrival order. *pahoClient implements it.
 type client interface {
 	// Connect opens the connection and reports whether the broker kept a
 	// session for the client id. A ctx that ends first returns ctx.Err() and
@@ -30,6 +31,9 @@ type client interface {
 	// Unsubscribe unsubscribes topics and waits for the broker's answer; no
 	// topics is a no-op.
 	Unsubscribe(ctx context.Context, topics []string) error
+	// Publish publishes payload on topic at qos, never retained, and waits
+	// for the token: at QoS 0 until the packet is written.
+	Publish(ctx context.Context, topic string, payload []byte, qos byte) error
 	// Disconnect closes the connection, if any, without unsubscribing: a
 	// persistent session keeps its messages. It is not a loss.
 	Disconnect()
@@ -54,6 +58,7 @@ var (
 	errSubscribe          = errors.New("mqtt: subscribe failed")
 	errSubscribeRefused   = errors.New("mqtt: the broker refused the subscription")
 	errUnsubscribe        = errors.New("mqtt: unsubscribe failed")
+	errPublish            = errors.New("mqtt: publish failed")
 	errBrokerURL          = errors.New("mqtt: connection.broker: unsupported scheme")
 	errCAFile             = errors.New("mqtt: connection.tls.ca_file: cannot be read as PEM certificates")
 	errClientCertificate  = errors.New("mqtt: connection.tls.cert_file, key_file: cannot be loaded as a certificate and key pair")
@@ -309,6 +314,23 @@ func (c *pahoClient) Unsubscribe(ctx context.Context, topics []string) error {
 		}
 
 		return errUnsubscribe
+	}
+
+	return nil
+}
+
+// Publish implements client.
+func (c *pahoClient) Publish(ctx context.Context, topic string, payload []byte, qos byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if err := wait(ctx, c.lib.Publish(topic, qos, false, payload)); err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+
+		return errPublish
 	}
 
 	return nil

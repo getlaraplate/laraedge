@@ -50,7 +50,7 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 	configFile := fs.String("config", "", "configuration document to use instead of the last valid one")
 	nodeFlag := fs.String("node", "", "NodeId to start from (default: the Objects folder, i=85)")
 	depth := fs.Int("depth", opcua.DefaultBrowseDepth, fmt.Sprintf("levels to print below the start node, 1 to %d", opcua.MaxBrowseDepth))
-	filter := fs.String("filter", mqtt.DefaultBrowseFilter, "mqtt topic filter to subscribe to")
+	filter := fs.String("filter", mqtt.DefaultBrowseFilter, "mqtt topic filter to subscribe to (default "+mqtt.DefaultSparkplugBrowseFilter+" for an input with format sparkplug_b)")
 	duration := fs.Duration("duration", mqtt.DefaultBrowseDuration, "mqtt: how long to collect messages, 1s to 5m")
 
 	positional, code, ok := parseArgs(fs, args)
@@ -70,6 +70,12 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 		if given["node"] || given["depth"] {
 			fmt.Fprintf(stderr, "%s%s\n", prefix, errMQTTBrowseFlags)
 			return exitUsage
+		}
+
+		// An input with format sparkplug_b browses spBv1.0/# unless --filter
+		// says otherwise (decision S14).
+		if conn, err := mqtt.ParseConnection(cfg.Connection, cfg); err == nil && conn.Format == mqtt.FormatSparkplugB && !given["filter"] {
+			*filter = mqtt.DefaultSparkplugBrowseFilter
 		}
 
 		return browseMQTT(doc, boot, cfg, *configFile, *bootstrapPath, *filter, *duration, stdout, stderr)
@@ -230,16 +236,28 @@ func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, conf
 	ctx, cancel := context.WithTimeout(ctx, duration+browseTimeout)
 	defer cancel()
 
-	entries, truncated, err := in.Browse(ctx, filter, duration)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s%v\n", prefix, err)
-		return exitFailure
+	var lines []string
+	var truncated bool
+	if conn, err := mqtt.ParseConnection(cfg.Connection, cfg); err == nil && conn.Format == mqtt.FormatSparkplugB {
+		var entries []mqtt.SparkplugEntry
+		if entries, truncated, err = in.BrowseSparkplug(ctx, filter, duration); err != nil {
+			fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+			return exitFailure
+		}
+		lines = sparkplugBrowseLines(entries)
+	} else {
+		var entries []mqtt.BrowseEntry
+		if entries, truncated, err = in.Browse(ctx, filter, duration); err != nil {
+			fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+			return exitFailure
+		}
+		lines = mqttBrowseLines(entries)
 	}
 
-	for _, line := range mqttBrowseLines(entries) {
+	for _, line := range lines {
 		fmt.Fprintln(stdout, line)
 	}
-	if len(entries) == 0 {
+	if len(lines) == 0 {
 		fmt.Fprintln(stdout, browseNoMessage)
 	}
 	if truncated {
@@ -272,6 +290,36 @@ func mqttBrowseLines(entries []mqtt.BrowseEntry) []string {
 		}
 		if e.MorePaths > 0 {
 			lines = append(lines, fmt.Sprintf("  ... %d more leaves not shown", e.MorePaths))
+		}
+	}
+
+	return lines
+}
+
+// sparkplugBrowseLines formats the entries of a Sparkplug B browse: one line
+// "<group>/<node>[/<device>]  <n> msg  <born|->", with "  <n> malformed"
+// when a payload was not valid, then one indented line per metric of the
+// births, "  <address>  <type>", sorted by address.
+func sparkplugBrowseLines(entries []mqtt.SparkplugEntry) []string {
+	var lines []string
+	for _, e := range entries {
+		key := e.Group + "/" + e.Node
+		if e.Device != "" {
+			key += "/" + e.Device
+		}
+		born := "-"
+		if e.Born {
+			born = "born"
+		}
+
+		line := fmt.Sprintf("%s  %d msg  %s", mqtt.Escape(key), e.Messages, born)
+		if e.Malformed > 0 {
+			line += fmt.Sprintf("  %d malformed", e.Malformed)
+		}
+		lines = append(lines, line)
+
+		for _, m := range e.Metrics {
+			lines = append(lines, "  "+mqtt.Escape(m.Address)+"  "+m.Type)
 		}
 	}
 

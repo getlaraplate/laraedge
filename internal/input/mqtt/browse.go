@@ -19,6 +19,9 @@ const (
 	BrowseMaxTopics = 1000
 	// DefaultBrowseFilter is the topic filter browse subscribes to.
 	DefaultBrowseFilter = "#"
+	// DefaultSparkplugBrowseFilter is the topic filter browse subscribes to
+	// under sparkplug_b (decision S14).
+	DefaultSparkplugBrowseFilter = SparkplugNamespace + "/#"
 	// DefaultBrowseDuration is how long browse collects messages.
 	DefaultBrowseDuration = 10 * time.Second
 	// MinBrowseDuration and MaxBrowseDuration bound --duration.
@@ -326,5 +329,187 @@ func escapeRune(r rune, size int, raw string) string {
 		return q[1 : len(q)-1]
 	default:
 		return raw
+	}
+}
+
+// SparkplugMetricEntry is one metric of a birth: Address is a usable point
+// address (group/node[/device]|metric) and Type the suggested point type, or
+// unsupported:<DataType name> when none fits.
+type SparkplugMetricEntry struct {
+	Address string
+	Type    string
+}
+
+// SparkplugEntry is one group, node or device seen by browse under
+// sparkplug_b. Messages counts every message of it, Born says whether a birth
+// was seen, Malformed counts the payloads that were not valid, and Metrics
+// are the metrics of the births, sorted by address. The fields hold raw
+// text: escape them with Escape before printing.
+type SparkplugEntry struct {
+	Group     string
+	Node      string
+	Device    string
+	Messages  int
+	Born      bool
+	Malformed int
+	Metrics   []SparkplugMetricEntry
+}
+
+// BrowseSparkplug is Browse for format sparkplug_b (decision S14): it
+// subscribes to filter with the client id <client_id>-browse for duration and
+// returns one entry per node and device seen, sorted by group, node and
+// device, and whether it stopped early at the 1001st entry. NCMD, DCMD and
+// STATE messages are not listed. With rebirth on, it publishes one rebirth
+// request to each node the input's points address at the node's first
+// message in the window, and that is its only write (ruling R12): a node no
+// point addresses is listed but never written to. With rebirth off it never
+// publishes.
+func (in *Input) BrowseSparkplug(ctx context.Context, filter string, duration time.Duration) (entries []SparkplugEntry, truncated bool, err error) {
+	if err := CheckFilter(filter); err != nil {
+		return nil, false, fmt.Errorf("mqtt input %q: browse: filter: %w", in.cfg.ID, err)
+	}
+	if duration < MinBrowseDuration || duration > MaxBrowseDuration {
+		return nil, false, fmt.Errorf("mqtt input %q: browse: duration: want 1s to 5m", in.cfg.ID)
+	}
+
+	type seen struct {
+		SparkplugEntry
+		metrics map[string]string
+	}
+
+	var (
+		mu    sync.Mutex
+		found = make(map[SparkplugTarget]*seen)
+		asked = make(map[SparkplugTarget]bool)
+		// addressed are the nodes a rebirth may be asked of.
+		addressed = make(map[SparkplugTarget]bool)
+		full      = make(chan struct{})
+		rebirths  = make(chan SparkplugTarget, BrowseMaxTopics+1)
+	)
+
+	if in.conn.Rebirth && in.sparkplug != nil {
+		for _, node := range in.sparkplugNodes() {
+			addressed[node] = true
+		}
+	}
+
+	onMessage := func(topic string, payload []byte, _ bool) {
+		defer in.traceEvent(traceBrowseMessage)
+
+		target, ok := sparkplugTopicTarget(topic)
+		if !ok {
+			return
+		}
+		typ := strings.Split(topic, "/")[2]
+		switch typ {
+		case spNBIRTH, spNDEATH, spNDATA, spDBIRTH, spDDEATH, spDDATA:
+		default:
+			return
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if truncated {
+			return
+		}
+
+		e := found[target]
+		if e == nil {
+			if len(found) >= BrowseMaxTopics {
+				truncated = true
+				close(full)
+
+				return
+			}
+			e = &seen{SparkplugEntry: SparkplugEntry{Group: target.Group, Node: target.Node, Device: target.Device}, metrics: make(map[string]string)}
+			found[target] = e
+		}
+		e.Messages++
+
+		if node := (SparkplugTarget{Group: target.Group, Node: target.Node}); in.conn.Rebirth && addressed[node] && !asked[node] {
+			asked[node] = true
+			rebirths <- node
+		}
+
+		if len(payload) > in.conn.MaxPayload {
+			return
+		}
+		p, err := decodePayload(payload)
+		if err != nil {
+			e.Malformed++
+
+			return
+		}
+		if typ == spNBIRTH || typ == spDBIRTH {
+			e.Born = true
+			for _, m := range p.Metrics {
+				if m.HasName {
+					e.metrics[target.Key()+"|"+m.Name] = SuggestedType(m.Datatype)
+				}
+			}
+		}
+	}
+
+	c, refused, err := in.commandClient(ctx, "-browse", []string{filter}, onMessage)
+	if err != nil {
+		return nil, false, fmt.Errorf("mqtt input %q: browse: %w", in.cfg.ID, err)
+	}
+	defer c.Disconnect()
+
+	if len(refused) > 0 {
+		return nil, false, fmt.Errorf("mqtt input %q: browse: %w", in.cfg.ID, errSubscribeRefused)
+	}
+
+	timer := in.clk.NewTimer(duration)
+	defer timer.Stop()
+
+	var lostErr error
+wait:
+	for {
+		select {
+		case node := <-rebirths:
+			in.requestRebirths(ctx, c, []SparkplugTarget{node})
+		case <-timer.C():
+			break wait
+		case <-ctx.Done():
+			break wait
+		case <-full:
+			break wait
+		case <-c.Lost():
+			lostErr = errConnectionLost
+
+			break wait
+		}
+	}
+
+	if lostErr != nil {
+		return nil, false, fmt.Errorf("mqtt input %q: browse: %w", in.cfg.ID, lostErr)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	entries = make([]SparkplugEntry, 0, len(found))
+	for _, e := range found {
+		for _, address := range slices.Sorted(mapKeysOf(e.metrics)) {
+			e.Metrics = append(e.Metrics, SparkplugMetricEntry{Address: address, Type: e.metrics[address]})
+		}
+		entries = append(entries, e.SparkplugEntry)
+	}
+	slices.SortFunc(entries, func(a, b SparkplugEntry) int {
+		return strings.Compare(SparkplugTarget{Group: a.Group, Node: a.Node, Device: a.Device}.Key(), SparkplugTarget{Group: b.Group, Node: b.Node, Device: b.Device}.Key())
+	})
+
+	return entries, truncated, nil
+}
+
+func mapKeysOf[V any](m map[string]V) func(yield func(string) bool) {
+	return func(yield func(string) bool) {
+		for k := range m {
+			if !yield(k) {
+				return
+			}
+		}
 	}
 }

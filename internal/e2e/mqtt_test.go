@@ -348,3 +348,193 @@ func checkMQTTValues(t *testing.T, events []busEvent) {
 		t.Errorf("%d bad press samples, want %d (the message that is not JSON)", bad, len(mqttSignals["press"]))
 	}
 }
+
+// writeSparkplugSetup writes the file provider setup of a sparkplug_b input
+// "sp" with a node device and a Sparkplug device, into dir, and returns the
+// bootstrap path.
+func writeSparkplugSetup(t *testing.T, dir, url string, broker *mqtttest.Broker) string {
+	t.Helper()
+
+	doc := marshal(t, map[string]any{
+		"schema":  "laraplate-edge-config/1",
+		"version": 1,
+		"inputs": []any{map[string]any{
+			"id":              "sp",
+			"driver":          "mqtt",
+			"death_tolerance": "3s",
+			"connection": map[string]any{
+				"broker": "mqtt://" + broker.Addr(),
+				"format": "sparkplug_b",
+			},
+			"devices": []any{
+				map[string]any{"device": "node-1", "points": []any{
+					map[string]any{"signal": "temp", "address": "plant/edge1|Temp", "type": "float64", "unit": "C", "read": "subscribe"},
+				}},
+				map[string]any{"device": "dev-1", "points": []any{
+					map[string]any{"signal": "speed", "address": "plant/edge1/dev1|Speed", "type": "int32", "read": "subscribe"},
+				}},
+			},
+		}},
+		"outputs": []any{map[string]any{
+			"id": "laraplate", "type": "laraplate-http", "url": url, "token": "secret://env/" + tokenEnv,
+			"batch": map[string]any{"max_samples": 40, "max_wait": "200ms"},
+		}},
+	})
+	writeFile(t, filepath.Join(dir, "config.json"), string(doc))
+
+	boot := filepath.Join(dir, "bootstrap.yaml")
+	writeFile(t, boot, fmt.Sprintf("agent_id: e2e-spb\nconfig:\n  provider: file\n  file: %s\ndata_dir: %s\nstatus_listen: 127.0.0.1:0\n",
+		filepath.Join(dir, "config.json"), filepath.Join(dir, "data")))
+
+	return boot
+}
+
+// TestMQTTSparkplug: the built binary follows a Sparkplug B edge node and one
+// of its devices. The node publishes its births with the declared data types,
+// data by alias, the death of the device and then the death of the node. The
+// backend receives the births with their data types, the samples, the death
+// of the device and then the death of the node, and the envelopes are valid
+// against the backend schema.
+func TestMQTTSparkplug(t *testing.T) {
+	b := newBackend(t)
+	broker := mqtttest.Start(t, mqtttest.Options{})
+
+	dir := t.TempDir()
+	boot := writeSparkplugSetup(t, dir, b.url(), broker)
+
+	a := startAgent(t, boot)
+
+	// The broker does not deliver retained node messages to the node filter,
+	// so publish once the subscription is in place.
+	broker.WaitSubscribed("laraplate-edge-e2e-spb-sp", 1)
+
+	u64 := func(v uint64) *uint64 { return &v }
+	u32 := func(v uint32) *uint32 { return &v }
+	str := func(v string) *string { return &v }
+	f64 := func(v float64) *float64 { return &v }
+	const (
+		dtInt32  = 3
+		dtDouble = 10
+	)
+	publish := func(topic string, p mqtttest.SparkplugPayload) {
+		broker.Publish("spBv1.0/plant/"+topic, p.Encode(), false, 0)
+	}
+
+	publish("NBIRTH/edge1", mqtttest.SparkplugPayload{Seq: u64(0), Metrics: []mqtttest.SparkplugMetric{
+		mqtttest.BdSeq(7),
+		{Name: str("Temp"), Alias: u64(1), Datatype: u32(dtDouble), Double: f64(21.5)},
+	}})
+	publish("DBIRTH/edge1/dev1", mqtttest.SparkplugPayload{Seq: u64(1), Metrics: []mqtttest.SparkplugMetric{
+		{Name: str("Speed"), Alias: u64(2), Datatype: u32(dtInt32), Int: u32(900)},
+	}})
+	publish("NDATA/edge1", mqtttest.SparkplugPayload{Seq: u64(2), Metrics: []mqtttest.SparkplugMetric{
+		{Alias: u64(1), Double: f64(22.5)},
+	}})
+	publish("DDATA/edge1/dev1", mqtttest.SparkplugPayload{Seq: u64(3), Metrics: []mqtttest.SparkplugMetric{
+		{Alias: u64(2), Int: u32(950)},
+	}})
+
+	b.waitFor(t, a, "the samples by alias", func() bool {
+		events := b.events()
+
+		return slices.ContainsFunc(events, func(e busEvent) bool {
+			return e.device == "node-1" && e.signal == "temp" && string(e.value) == "22.5"
+		}) && slices.ContainsFunc(events, func(e busEvent) bool {
+			return e.device == "dev-1" && e.signal == "speed" && string(e.value) == "950"
+		})
+	})
+
+	// The device dies alone, then the node.
+	publish("DDEATH/edge1/dev1", mqtttest.SparkplugPayload{Seq: u64(4)})
+	b.waitFor(t, a, "the device dead", func() bool {
+		return countEvents(b.events(), "dev-1", "death") >= 1
+	})
+	if n := countEvents(b.events(), "node-1", "death"); n != 0 {
+		t.Errorf("node-1: %d deaths after the device death, want 0", n)
+	}
+	publish("NDEATH/edge1", mqtttest.SparkplugPayload{Metrics: []mqtttest.SparkplugMetric{mqtttest.BdSeq(7)}})
+	b.waitFor(t, a, "the node dead", func() bool {
+		return countEvents(b.events(), "node-1", "death") >= 1
+	})
+
+	a.stop(t)
+
+	events := b.events()
+	checkSparkplugBirths(t, events)
+	checkSparkplugOrder(t, events)
+	if !slices.ContainsFunc(events, func(e busEvent) bool {
+		return e.device == "node-1" && e.signal == "temp" && e.quality == "good" && string(e.value) == "21.5"
+	}) {
+		t.Error("node-1: no good sample 21.5 from the NBIRTH")
+	}
+	for _, e := range events {
+		if e.kind == "sample" && e.quality != "good" {
+			t.Errorf("%s/%s: a %s sample, want good", e.device, e.signal, e.quality)
+		}
+	}
+	b.noViolations(t)
+	a.checkOutput(t, false)
+}
+
+// checkSparkplugBirths: each device is born with the data type of its point
+// and the unit of the document.
+func checkSparkplugBirths(t *testing.T, events []busEvent) {
+	t.Helper()
+
+	want := map[string]map[string]string{
+		"node-1": {"temp": "number"},
+		"dev-1":  {"speed": "number"},
+	}
+	for d, signals := range want {
+		births := 0
+		for _, e := range events {
+			if e.device != d || e.kind != "birth" {
+				continue
+			}
+			births++
+			got := map[string]string{}
+			for _, s := range e.signals {
+				got[s.Signal] = s.DataType
+			}
+			if !slices.Equal(sortedPairs(got), sortedPairs(signals)) {
+				t.Errorf("%s: birth announces %v, want %v", d, got, signals)
+			}
+		}
+		if births == 0 {
+			t.Errorf("%s: no birth", d)
+		}
+	}
+}
+
+// checkSparkplugOrder: a device has no sample before its birth or after its
+// death, the device dies before the node and each dies once.
+func checkSparkplugOrder(t *testing.T, events []busEvent) {
+	t.Helper()
+
+	deathAt := map[string]int{}
+	for _, d := range []string{"node-1", "dev-1"} {
+		alive := false
+		for i, e := range events {
+			if e.device != d {
+				continue
+			}
+			switch e.kind {
+			case "birth":
+				alive = true
+			case "death":
+				alive = false
+				deathAt[d] = i
+			case "sample":
+				if !alive {
+					t.Errorf("%s: sample of %s while dead", d, e.signal)
+				}
+			}
+		}
+		if n := countEvents(events, d, "death"); n != 1 {
+			t.Errorf("%s: %d deaths, want 1", d, n)
+		}
+	}
+	if deathAt["dev-1"] >= deathAt["node-1"] {
+		t.Errorf("the device died at %d, the node at %d, want the device first", deathAt["dev-1"], deathAt["node-1"])
+	}
+}

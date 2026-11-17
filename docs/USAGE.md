@@ -378,7 +378,8 @@ their own ids from it.
 Both commands connect with the id `<client_id>-probe` or `<client_id>-browse`, a clean session and QoS 0. They
 never use the agent's id: a second client with that id would make the broker disconnect the running agent and
 take over its persistent session. So they are safe beside a running agent, and they neither read nor change its
-subscriptions or its `mqtt/topics/<input id>.json`. Neither publishes anything.
+subscriptions or its `mqtt/topics/<input id>.json`. Neither publishes anything, except the Sparkplug B rebirth
+request of an input with `rebirth: true` (see "Sparkplug B").
 
 ### Reading the points once: `probe`
 
@@ -450,6 +451,80 @@ plant/press-07/status  1 msg  6 B  retained  online
 - With the default filter it sees only what the broker lets that client subscribe to: an ACL that hides a
   topic hides it from `browse` too, and from the agent. A filter the broker refuses altogether ends the command
   with exit code 1 and "the broker refused the subscription".
+
+### Sparkplug B
+
+An `mqtt` input with `format: sparkplug_b` ([CONFIGURATION.md](CONFIGURATION.md#sparkplug-b)) reads Sparkplug B
+edge nodes. The addresses are `<group>/<edge_node>[/<device>]|<metric>`; `examples/mqtt/config.yaml` has one.
+
+What the agent follows, in short:
+
+- **Births and deaths.** A node announces itself with an NBIRTH (its metrics, with names, aliases and data
+  types) and each device with a DBIRTH; it says goodbye with an NDEATH or a DDEATH. The agent reports the
+  agent device of the node or of the Sparkplug device born or dead as they say. A dead node publishes no data
+  until it is born again, so data of a node or device the agent holds dead proves that its birth was lost: the
+  device is alive again, its samples are kept, the agent counts `missed_birth` and, with `rebirth: true`, asks
+  the node for a rebirth. This is what happens after an agent outage with a persistent session: the broker
+  queues the node's NDEATH (QoS 1) for the agent, but not its NBIRTH (QoS 0).
+- **bdSeq.** Each NBIRTH carries a birth and death sequence number `bdSeq`, and the node's Last Will (its
+  NDEATH, published by the broker if the node vanishes) carries the one of its birth. An NDEATH whose `bdSeq`
+  is not the last NBIRTH's is an old Last Will and is ignored.
+- **Aliases.** To save bytes a node can send data by a numeric alias, declared in the birth. The agent must have
+  seen the birth to know a metric by its alias. Births are published when a node starts, not retained: **an
+  agent that starts later sees `unknown_alias` for those metrics until the node publishes a birth again**, on
+  its restart or when asked. With `rebirth: true` the agent asks (an `NCMD` with `Node Control/Rebirth`, at
+  most once every 30 s per node); without it, restart the node.
+- **seq.** Every message of a node and of its devices carries a counter from 0 to 255. A gap means a message was
+  lost; the agent counts `sequence_gap` (and asks for a rebirth, if allowed, at most once every 30 s per node). Since the counter is shared by
+  the node and its devices, the agent subscribes each node with all its devices; the messages of devices no
+  point addresses are read only to follow the counter.
+
+`probe` and `browse` work on a Sparkplug input as for JSON, through their own client ids, `-probe` and
+`-browse`, and a clean session.
+
+```bash
+laraplate-edge probe sparkplug --config config.yaml --bootstrap bootstrap.yaml
+```
+
+```
+line-1-node	line_speed	41.5	float	good
+line-1-drive	motor_current	unknown_alias
+line-1-drive	running	no message
+```
+
+- `probe` subscribes to the filters of the document and decodes the messages as the running input does. A point
+  shows its first sample, or the reason it has none: `unknown_alias` (data by alias arrived, no birth in the
+  window), `malformed_payload`, `payload_too_large`, `subscribe_refused` or `no message`. With `rebirth: true` it
+  publishes one rebirth request per addressed node once subscribed, so the births arrive within its wait; that
+  is the only thing it writes. The running agent sees those births too and only learns from them.
+
+```bash
+laraplate-edge browse sparkplug --config config.yaml --bootstrap bootstrap.yaml --duration 20s
+```
+
+```
+plant/line-1  42 msg  born
+  plant/line-1|Line/Speed  float64
+  plant/line-1|Node Control/Rebirth  bool
+plant/line-1/drive  17 msg  born
+  plant/line-1/drive|Motor/Current  float32
+  plant/line-1/drive|Running  bool
+plant/line-2  3 msg  -  1 malformed
+```
+
+- The default filter is `spBv1.0/#` (a Sparkplug input) and `--filter` and `--duration` work as for JSON.
+- One line per group, node and device seen: `<group>/<edge_node>[/<device>]`, the number of messages, `born`
+  when a birth was seen in the window (`-` otherwise) and, when there were any, the number of `malformed`
+  payloads.
+- Each entry that had a birth is followed by one indented line per metric of the birth, `<address>  <type>`,
+  sorted: the address is ready to copy into a point, and the type is the suggested point `type`: Int8 and Int16
+  `int16`, Int32 `int32`, Int64 and DateTime `int64`, UInt8 and UInt16 `uint16`, UInt32 `uint32`, UInt64
+  `uint64`, Float `float32`, Double `float64`, Boolean `bool`, String, Text and UUID `string`, and
+  `unsupported:<DataType name>` for the rest. A node that was not born in the window lists no metrics: browse
+  longer, or with `rebirth: true`, which makes browse publish one rebirth to each node the input's points
+  address, at its first message in the window. A node no point addresses is listed but never written to, even
+  with the default filter, which shows every node on the broker: a rebirth is a write to someone else's equipment.
+- Neither command writes anything with `rebirth: false`, the default.
 
 ## Running plugins
 
@@ -570,7 +645,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
 | `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down; only inputs that run and keep a connection: the series of an input that failed or was removed ends (a stale series to Prometheus), so alert on `input_up == 0` for a failed input |
-| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, for every input that reports its health (an `mqtt` input counts only `connection` among them); an `mqtt` input adds the kinds `payload_too_large`, `malformed_json`, `bad_timestamp`, `conversion`, `availability`, `unmapped` and `subscribe_refused` (a point on a topic the broker refused to subscribe, once per connection) (CONFIGURATION.md, "The `mqtt` driver"), whose series appear at their first count; the series restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
+| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, for every input that reports its health (an `mqtt` input counts only `connection` among them); an `mqtt` input adds the kinds `payload_too_large`, `malformed_json`, `bad_timestamp`, `conversion`, `availability`, `unmapped` and `subscribe_refused` (a point on a topic the broker refused to subscribe, once per connection), and with `format: sparkplug_b` `unknown_alias` (a data metric by an alias no birth declared), `sequence_gap` (a message whose `seq` does not follow), `missed_birth` (data of a node or device held dead by a death, whose birth was lost) and `malformed_payload` (a payload that is not Sparkplug B) (CONFIGURATION.md, "The `mqtt` driver"), whose series appear at their first count; the series restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
 | `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |
@@ -700,6 +775,12 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `read_errors` `malformed_json`, `bad_timestamp` or `conversion` growing, `mqtt` points `bad` | the payload is not JSON where an address has a path, a `timestamp` is set for a topic whose payload has none (every point of the topic, plain ones included, is `bad`), or a value does not convert to the point's `type` (`3.0` or `1e3` to an integer type, `70000` to `int16`, a JSON string to a number) | look at the payload with `browse`; set the `type` the value has; give the `timestamp` only to the JSON topics, per topic under `topics` |
 | `read_errors` `payload_too_large` growing | a message above `max_payload` (256 KiB by default) is dropped | raise `max_payload` (up to 16 MiB) if the message is expected; the topic is probably not one for a point |
 | `read_errors` `unmapped` counts a few messages after a reload or a rollback | the persistent session still held messages of a topic the new document no longer uses: they are dropped, never sent, and the topic is unsubscribed at the first connection of the new document (after a rollback, of the restored one), since the subscription set in `data_dir/mqtt/topics/` survives both | nothing: it stops once that connection is made. If it keeps growing, the file was lost (a `data_dir` wiped or not writable): connect once with `persistent_session: false`, which clears the session, or clear the session of the client id on the broker |
+| a Sparkplug B input: no samples after the agent restarted, `read_errors` `unknown_alias` growing | the node sends its data by alias and declared the aliases in a birth the agent did not see: births are published when the node starts, not retained | set `rebirth: true`, so the agent asks the node for a new birth (at most once every 30 s per node; the broker user must be allowed to publish on `spBv1.0/<group>/NCMD/<edge_node>`), or restart the node. `probe` shows `unknown_alias` for those points. |
+| a Sparkplug B input: devices reported dead after an agent outage (an update, a maintenance, a network cut), `read_errors` `missed_birth` | the node restarted while the agent was away: the broker kept its NDEATH (QoS 1) in the agent's persistent session and delivered it at the reconnection, but not its NBIRTH and DBIRTH (QoS 0) | nothing to do: the node's next data revives the node's device, and each Sparkplug device's next data revives that device. A device of a node that publishes only by exception stays dead until it publishes; `rebirth: true` makes the agent ask the node for its births at the first data (at most once every 30 s per node). |
+| a Sparkplug B input: the devices of a node dead after an NDEATH, still dead | the node died and has published nothing since: an NDEATH puts dead the node and every device under it, until a birth or the next data | check the node; restart it if it does not come back. |
+| a Sparkplug B node reported dead right after it was born, or never reported dead when it vanished | the Last Will of the node (its NDEATH) carries an old `bdSeq`, which the agent ignores as a stale will of an earlier session, or the node has no Last Will | check that the node publishes the `bdSeq` of its NBIRTH in its will. An NDEATH with no `bdSeq` is honoured. |
+| `read_errors` `sequence_gap` growing on a Sparkplug B input | messages of the node, or of one of its devices (also devices no point addresses), were lost or reordered, or the node restarts without an NBIRTH | check the node and the broker's QoS and session settings; `rebirth: true` makes the agent ask for a fresh birth at a gap, at most once every 30 s per node. A gap across a connection loss is not counted. |
+| `read_errors` `malformed_payload` growing on a Sparkplug B input | the payload on a `spBv1.0` topic is not a Sparkplug B protobuf (JSON, a different version, a truncated message) | look at the node with `browse`, which counts the malformed messages per node |
 | the broker keeps queuing messages for the client id of an `mqtt` input that was removed from the document | the persistent session of the removed input stays on the broker, which queues its QoS 1 messages until it expires the session or the session is cleared | before removing an input, apply once a document with `persistent_session: false` for it; afterwards, clear the session of its client id on the broker (or let the broker's session expiry remove it) |
 | `read_errors` `availability` growing | a message on the availability topic is neither the `online` nor the `offline` string of the entry; the comparison is exact, case and spaces included | fix the two strings to what the device publishes (`browse` shows it) |
 | an `mqtt` device dead while the broker is connected, then born again at its first message | its availability topic holds `offline`: the device (or its Last Will, which a broker may retain) said so. The device stays dead until `online` or a sample arrives, however long it is silent | check what the device publishes on the topic; publish `online`, or clear a stale retained `offline` on the broker |

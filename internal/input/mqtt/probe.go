@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/getlaraplate/laraedge/internal/model"
@@ -106,8 +107,65 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 		}
 	}
 
+	var session *sparkplugSession
+	if in.sparkplug != nil {
+		// The probe session never asks for a rebirth by itself: the probe
+		// sends its own, once (decision S13).
+		session = newSparkplugSession(in.sparkplug, false, in.clk)
+	}
+
+	// sparkplugMessage keeps the first sample of every point a Sparkplug
+	// message gives, and says why a point of its target has none; mu is held.
+	sparkplugMessage := func(topic string, payload []byte) {
+		target, _ := sparkplugTopicTarget(topic)
+		var points map[string]PlannedPoint
+		if tp := in.sparkplug.Targets[target]; tp != nil {
+			points = tp.Points
+		}
+		reason := func(kind string) {
+			for _, pp := range points {
+				if key := (PointRef{pp.Device, pp.Signal}); !hasSample(got, key) {
+					why[key] = kind
+				}
+			}
+		}
+
+		if len(payload) > in.conn.MaxPayload {
+			reason(KindPayloadTooLarge)
+
+			return
+		}
+
+		res := session.Handle(topic, payload, in.clk.Now())
+		if res.Ignored || !res.Mapped {
+			return
+		}
+		switch {
+		case slices.Contains(res.Kinds, KindMalformedPayload):
+			reason(KindMalformedPayload)
+		case slices.Contains(res.Kinds, KindUnknownAlias):
+			reason(KindUnknownAlias)
+		}
+		for _, s := range res.Samples {
+			if key := (PointRef{s.Device, s.Signal}); !hasSample(got, key) {
+				got[key] = s
+				delete(why, key)
+			}
+		}
+		finish()
+	}
+
 	onMessage := func(topic string, payload []byte, _ bool) {
 		defer in.traceEvent(traceProbeMessage)
+
+		if session != nil {
+			mu.Lock()
+			defer mu.Unlock()
+
+			sparkplugMessage(topic, payload)
+
+			return
+		}
 
 		plan := in.plan[topic]
 		if plan == nil {
@@ -149,7 +207,12 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 		finish()
 	}
 
-	c, refused, err := in.commandClient(ctx, "-probe", slices.Sorted(maps.Keys(in.plan)), onMessage)
+	filters := slices.Sorted(maps.Keys(in.plan))
+	if session != nil {
+		filters = in.sparkplug.Filters
+	}
+
+	c, refused, err := in.commandClient(ctx, "-probe", filters, onMessage)
 	if err != nil {
 		return nil, nil, fmt.Errorf("mqtt input %q: probe: %w", in.cfg.ID, err)
 	}
@@ -157,7 +220,7 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 
 	mu.Lock()
 	for _, topic := range refused {
-		for _, pp := range in.plan[topic].Points {
+		for _, pp := range in.refusedPoints(topic) {
 			key := PointRef{pp.Device, pp.Signal}
 			why[key] = KindSubscribeRefused
 			need--
@@ -165,6 +228,12 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 	}
 	finish()
 	mu.Unlock()
+
+	// With rebirth on, the probe asks every addressed node for its births, now
+	// that its subscription is acknowledged; this is its only write (S13).
+	if session != nil && in.conn.Rebirth {
+		in.requestRebirths(ctx, c, in.sparkplugNodes())
+	}
 
 	var lostErr error
 	select {
@@ -207,4 +276,76 @@ func sampleOf(samples []model.Sample, key PointRef) (model.Sample, bool) {
 	}
 
 	return model.Sample{}, false
+}
+
+// refusedPoints returns the points of the subscription topic: under json the
+// points on that topic, under sparkplug_b those of every target of the node
+// the filter subscribes; none for an availability topic.
+func (in *Input) refusedPoints(topic string) []PlannedPoint {
+	if in.sparkplug == nil {
+		if plan := in.plan[topic]; plan != nil {
+			return plan.Points
+		}
+
+		return nil
+	}
+
+	var out []PlannedPoint
+	for _, target := range slices.SortedFunc(maps.Keys(in.sparkplug.Targets), func(a, b SparkplugTarget) int { return strings.Compare(a.Key(), b.Key()) }) {
+		if sparkplugNodeFilter(target) != topic {
+			continue
+		}
+		for _, name := range slices.Sorted(maps.Keys(in.sparkplug.Targets[target].Points)) {
+			out = append(out, in.sparkplug.Targets[target].Points[name])
+		}
+	}
+
+	return out
+}
+
+// sparkplugNodeFilter is the subscription that covers the node of target and
+// every device under it.
+func sparkplugNodeFilter(target SparkplugTarget) string {
+	return SparkplugNamespace + "/" + target.Group + "/+/" + target.Node + "/#"
+}
+
+// sparkplugNodes returns the nodes the points address, sorted by key.
+func (in *Input) sparkplugNodes() []SparkplugTarget {
+	seen := make(map[SparkplugTarget]bool)
+	for target := range in.sparkplug.Targets {
+		seen[SparkplugTarget{Group: target.Group, Node: target.Node}] = true
+	}
+
+	return slices.SortedFunc(maps.Keys(seen), func(a, b SparkplugTarget) int { return strings.Compare(a.Key(), b.Key()) })
+}
+
+// sparkplugTopicTarget reads the target of a Sparkplug topic
+// spBv1.0/<group>/<type>/<node>[/<device>]; false for any other shape.
+func sparkplugTopicTarget(topic string) (SparkplugTarget, bool) {
+	levels := strings.Split(topic, "/")
+	if len(levels) < 4 || len(levels) > 5 || levels[0] != SparkplugNamespace {
+		return SparkplugTarget{}, false
+	}
+	t := SparkplugTarget{Group: levels[1], Node: levels[3]}
+	if len(levels) == 5 {
+		t.Device = levels[4]
+	}
+
+	return t, true
+}
+
+// sparkplugRebirthTopic is the NCMD topic of a node.
+func sparkplugRebirthTopic(node SparkplugTarget) string {
+	return SparkplugNamespace + "/" + node.Group + "/" + spNCMD + "/" + node.Node
+}
+
+// requestRebirths publishes a rebirth request to every node of nodes on c, at
+// QoS 0 and not retained (decision S11). A failure is logged at warn with
+// the node only: the caller goes on without the births.
+func (in *Input) requestRebirths(ctx context.Context, c client, nodes []SparkplugTarget) {
+	for _, node := range nodes {
+		if err := c.Publish(ctx, sparkplugRebirthTopic(node), encodeRebirth(in.clk.Now()), 0); err != nil {
+			in.log.Warn("mqtt: the Sparkplug rebirth request cannot be published", "input", in.cfg.ID, "node", node.Key(), "error", err.Error())
+		}
+	}
 }

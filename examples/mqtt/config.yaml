@@ -10,6 +10,9 @@
 # Check the document offline, then read every point once:
 #   laraplate-edge config validate config.yaml
 #   laraplate-edge probe broker --config config.yaml --bootstrap bootstrap.yaml
+# The second input reads a Sparkplug B edge node. List its groups, nodes,
+# devices and metrics, with the point type to use for each:
+#   laraplate-edge browse sparkplug --config config.yaml --bootstrap bootstrap.yaml
 
 schema: laraplate-edge-config/1
 version: 1
@@ -61,6 +64,29 @@ inputs:
           - {signal: door_open, address: plant/furnace-02/door, type: bool, read: subscribe, priority: critical}
           - {signal: recipe, address: plant/furnace-02/recipe, type: string, read: subscribe, priority: critical}
           - {signal: temperature, address: "plant/furnace/temp|value", type: float64, unit: C, read: subscribe, priority: bulk}
+
+  # Sparkplug B on the same broker: the agent decodes the protobuf payloads,
+  # follows the births, deaths, aliases and sequence numbers of the edge node
+  # and reports each device alive or dead as the node says. The address is
+  # <group>/<edge_node>[/<device>]|<metric>; a device is an agent device with
+  # points of one node or of one Sparkplug device.
+  - id: sparkplug
+    driver: mqtt
+    connection:
+      broker: mqtt://192.168.10.5:1883
+      format: sparkplug_b
+      # Ask the node for a new birth when an alias is unknown or a message is
+      # missing (an NCMD "Node Control/Rebirth", at most one every 30 s per
+      # node). It is the only thing the agent ever publishes; off by default.
+      rebirth: true
+    devices:
+      - device: line-1-node
+        points:
+          - {signal: line_speed, address: "plant/line-1|Line/Speed", type: float64, unit: m/min, read: subscribe, priority: bulk}
+      - device: line-1-drive
+        points:
+          - {signal: motor_current, address: "plant/line-1/drive|Motor/Current", type: float32, unit: A, read: subscribe, priority: bulk}
+          - {signal: running, address: "plant/line-1/drive|Running", type: bool, read: subscribe, priority: critical}
 
 outputs:
   - id: laraplate

@@ -71,8 +71,10 @@ type Input struct {
 	log  *slog.Logger
 	conn Connection
 
-	// plan is the decoding plan of every subscribed topic.
-	plan      map[string]*TopicPlan
+	// plan is the decoding plan of every subscribed topic (format json).
+	plan map[string]*TopicPlan
+	// sparkplug is the plan of format sparkplug_b; nil with json.
+	sparkplug *SparkplugPlan
 	devices   []string
 	clientID  string
 	tolerance time.Duration
@@ -122,13 +124,19 @@ func newInput(cfg config.Input, clk clock.Clock, opts Options, d deps) (*Input, 
 
 	for d, dev := range cfg.Devices {
 		for i, p := range dev.Points {
-			if err := checkPoint(p); err != nil {
+			if err := checkPoint(p, conn.Format); err != nil {
 				return nil, fmt.Errorf("mqtt input %q: devices.%d.points.%d: %w", cfg.ID, d, i, err)
 			}
 		}
 	}
 
-	plan, err := Plan(cfg, conn)
+	var plan map[string]*TopicPlan
+	var sparkplug *SparkplugPlan
+	if conn.Format == FormatSparkplugB {
+		sparkplug, err = PlanSparkplug(cfg)
+	} else {
+		plan, err = Plan(cfg, conn)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("mqtt input %q: %w", cfg.ID, err)
 	}
@@ -145,6 +153,7 @@ func newInput(cfg config.Input, clk clock.Clock, opts Options, d deps) (*Input, 
 		log:       log,
 		conn:      conn,
 		plan:      plan,
+		sparkplug: sparkplug,
 		clientID:  clientID(conn, opts.AgentID, cfg.ID),
 		tolerance: cfg.DeathTolerance,
 		deps:      d,
@@ -210,9 +219,16 @@ func CheckClientIDs(doc config.Document, agentID string) []string {
 	return msgs
 }
 
-// checkPoint validates a point and its address.
-func checkPoint(p config.Point) error {
+// checkPoint validates a point and its address, with the address parser of
+// the connection's format.
+func checkPoint(p config.Point, format string) error {
 	if err := CheckPoint(p); err != nil {
+		return err
+	}
+
+	if format == FormatSparkplugB {
+		_, err := ParseSparkplugAddress(p.Address)
+
 		return err
 	}
 
@@ -252,11 +268,7 @@ func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 	in.started = true
 
 	life := edgeinput.NewLifecycle(in.cfg, in.clk, emit)
-	in.router = &router{
-		in:      in,
-		emit:    emit,
-		tracker: NewTracker(life, in.conn.Availability, in.devices),
-	}
+	in.router = newRouter(in, emit, NewTracker(life, in.conn.Availability, in.devices))
 
 	in.wg.Go(func() { life.Run(runCtx) })
 	in.wg.Go(func() { in.run(runCtx, in.router) })
@@ -297,9 +309,13 @@ func (in *Input) Health() edgeinput.Health {
 }
 
 // topics returns the subscription set of the input: the topics of the plan
-// and the availability topics, sorted and without duplicates.
+// (json) or the node filters (sparkplug_b) and the availability topics,
+// sorted and without duplicates.
 func (in *Input) topics(tracker *Tracker) []string {
 	topics := slices.Collect(maps.Keys(in.plan))
+	if in.sparkplug != nil {
+		topics = append(topics, in.sparkplug.Filters...)
+	}
 	topics = append(topics, tracker.Topics()...)
 	slices.Sort(topics)
 

@@ -280,3 +280,68 @@ func describe(rs []model.Record) string {
 
 	return out
 }
+
+// sparkplugInput is mqttInput under format sparkplug_b.
+func sparkplugInput(t *testing.T, id string, b *mqtttest.Broker, conn map[string]any, devices ...config.Device) config.Input {
+	t.Helper()
+
+	fields := map[string]any{"format": FormatSparkplugB}
+	for k, v := range conn {
+		fields[k] = v
+	}
+
+	return mqttInput(t, id, b, fields, devices...)
+}
+
+// sparkplugDevices are the devices of the Sparkplug input tests: press is
+// the edge node g/n1 (its metric Temp), oven the Sparkplug device g/n1/d1
+// (its metric Speed). The topics are those of sparkplug_session_test.go.
+func sparkplugDevices() []config.Device {
+	return []config.Device{
+		device("press", subscribePoint("temp", "g/n1|Temp", "float64")),
+		device("oven", subscribePoint("speed", "g/n1/d1|Speed", "int32")),
+	}
+}
+
+// dtInt32 is the Sparkplug datatype Int32.
+const dtInt32 uint32 = 3
+
+// speed is the Speed metric of the oven, an Int32 under alias.
+func speed(alias uint64, v uint32) mqtttest.SparkplugMetric {
+	m := named("Speed", alias, dtInt32)
+	m.Int = ptr(v)
+
+	return m
+}
+
+// stamped returns m with the metric timestamp ts.
+func stamped(m mqtttest.SparkplugMetric, ts time.Time) mqtttest.SparkplugMetric {
+	m.Timestamp = ptr(uint64(ts.UnixMilli()))
+
+	return m
+}
+
+// readErrors returns the read error kinds of the input with a count above 0.
+func (h *harness) readErrors() map[string]uint64 {
+	out := map[string]uint64{}
+	for kind, n := range h.in.Health().ReadErrors {
+		if n > 0 {
+			out[kind] = n
+		}
+	}
+
+	return out
+}
+
+// steps advances the fake clock by d in steps of half the death tolerance,
+// letting the keep-alive renew the devices at each, so nothing dies.
+func (h *harness) steps(d time.Duration) {
+	h.t.Helper()
+
+	for d > 0 {
+		step := min(d, testTolerance/2)
+		h.clk.Advance(step)
+		h.clk.BlockUntil(h.t, idleTimers)
+		d -= step
+	}
+}

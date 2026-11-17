@@ -77,6 +77,22 @@ type Broker struct {
 	connects []Connect
 	// hold, when set, holds every SUBSCRIBE until it is released.
 	hold *Hold
+	// published are the PUBLISH packets received from clients, the broker's
+	// own excluded, in order; changed is closed and replaced at every one.
+	published []Message
+	changed   chan struct{}
+	// subscribed counts, by client id, the SUBSCRIBE packets the broker
+	// processed; changed is closed and replaced at every one too.
+	subscribed map[string]int
+}
+
+// Message is a PUBLISH packet the broker received from a client.
+type Message struct {
+	ClientID string
+	Topic    string
+	Payload  []byte
+	QoS      byte
+	Retain   bool
 }
 
 // Hold holds the SUBSCRIBE packets the broker receives until Release.
@@ -104,11 +120,14 @@ func Start(t testing.TB, opts Options) *Broker {
 		Logger:       slog.New(slog.DiscardHandler),
 	})
 	b := &Broker{
-		t:      t,
-		server: server,
-		conns:  map[net.Conn]struct{}{},
-		acks:   map[string]int{},
-		acked:  make(chan struct{}),
+		t:       t,
+		server:  server,
+		conns:   map[net.Conn]struct{}{},
+		acks:    map[string]int{},
+		acked:   make(chan struct{}),
+		changed: make(chan struct{}),
+
+		subscribed: map[string]int{},
 	}
 	b.SetRefused(opts.Refuse...)
 	if err := server.AddHook(&authHook{users: opts.Users, broker: b}, nil); err != nil {
@@ -188,6 +207,80 @@ func (b *Broker) WaitAcknowledged(clientID string, n int) {
 		case <-acked:
 		case <-timeout.C:
 			b.t.Fatalf("mqtttest: %d of %d acknowledgements from %q within the timeout", count, n, clientID)
+
+			return
+		}
+	}
+}
+
+// Published returns the PUBLISH packets the broker received from clientID
+// since the start of the test, in arrival order; the broker's own publishes
+// are not included.
+func (b *Broker) Published(clientID string) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	var out []Message
+	for _, m := range b.published {
+		if m.ClientID == clientID {
+			out = append(out, m)
+		}
+	}
+
+	return out
+}
+
+// WaitPublished waits until the broker has received n PUBLISH packets from
+// clientID and returns those received so far. It fails the test after a
+// timeout, so call it from the test goroutine.
+func (b *Broker) WaitPublished(clientID string, n int) []Message {
+	b.t.Helper()
+
+	timeout := time.NewTimer(waitTimeout)
+	defer timeout.Stop()
+
+	for {
+		b.mu.Lock()
+		changed := b.changed
+		b.mu.Unlock()
+
+		got := b.Published(clientID)
+		if len(got) >= n {
+			return got
+		}
+
+		select {
+		case <-changed:
+		case <-timeout.C:
+			b.t.Fatalf("mqtttest: %d of %d publishes from %q within the timeout", len(got), n, clientID)
+
+			return got
+		}
+	}
+}
+
+// WaitSubscribed waits until the broker has processed n SUBSCRIBE packets
+// from clientID, so a message published afterwards reaches it, retained or
+// not. It fails the test after a timeout, so call it from the test goroutine.
+func (b *Broker) WaitSubscribed(clientID string, n int) {
+	b.t.Helper()
+
+	timeout := time.NewTimer(waitTimeout)
+	defer timeout.Stop()
+
+	for {
+		b.mu.Lock()
+		count, changed := b.subscribed[clientID], b.changed
+		b.mu.Unlock()
+
+		if count >= n {
+			return
+		}
+
+		select {
+		case <-changed:
+		case <-timeout.C:
+			b.t.Fatalf("mqtttest: %d of %d subscriptions from %q within the timeout", count, n, clientID)
 
 			return
 		}
@@ -394,8 +487,8 @@ func (h *ackHook) OnQosComplete(cl *mochi.Client, _ packets.Packet) {
 	h.broker.acknowledged(cl.ID)
 }
 
-// recordHook records every CONNECT and holds the
-// SUBSCRIBE packets while a Hold is set.
+// recordHook records every CONNECT and every PUBLISH of a client, and holds
+// the SUBSCRIBE packets while a Hold is set.
 type recordHook struct {
 	mochi.HookBase
 	broker *Broker
@@ -404,7 +497,28 @@ type recordHook struct {
 func (h *recordHook) ID() string { return "mqtttest-record" }
 
 func (h *recordHook) Provides(b byte) bool {
-	return b == mochi.OnConnect || b == mochi.OnSubscribe
+	return b == mochi.OnConnect || b == mochi.OnSubscribe || b == mochi.OnSubscribed || b == mochi.OnPublish
+}
+
+func (h *recordHook) OnPublish(cl *mochi.Client, pk packets.Packet) (packets.Packet, error) {
+	if cl.Net.Inline {
+		return pk, nil
+	}
+
+	h.broker.mu.Lock()
+	defer h.broker.mu.Unlock()
+
+	h.broker.published = append(h.broker.published, Message{
+		ClientID: cl.ID,
+		Topic:    pk.TopicName,
+		Payload:  append([]byte(nil), pk.Payload...),
+		QoS:      pk.FixedHeader.Qos,
+		Retain:   pk.FixedHeader.Retain,
+	})
+	close(h.broker.changed)
+	h.broker.changed = make(chan struct{})
+
+	return pk, nil
 }
 
 func (h *recordHook) OnConnect(_ *mochi.Client, pk packets.Packet) error {
@@ -414,6 +528,19 @@ func (h *recordHook) OnConnect(_ *mochi.Client, pk packets.Packet) error {
 	h.broker.connects = append(h.broker.connects, Connect{ClientID: pk.Connect.ClientIdentifier, CleanSession: pk.Connect.Clean})
 
 	return nil
+}
+
+func (h *recordHook) OnSubscribed(cl *mochi.Client, _ packets.Packet, _ []byte) {
+	if cl.Net.Inline {
+		return
+	}
+
+	h.broker.mu.Lock()
+	defer h.broker.mu.Unlock()
+
+	h.broker.subscribed[cl.ID]++
+	close(h.broker.changed)
+	h.broker.changed = make(chan struct{})
 }
 
 func (h *recordHook) OnSubscribe(cl *mochi.Client, pk packets.Packet) packets.Packet {

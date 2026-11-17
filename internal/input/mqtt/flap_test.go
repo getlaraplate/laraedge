@@ -94,8 +94,11 @@ func (failingSubscribeClient) Subscribe(context.Context, []string, byte) ([]stri
 }
 
 func (failingSubscribeClient) Unsubscribe(context.Context, []string) error { return nil }
-func (failingSubscribeClient) Disconnect()                                 {}
-func (failingSubscribeClient) Lost() <-chan error                          { return nil }
+func (failingSubscribeClient) Publish(context.Context, string, []byte, byte) error {
+	return nil
+}
+func (failingSubscribeClient) Disconnect()        {}
+func (failingSubscribeClient) Lost() <-chan error { return nil }
 
 // TestInputCountsAFailedSubscribeAsAShortConnection: connections that end on a
 // failed SUBSCRIBE right after connecting feed the duplicate client id
