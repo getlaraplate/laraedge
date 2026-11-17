@@ -398,6 +398,52 @@ func TestInputReloadDropsATopic(t *testing.T) {
 	}
 }
 
+// TestInputReloadDropsATopicWhileTheDeviceStays (json): a reload drops one
+// of the two topics of a device that stays. The message queued for it in the
+// persistent session is counted unmapped and not emitted, the topic is
+// unsubscribed at the next connection and the subscription set rewritten.
+func TestInputReloadDropsATopicWhileTheDeviceStays(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{})
+	dataDir := t.TempDir()
+	opts := Options{DataDir: dataDir, AgentID: "agent"}
+
+	before := mqttInput(t, "line", b, nil, device("press",
+		subscribePoint("count", "plant/press/count", "int32"),
+		subscribePoint("temp", "plant/press/temp", "float64"),
+	))
+	first := newHarness(t, before, opts)
+	first.start()
+	first.serving()
+	warmUp(t, b, first, "plant/press/count", "count")
+	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count", "plant/press/temp"}) {
+		t.Fatalf("subscription set = %q, %v", got, err)
+	}
+	first.close()
+
+	b.Publish("plant/press/temp", []byte("20.5"), false, 1)
+
+	after := mqttInput(t, "line", b, nil, device("press", subscribePoint("count", "plant/press/count", "int32")))
+	next := newHarness(t, after, opts)
+	next.start()
+	next.serving()
+
+	// Published in this order on one connection: had temp still been
+	// subscribed, its message would arrive before the count sample.
+	b.Publish("plant/press/temp", []byte("21.5"), false, 1)
+	b.Publish("plant/press/count", []byte("103"), false, 1)
+	next.waitValue("count", model.IntValue(103))
+
+	if n := next.in.Health().ReadErrors[KindUnmapped]; n != 1 {
+		t.Errorf("unmapped = %d, want 1 (the queued message only)", n)
+	}
+	if got := samplesOf(next.snapshot(), "temp"); len(got) != 0 {
+		t.Errorf("temp samples emitted: %+v", got)
+	}
+	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count"}) {
+		t.Errorf("subscription set = %q, %v", got, err)
+	}
+}
+
 // TestInputRollbackUnsubscribesTheFailedDocumentTopics replays a rollback:
 // the input of a new document subscribes an extra topic and writes the
 // subscription set, the supervisor deletes data_dir/inputs/{id}, and the
