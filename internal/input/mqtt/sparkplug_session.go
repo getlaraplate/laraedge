@@ -52,8 +52,10 @@ type spResult struct {
 	Online, Offline []string
 	// Kinds are the read error kinds, one per occurrence.
 	Kinds []string
-	// Mapped is false for a topic outside the Sparkplug shape or a node or
-	// device not in the plan: the input counts it unmapped.
+	// Mapped is false for a topic outside the Sparkplug shape or of a node
+	// not in the plan (its devices included): the input counts it unmapped.
+	// A device of a known node that no point addresses is mapped: it takes
+	// part in seq checking and teaches its aliases, and gives nothing else.
 	Mapped bool
 	// Ignored is true for NCMD, DCMD and STATE, dropped without a count.
 	Ignored bool
@@ -130,8 +132,8 @@ func newSparkplugSession(plan *SparkplugPlan, rebirth bool, clk clock.Clock) *sp
 }
 
 // Handle interprets one message received at received. Its payload is
-// decoded only when the topic is a handled message of a node or device in
-// the plan.
+// decoded only when the topic is a handled message of a known node or of a
+// device under one.
 func (s *sparkplugSession) Handle(topic string, payload []byte, received time.Time) spResult {
 	levels := strings.Split(topic, "/")
 	if len(levels) < 3 || levels[0] != SparkplugNamespace {
@@ -168,9 +170,6 @@ func (s *sparkplugSession) Handle(topic string, payload []byte, received time.Ti
 	target := nodeKey
 	if len(levels) == 5 {
 		target.Device = levels[4]
-		if s.plan.Targets[target] == nil {
-			return spResult{}
-		}
 	}
 
 	p, err := decodePayload(payload)
@@ -194,7 +193,9 @@ func (s *sparkplugSession) Handle(topic string, payload []byte, received time.Ti
 		s.checkSeq(&r, node, p)
 		node.learn(target.Device, p)
 		s.samples(&r, node, target, p, received)
-		r.Online = []string{s.plan.Targets[target].Device}
+		if tp := s.plan.Targets[target]; tp != nil {
+			r.Online = []string{tp.Device}
+		}
 	case spNDATA, spDDATA:
 		s.checkSeq(&r, node, p)
 		s.samples(&r, node, target, p, received)
@@ -210,7 +211,9 @@ func (s *sparkplugSession) Handle(topic string, payload []byte, received time.Ti
 		slices.Sort(r.Offline)
 	case spDDEATH:
 		s.checkSeq(&r, node, p)
-		r.Offline = []string{s.plan.Targets[target].Device}
+		if tp := s.plan.Targets[target]; tp != nil {
+			r.Offline = []string{tp.Device}
+		}
 	}
 
 	return r

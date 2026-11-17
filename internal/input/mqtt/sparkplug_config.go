@@ -77,8 +77,11 @@ type SparkplugPlan struct {
 	// ByDevice maps an agent device to its target. A device with no points
 	// has no entry.
 	ByDevice map[string]SparkplugTarget
-	// Filters are the subscriptions, sorted and without duplicates: the node
-	// of every target, devices included (decision S1b), and each device target.
+	// Filters are the subscriptions, sorted and without duplicates: one
+	// spBv1.0/<group>/+/<edge_node>/# per node of every target, devices
+	// included (decision S1b as amended). It matches the node's own topics and
+	// those of every device under it, planned or not: seq is one counter per
+	// node and its devices, so the session must see them all.
 	Filters []string
 }
 
@@ -134,11 +137,7 @@ func PlanSparkplug(cfg config.Input) (*SparkplugPlan, error) {
 			metrics[dev.Device][addr.Metric] = metricPos{di, pi}
 			tp.Points[addr.Metric] = PlannedPoint{Device: dev.Device, Signal: p.Signal, Point: p}
 
-			prefix := SparkplugNamespace + "/" + addr.Group + "/+/" + addr.Node
-			filters[prefix] = true
-			if addr.Device != "" {
-				filters[prefix+"/"+addr.Device] = true
-			}
+			filters[SparkplugNamespace+"/"+addr.Group+"/+/"+addr.Node+"/#"] = true
 		}
 	}
 	for f := range filters {

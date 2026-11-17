@@ -373,7 +373,8 @@ func TestSessionTopics(t *testing.T) {
 		{"spBv1.0/g/NDATA", false, false},
 		{"spBv1.0/g/NDATA/n9", false, false},
 		{"spBv1.0/h/NDATA/n1", false, false},
-		{"spBv1.0/g/DDATA/n1/d9", false, false},
+		{"spBv1.0/g/DDATA/n1/d9", true, false},
+		{"spBv1.0/g/DDATA/n9/d1", false, false},
 		{"spBv1.0/g/NDATA/n1/d1", false, false},
 		{"spBv1.0/g/DDATA/n1", false, false},
 		{"spBv1.0/g/FOO/n1", false, false},
@@ -451,5 +452,55 @@ func TestSessionConversionKind(t *testing.T) {
 	r := s.Handle(tNDATA, payload(nil, m), spStart)
 	if want := []string{KindConversion}; !reflect.DeepEqual(r.Kinds, want) || len(r.Samples) != 1 || r.Samples[0].Quality != model.Bad {
 		t.Fatalf("result = %+v, want one bad sample and Kinds %q", r, want)
+	}
+}
+
+// TestSessionUnplannedDeviceOfAPlannedNode: a device of a planned node that
+// no point addresses takes part in seq checking and teaches its aliases, but
+// gives no samples, no Online or Offline and no kind, and is not unmapped.
+func TestSessionUnplannedDeviceOfAPlannedNode(t *testing.T) {
+	s, _ := newTestSession(t, true)
+	s.Handle(tNBIRTH, nbirth(1, 0), spStart)
+
+	steps := []struct {
+		topic string
+		p     []byte
+	}{
+		{tDBIRTH, payload(ptr(uint64(1)))},
+		{"spBv1.0/g/DBIRTH/n1/d2", payload(ptr(uint64(2)), named("Level", 40, dtDouble))},
+		{"spBv1.0/g/DDATA/n1/d2", payload(ptr(uint64(3)), byAlias(40, 1))},
+		{tDDATA, payload(ptr(uint64(4)))},
+		{"spBv1.0/g/NDATA/n1", payload(ptr(uint64(5)), temp(1, 1))},
+		{"spBv1.0/g/DDATA/n1/d2", payload(ptr(uint64(6)), mqtttest.SparkplugMetric{Name: ptr("Level"), Double: ptr(2.0)})},
+		{"spBv1.0/g/DDEATH/n1/d2", payload(ptr(uint64(7)))},
+		{tNDATA, payload(ptr(uint64(8)))},
+	}
+	for _, st := range steps {
+		r := s.Handle(st.topic, st.p, spStart)
+		if !r.Mapped || r.Ignored || r.Kinds != nil {
+			t.Fatalf("%s: result = %+v, want mapped and no kinds", st.topic, r)
+		}
+		if st.topic[len(st.topic)-2:] == "d2" && (r.Samples != nil || r.Online != nil || r.Offline != nil) {
+			t.Fatalf("%s: result = %+v, want nothing", st.topic, r)
+		}
+	}
+	if got := s.RebirthNodes(spStart); got != nil {
+		t.Fatalf("RebirthNodes = %+v, want none", got)
+	}
+
+	if r := s.Handle("spBv1.0/g/DDATA/n1/d2", payload(ptr(uint64(10))), spStart); !reflect.DeepEqual(r.Kinds, []string{KindSequenceGap}) {
+		t.Fatalf("gap on d2: Kinds = %q, want [sequence_gap]", r.Kinds)
+	}
+}
+
+// TestSessionUnplannedDeviceAliasesStayItsOwn: an alias a DBIRTH of an
+// unplanned device teaches does not resolve for a planned device.
+func TestSessionUnplannedDeviceAliasesStayItsOwn(t *testing.T) {
+	s, _ := newTestSession(t, false)
+	s.Handle("spBv1.0/g/DBIRTH/n1/d2", payload(nil, named("Speed", 40, 3)), spStart)
+
+	r := s.Handle(tDDATA, payload(nil, mqtttest.SparkplugMetric{Alias: ptr(uint64(40)), Int: ptr(uint32(1))}), spStart)
+	if r.Samples != nil || !reflect.DeepEqual(r.Kinds, []string{KindUnknownAlias}) {
+		t.Fatalf("result = %+v, want no sample and unknown_alias", r)
 	}
 }

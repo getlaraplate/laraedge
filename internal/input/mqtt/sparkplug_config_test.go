@@ -66,7 +66,7 @@ func TestPlanSparkplug(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantFilters := []string{"spBv1.0/g/+/n", "spBv1.0/g/+/n/d"}
+	wantFilters := []string{"spBv1.0/g/+/n/#"}
 	if !reflect.DeepEqual(plan.Filters, wantFilters) {
 		t.Errorf("filters = %v, want %v", plan.Filters, wantFilters)
 	}
@@ -92,7 +92,7 @@ func TestPlanSparkplugDeviceAloneSubscribesItsNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"spBv1.0/g/+/n", "spBv1.0/g/+/n/d"}
+	want := []string{"spBv1.0/g/+/n/#"}
 	if !reflect.DeepEqual(plan.Filters, want) {
 		t.Errorf("filters = %v, want %v", plan.Filters, want)
 	}
@@ -106,7 +106,7 @@ func TestPlanSparkplugFiltersSortedAndDeduplicated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"spBv1.0/g/+/n", "spBv1.0/g/+/n/d1", "spBv1.0/g/+/n/d2", "spBv1.0/h/+/z", "spBv1.0/h/+/z/d1"}
+	want := []string{"spBv1.0/g/+/n/#", "spBv1.0/h/+/z/#"}
 	if !reflect.DeepEqual(plan.Filters, want) {
 		t.Errorf("filters = %v, want %v", plan.Filters, want)
 	}
