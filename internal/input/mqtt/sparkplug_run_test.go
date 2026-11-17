@@ -164,10 +164,13 @@ func TestSparkplugInputLateStartWithoutRebirthPublishesNothing(t *testing.T) {
 // TestSparkplugInputLateStartAsksForARebirth: with rebirth on, the first
 // unknown alias publishes one NCMD Node Control/Rebirth; the node's NBIRTH
 // teaches the aliases; further unknown aliases within 30 s publish nothing
-// more, and one after 30 s asks again.
+// more, and one after 30 s asks again. The input reads two nodes, so the
+// first request of the other node marks where an extra request would show.
 func TestSparkplugInputLateStartAsksForARebirth(t *testing.T) {
 	b := mqtttest.Start(t, mqtttest.Options{})
-	h := startSparkplug(t, b, map[string]any{"rebirth": true})
+	h := newHarness(t, sparkplugInput(t, "line", b, map[string]any{"rebirth": true}, twoNodeDevices()...), Options{DataDir: t.TempDir(), AgentID: "agent"})
+	h.start()
+	h.serving()
 	clientID := h.in.clientID
 	asked := h.clk.Now()
 
@@ -195,22 +198,37 @@ func TestSparkplugInputLateStartAsksForARebirth(t *testing.T) {
 		t.Errorf("temp samples = %+v, want 20.5 then 21", temps)
 	}
 
-	// Two more unknown aliases within 30 s ask nothing. One at 30 s asks
-	// again: the agent publishes in order on one connection, so a request
-	// the two had wrongly made would reach the broker before it.
+	// Two more unknown aliases of g/n1 within 30 s ask nothing; one of g/n2
+	// asks g/n2. The agent publishes in order on one connection, and the
+	// router queues the requests in the order of the messages, so a request
+	// of g/n1 the two had wrongly made would reach the broker before g/n2's.
 	b.Publish(tNDATA, payload(nil, byAlias(9, 1)), false, 1)
 	b.Publish(tNDATA, payload(nil, byAlias(9, 2)), false, 1)
-	b.Publish(tNDATA, payload(nil, temp(1, 22)), false, 1)
-	h.waitSamples("temp", 3)
+	b.Publish("spBv1.0/g/NDATA/n2", payload(nil, byAlias(9, 1)), false, 1)
+	got = b.WaitPublished(clientID, 2)
+	if got[1].Topic != "spBv1.0/g/NCMD/n2" {
+		t.Fatalf("published = %+v, want the second request for g/n2, none more for g/n1 within 30 s", got)
+	}
+
+	// At 30 s an unknown alias of g/n1 asks again, stamped with the clock
+	// stepped by the interval.
 	h.steps(rebirthInterval)
 	b.Publish(tNDATA, payload(nil, byAlias(9, 3)), false, 1)
-
-	got = b.WaitPublished(clientID, 2)
-	if len(got) != 2 || got[1].Topic != "spBv1.0/g/NCMD/n1" {
-		t.Errorf("published = %+v, want exactly two NCMD of g/n1", got)
+	got = b.WaitPublished(clientID, 3)
+	if got[2].Topic != "spBv1.0/g/NCMD/n1" {
+		t.Fatalf("published = %+v, want the third request for g/n1", got)
 	}
-	if errs := h.readErrors(); !maps.Equal(errs, map[string]uint64{KindUnknownAlias: 4}) {
-		t.Errorf("read errors = %v, want four unknown_alias", errs)
+	if p, err := decodePayload(got[2].Payload); err != nil || p.Timestamp != uint64(asked.Add(rebirthInterval).UnixMilli()) {
+		t.Errorf("third NCMD payload = %+v, %v, want the timestamp %d", p, err, asked.Add(rebirthInterval).UnixMilli())
+	}
+
+	// Close disconnects after the outgoing packets are flushed.
+	h.close()
+	if got := b.Published(clientID); len(got) != 3 {
+		t.Errorf("published = %+v, want exactly three NCMD", got)
+	}
+	if errs := h.readErrors(); !maps.Equal(errs, map[string]uint64{KindUnknownAlias: 5}) {
+		t.Errorf("read errors = %v, want five unknown_alias", errs)
 	}
 }
 
