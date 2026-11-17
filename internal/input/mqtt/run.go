@@ -3,6 +3,7 @@ package mqtt
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -179,17 +180,15 @@ func (in *Input) session(ctx context.Context, r *router, flaps *flapDetector) (s
 }
 
 // refuse handles the topics the broker refused on this connection: each is
-// logged at warn and counted subscribe_refused, once per point on it or once
+// logged at warn and counted subscribe_refused, once per point it carries
+// (under sparkplug_b, every point of the node the filter subscribes) or once
 // for an availability topic, and the devices whose points are all on refused
 // topics are no longer kept alive (an empty refused list keeps them all).
 func (in *Input) refuse(refused []string, tracker *Tracker) {
 	for _, topic := range refused {
 		in.log.Warn(msgSubscribeRefused, "input", in.cfg.ID, "topic", topic)
 
-		count := 1
-		if plan := in.plan[topic]; plan != nil {
-			count = len(plan.Points)
-		}
+		count := max(len(in.refusedPoints(topic)), 1)
 		for range count {
 			in.health.CountError(KindSubscribeRefused)
 		}
@@ -199,18 +198,23 @@ func (in *Input) refuse(refused []string, tracker *Tracker) {
 }
 
 // refusedDevices returns the devices of the input whose points are all on
-// topics of refused.
+// topics of refused: under json the point topics, under sparkplug_b the node
+// filters.
 func (in *Input) refusedDevices(refused []string) []string {
 	if len(refused) == 0 {
 		return nil
 	}
 
+	topics := slices.Collect(maps.Keys(in.plan))
+	if in.sparkplug != nil {
+		topics = in.sparkplug.Filters
+	}
 	accepted := make(map[string]bool, len(in.devices))
-	for topic, plan := range in.plan {
+	for _, topic := range topics {
 		if slices.Contains(refused, topic) {
 			continue
 		}
-		for _, pp := range plan.Points {
+		for _, pp := range in.refusedPoints(topic) {
 			accepted[pp.Device] = true
 		}
 	}

@@ -280,10 +280,14 @@ func sampleOf(samples []model.Sample, key PointRef) (model.Sample, bool) {
 
 // refusedPoints returns the points of the subscription topic: under json the
 // points on that topic, under sparkplug_b those of every target of the node
-// the filter subscribes.
+// the filter subscribes; none for an availability topic.
 func (in *Input) refusedPoints(topic string) []PlannedPoint {
 	if in.sparkplug == nil {
-		return in.plan[topic].Points
+		if plan := in.plan[topic]; plan != nil {
+			return plan.Points
+		}
+
+		return nil
 	}
 
 	var out []PlannedPoint

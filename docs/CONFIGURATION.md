@@ -628,7 +628,8 @@ does not let the client read it). The input keeps the connection and its other t
 once per connection for each refused topic, naming the topic and the input, and counts `subscribe_refused`
 once for every point on that topic (once for a refused availability topic). A device whose points are all on
 refused topics is no longer kept alive, so it dies after `death_tolerance`; a device with at least one accepted
-topic stays alive. Every connection subscribes the document's topics again, so a refused topic is retried at the
+topic stays alive. Under `sparkplug_b` the topic is the node filter `spBv1.0/<group>/+/<edge_node>/#`: its refusal
+counts every point of the node and its devices, and only those agent devices stop being kept alive. Every connection subscribes the document's topics again, so a refused topic is retried at the
 next connection: after a reconnection, a reload or a restart. A topic refused at its first subscription is not
 written to the subscription set; one the set already held (granted on an earlier connection, which a broker
 usually keeps in the session) stays in it, so a document that drops it still unsubscribes it. There is no retry timer: fix the ACL on the
@@ -807,7 +808,7 @@ kinds below. Like every input that reports its health, an `mqtt` input shows `ti
 | `sequence_gap` | `sparkplug_b`: a message whose `seq` does not follow the node's last one |
 | `missed_birth` | `sparkplug_b`: an NDATA or DDATA of a node or device a death put offline, which proves its birth was lost, once per message |
 | `malformed_payload` | `sparkplug_b`: a payload that is not a Sparkplug B protobuf, once per message |
-| `subscribe_refused` | a point on a topic whose subscription the broker refused, once per connection (once for a refused availability topic) |
+| `subscribe_refused` | a point on a topic whose subscription the broker refused, once per connection (once for a refused availability topic; under `sparkplug_b` a refused node filter counts every point of that node and its devices) |
 
 Payload values, user names, passwords and broker addresses are never written to the logs at `info` and above.
 Two warnings name more than the input: a refused subscription names its topic, and the duplicate client id

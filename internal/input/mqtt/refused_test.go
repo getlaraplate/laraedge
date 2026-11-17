@@ -251,3 +251,34 @@ func TestInputKeepsARefusedTopicItHeldBefore(t *testing.T) {
 		t.Errorf("unmapped = %d, want 0: the dropped topic was not unsubscribed", n)
 	}
 }
+
+// TestSparkplugInputRefusedNodeFilter: under sparkplug_b the broker refuses
+// the filter of one node. The refusal counts once per point of that node,
+// its device dies at the tolerance, and the quiet device of the other node,
+// whose filter was accepted, is kept alive.
+func TestSparkplugInputRefusedNodeFilter(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{Refuse: []string{"spBv1.0/g/+/n1/#"}})
+	cfg := sparkplugInput(t, "line", b, nil,
+		device("press",
+			subscribePoint("temp", "g/n1|Temp", "float64"),
+			subscribePoint("count", "g/n1|Count", "int64"),
+		),
+		device("saw", subscribePoint("on", "g/n2|On", "bool")),
+	)
+	h := newHarness(t, cfg, Options{DataDir: t.TempDir(), AgentID: "agent"})
+	h.start()
+	h.serving()
+
+	if n := h.in.Health().ReadErrors[KindSubscribeRefused]; n != 2 {
+		t.Errorf("subscribe_refused = %d, want one per point of the refused node", n)
+	}
+
+	for range 3 {
+		h.clk.Advance(testTolerance / 2)
+		h.clk.BlockUntil(t, idleTimers)
+	}
+	h.waitEvents(model.Death, 1, "press")
+	if n := countEvents(h.snapshot(), model.Death, "saw"); n != 0 {
+		t.Errorf("saw deaths = %d, want 0: its node filter was accepted", n)
+	}
+}
