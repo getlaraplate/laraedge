@@ -216,7 +216,7 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - `func (p SparkplugPayload) Encode() []byte` (protowire, test-only);
   - `func BdSeq(v uint64) SparkplugMetric`.
 
-- [ ] **Step 1: Failing tests (table-driven).**
+- [x] **Step 1: Failing tests (table-driven).**
   - Round trip through `mqtttest.Encode` and `decodePayload` for every field of the wire table, including unknown field numbers, which are skipped.
   - Each of the following is an error: a truncated varint, a length beyond the buffer, and a group wire type.
   - `metricValue` for every datatype to every point type, at least:
@@ -236,9 +236,9 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - `metricQuality`: absent is Good; 192 and 255 are Good; 64 and 191 are Uncertain; 0 and 63 are Bad; a `string_value` Quality is Good (ignored).
   - `metricTime`: the metric's, else the payload's, else reception; year 10000 is implausible.
   - `encodeRebirth` decodes back to one metric named `Node Control/Rebirth`, datatype 11, `boolean_value` true, with the timestamp.
-- [ ] **Step 2: Fuzz.** `FuzzDecodePayload` with a seed corpus of the encoded fixtures plus `nil`, `0x0a`, `0xff×16`. Run `go test -run x -fuzz FuzzDecodePayload -fuzztime 10s ./internal/input/mqtt/`; no panic. The seeds run in the normal suite.
-- [ ] **Step 3: Implement** with `protowire.ConsumeTag`, `ConsumeVarint`, `ConsumeFixed32`, `ConsumeFixed64`, `ConsumeBytes`, `ConsumeFieldValue`.
-- [ ] **Step 4: Run the checks; commit** `feat(mqtt): decode Sparkplug B payloads by hand with protowire`.
+- [x] **Step 2: Fuzz.** `FuzzDecodePayload` with a seed corpus of the encoded fixtures plus `nil`, `0x0a`, `0xff×16`. Run `go test -run x -fuzz FuzzDecodePayload -fuzztime 10s ./internal/input/mqtt/`; no panic. The seeds run in the normal suite.
+- [x] **Step 3: Implement** with `protowire.ConsumeTag`, `ConsumeVarint`, `ConsumeFixed32`, `ConsumeFixed64`, `ConsumeBytes`, `ConsumeFieldValue`.
+- [x] **Step 4: Run the checks; commit** `feat(mqtt): decode Sparkplug B payloads by hand with protowire`.
 
 ### Task 3: The Sparkplug session and the tracker
 
