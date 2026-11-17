@@ -10,7 +10,8 @@ import (
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
-// Events given to Input.trace by the command clients, for the tests.
+// Events given to the observer of the deps by the command clients, for the
+// tests.
 const (
 	traceProbeMessage  = "probe-message"
 	traceBrowseMessage = "browse-message"

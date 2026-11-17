@@ -76,10 +76,8 @@ type Input struct {
 	clientID  string
 	tolerance time.Duration
 
-	// jitter draws the backoff jitter, in [0, 1); trace, when set, is told
-	// the steps of the connection (tests only).
-	jitter func() float64
-	trace  func(event string)
+	// deps are fixed by the constructor and never change afterwards.
+	deps deps
 
 	health driverkit.Health
 
@@ -95,10 +93,24 @@ type Input struct {
 
 var _ edgeinput.HealthReporter = (*Input)(nil)
 
+// deps are what an input takes besides its configuration: the draw of the
+// backoff jitter, in [0, 1), and an observer told the steps of the
+// connection and of the commands (the trace events), nil for none. New gives
+// the production ones; the tests build their inputs through newInput.
+type deps struct {
+	jitter  func() float64
+	observe func(event string)
+}
+
 // New returns the MQTT input of cfg. The errors are fixed texts naming the
 // input and the field path or the position of the point
 // (devices.<d>.points.<p>), never a value or a connection setting.
 func New(cfg config.Input, clk clock.Clock, opts Options) (*Input, error) {
+	return newInput(cfg, clk, opts, deps{jitter: rand.Float64})
+}
+
+// newInput is New with the given deps.
+func newInput(cfg config.Input, clk clock.Clock, opts Options, d deps) (*Input, error) {
 	conn, err := ParseConnection(cfg.Connection, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mqtt input %q: %w", cfg.ID, err)
@@ -131,7 +143,10 @@ func New(cfg config.Input, clk clock.Clock, opts Options) (*Input, error) {
 		plan:      plan,
 		clientID:  conn.ClientID,
 		tolerance: cfg.DeathTolerance,
-		jitter:    rand.Float64,
+		deps:      d,
+	}
+	if in.deps.jitter == nil {
+		in.deps.jitter = rand.Float64
 	}
 	if in.clientID == "" {
 		in.clientID = clientIDPrefix + opts.AgentID + "-" + cfg.ID
@@ -250,8 +265,9 @@ func (in *Input) keepAliveEvery() time.Duration {
 	return max(in.tolerance/2, time.Millisecond)
 }
 
+// traceEvent tells the observer of the deps, if any, of event.
 func (in *Input) traceEvent(event string) {
-	if in.trace != nil {
-		in.trace(event)
+	if in.deps.observe != nil {
+		in.deps.observe(event)
 	}
 }

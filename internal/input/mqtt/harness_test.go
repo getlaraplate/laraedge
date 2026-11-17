@@ -93,19 +93,21 @@ func newHarness(t *testing.T, cfg config.Input, opts Options) *harness {
 	t.Helper()
 
 	clk := clock.NewFake(driverEpoch)
-	in, err := New(cfg, clk, opts)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	h := &harness{t: t, clk: clk, events: make(chan string, 1024), changed: make(chan struct{})}
 
-	h := &harness{t: t, clk: clk, in: in, events: make(chan string, 1024), changed: make(chan struct{})}
-	in.jitter = func() float64 { return 0 }
-	in.trace = func(event string) {
-		select {
-		case h.events <- event:
-		default:
-		}
+	in, err := newInput(cfg, clk, opts, deps{
+		jitter: func() float64 { return 0 },
+		observe: func(event string) {
+			select {
+			case h.events <- event:
+			default:
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("newInput: %v", err)
 	}
+	h.in = in
 
 	return h
 }

@@ -19,7 +19,7 @@ const (
 	KindUnmapped = "unmapped"
 )
 
-// Events given to Input.trace, for the tests.
+// Events given to the observer of the deps, for the tests.
 const (
 	traceServing = "serving"
 	traceDown    = "down"
@@ -30,7 +30,7 @@ const (
 // ctx is done. The backoff starts again from its minimum after a connection
 // whose subscriptions were acknowledged.
 func (in *Input) run(ctx context.Context, r *router) {
-	backoff := driverkit.NewBackoff(in.clk, in.jitter)
+	backoff := driverkit.NewBackoff(in.clk, in.deps.jitter)
 
 	for {
 		subscribed, err := in.session(ctx, r)
