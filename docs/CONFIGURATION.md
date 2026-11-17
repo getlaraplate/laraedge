@@ -606,7 +606,7 @@ device is alive.
 the messages published while the agent is down, and the input receives them as samples, in order, when it
 connects again. Stopping an input for a reload disconnects without unsubscribing, so the session keeps the
 messages. The set of topics the input subscribed to is kept in `data_dir/mqtt/topics/<input id>.json` (a
-sorted JSON list, written after the broker acknowledged the subscriptions, without the topics it refused). At every connection the input
+sorted JSON list, written after the broker acknowledged the subscriptions; a topic refused at its first subscription is left out, one the set already held stays). At every connection the input
 unsubscribes the topics of that file that its document no longer uses, then subscribes its own: so a topic
 removed by a reload is dropped from the session at the next connection, and a message of it still queued in the
 session is dropped and counted as `unmapped`, never emitted. The file is outside `data_dir/inputs/<input id>`,
@@ -626,8 +626,10 @@ does not let the client read it). The input keeps the connection and its other t
 once per connection for each refused topic, naming the topic and the input, and counts `subscribe_refused`
 once for every point on that topic (once for a refused availability topic). A device whose points are all on
 refused topics is no longer kept alive, so it dies after `death_tolerance`; a device with at least one accepted
-topic stays alive. A refused topic is not written to the subscription set, so it is subscribed again at the
-next connection: after a reconnection, a reload or a restart. There is no retry timer: fix the ACL on the
+topic stays alive. Every connection subscribes the document's topics again, so a refused topic is retried at the
+next connection: after a reconnection, a reload or a restart. A topic refused at its first subscription is not
+written to the subscription set; one the set already held (granted on an earlier connection, which a broker
+usually keeps in the session) stays in it, so a document that drops it still unsubscribes it. There is no retry timer: fix the ACL on the
 broker, then reload the configuration (`SIGHUP`) or restart the agent. `connected` turns true only once the
 broker has answered the subscriptions.
 

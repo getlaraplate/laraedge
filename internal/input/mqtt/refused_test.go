@@ -194,3 +194,60 @@ func TestBrowseARefusedFilterIsAnError(t *testing.T) {
 		t.Fatalf("Browse = %v, %v, want the refusal", entries, err)
 	}
 }
+
+func TestSubscriptionSet(t *testing.T) {
+	topics := []string{"a", "b", "c"}
+	got := subscriptionSet(topics, []string{"b", "c"}, []string{"a", "c", "gone"})
+	if want := []string{"a", "c"}; !slices.Equal(got, want) {
+		t.Errorf("subscriptionSet = %q, want %q (c was held before, b is new)", got, want)
+	}
+}
+
+// TestInputKeepsARefusedTopicItHeldBefore: a topic granted on an earlier
+// connection and refused on a later one stays in the subscription set, so
+// the document that drops it still unsubscribes it.
+func TestInputKeepsARefusedTopicItHeldBefore(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{})
+	dataDir := t.TempDir()
+	opts := Options{DataDir: dataDir, AgentID: "agent"}
+	press := device("press", subscribePoint("count", "plant/press/count", "int32"))
+	vault := device("vault", subscribePoint("open", "plant/vault", "bool"))
+
+	first := newHarness(t, mqttInput(t, "line", b, nil, press, vault), opts)
+	first.start()
+	first.serving()
+	warmUp(t, b, first, "plant/press/count", "count")
+	b.WaitAcknowledged("laraplate-edge-agent-line", warmUpMessages)
+
+	b.SetRefused("plant/vault")
+	b.Stop()
+	first.waitEvent(traceDown)
+	b.Restart()
+	first.advanceToBackoffEnd()
+	first.waitEvent(traceServing)
+
+	if n := first.in.Health().ReadErrors[KindSubscribeRefused]; n != 1 {
+		t.Fatalf("subscribe_refused = %d, want 1", n)
+	}
+	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count", "plant/vault"}) {
+		t.Fatalf("subscription set = %q, %v, want the refused topic kept", got, err)
+	}
+	first.close()
+
+	// The ACL opens again, so only the unsubscription keeps a message of the
+	// topic, still subscribed in the session, from reaching the input.
+	b.SetRefused()
+	next := newHarness(t, mqttInput(t, "line", b, nil, press), opts)
+	next.start()
+	next.serving()
+	if got, err := readTopics(dataDir, "line"); err != nil || !slices.Equal(got, []string{"plant/press/count"}) {
+		t.Errorf("subscription set = %q, %v, want the dropped topic gone", got, err)
+	}
+
+	b.Publish("plant/vault", []byte("true"), false, 1)
+	b.Publish("plant/press/count", []byte("103"), false, 1)
+	next.waitValue("count", model.IntValue(103))
+	if n := next.in.Health().ReadErrors[KindUnmapped]; n != 0 {
+		t.Errorf("unmapped = %d, want 0: the dropped topic was not unsubscribed", n)
+	}
+}

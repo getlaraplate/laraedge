@@ -113,7 +113,7 @@ refusal failed the connection, which was retried forever and shown only as `conn
 broker refuses (SUBACK `0x80`) keeps the connection and the other topics. It is logged at warn once per
 connection, naming the topic and the input, and counted with kind `subscribe_refused` once per point on it. A
 device whose points are all on refused topics is not kept alive, so it dies after `death_tolerance`. The topic is
-left out of the subscription set and subscribed again at the next connection (a reconnection, a reload or a
+left out of the subscription set unless the previous set held it, and subscribed again at the next connection (a reconnection, a reload or a
 restart); there is no retry timer.
 
 **Death and birth:**

@@ -154,7 +154,8 @@ func (in *Input) session(ctx context.Context, r *router, flaps *flapDetector) (s
 	}()
 
 	topics := in.topics(r.tracker)
-	if err := in.unsubscribeStale(connCtx, c, topics); err != nil {
+	previous, err := in.unsubscribeStale(connCtx, c, topics)
+	if err != nil {
 		return false, lostOr(lost, err)
 	}
 	refused, err := c.Subscribe(connCtx, topics, in.conn.QoS)
@@ -166,8 +167,7 @@ func (in *Input) session(ctx context.Context, r *router, flaps *flapDetector) (s
 	defer in.health.SetConnected(false)
 
 	in.refuse(refused, r.tracker)
-	accepted := slices.DeleteFunc(slices.Clone(topics), func(topic string) bool { return slices.Contains(refused, topic) })
-	if err := writeTopics(in.opts.DataDir, in.cfg.ID, accepted); err != nil {
+	if err := writeTopics(in.opts.DataDir, in.cfg.ID, subscriptionSet(topics, refused, previous)); err != nil {
 		in.log.Debug("mqtt: the subscription set cannot be written", "input", in.cfg.ID, "error", err.Error())
 	}
 
@@ -244,17 +244,29 @@ func (in *Input) password(ctx context.Context) (string, error) {
 }
 
 // unsubscribeStale unsubscribes the topics of the last subscription set
-// that are not in topics. A missing or unreadable set means nothing to
-// unsubscribe (decision Q7).
-func (in *Input) unsubscribeStale(ctx context.Context, c client, topics []string) error {
-	old, err := readTopics(in.opts.DataDir, in.cfg.ID)
+// that are not in topics, and returns that set. A missing or unreadable set
+// means nothing to unsubscribe (decision Q7).
+func (in *Input) unsubscribeStale(ctx context.Context, c client, topics []string) (previous []string, err error) {
+	previous, err = readTopics(in.opts.DataDir, in.cfg.ID)
 	if err != nil {
 		in.log.Debug("mqtt: no previous subscription set, nothing to unsubscribe", "input", in.cfg.ID, "error", err.Error())
 
-		return nil
+		return nil, nil
 	}
 
-	return c.Unsubscribe(ctx, staleTopics(old, topics))
+	return previous, c.Unsubscribe(ctx, staleTopics(previous, topics))
+}
+
+// subscriptionSet is the subscription set to write after a SUBACK: the
+// topics the broker accepted, and the refused ones the previous set already
+// held. A broker usually keeps in the session a subscription it granted
+// earlier even when it refuses it again, so such a topic stays recorded and
+// is still unsubscribed once the document drops it. A topic refused at its
+// first subscription is left out.
+func subscriptionSet(topics, refused, previous []string) []string {
+	return slices.DeleteFunc(slices.Clone(topics), func(topic string) bool {
+		return slices.Contains(refused, topic) && !slices.Contains(previous, topic)
+	})
 }
 
 // keepAlive renews every device not held dead by its availability topic now,
