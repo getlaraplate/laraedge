@@ -92,11 +92,20 @@ type harness struct {
 func newHarness(t *testing.T, cfg config.Input, opts Options) *harness {
 	t.Helper()
 
+	return newHarnessWith(t, cfg, opts, nil)
+}
+
+// newHarnessWith is newHarness with the input's client built by newClient,
+// nil for the paho client.
+func newHarnessWith(t *testing.T, cfg config.Input, opts Options, newClient func(Connection, string, string, bool, func(string, []byte) bool) (client, error)) *harness {
+	t.Helper()
+
 	clk := clock.NewFake(driverEpoch)
 	h := &harness{t: t, clk: clk, events: make(chan string, 1024), changed: make(chan struct{})}
 
 	in, err := newInput(cfg, clk, opts, deps{
-		jitter: func() float64 { return 0 },
+		newClient: newClient,
+		jitter:    func() float64 { return 0 },
 		observe: func(event string) {
 			select {
 			case h.events <- event:

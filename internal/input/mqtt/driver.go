@@ -95,12 +95,15 @@ type Input struct {
 var _ edgeinput.HealthReporter = (*Input)(nil)
 
 // deps are what an input takes besides its configuration: the draw of the
-// backoff jitter, in [0, 1), and an observer told the steps of the
-// connection and of the commands (the trace events), nil for none. New gives
-// the production ones; the tests build their inputs through newInput.
+// backoff jitter, in [0, 1), the constructor of the input's client, and an
+// observer told the steps of the connection and of the commands (the trace
+// events), nil for none. New gives the production ones; the tests build
+// their inputs through newInput.
 type deps struct {
 	jitter  func() float64
 	observe func(event string)
+	// newClient builds the client of a connection; nil means newPahoClient.
+	newClient func(conn Connection, clientID, password string, cleanSession bool, onMessage func(topic string, payload []byte) (handled bool)) (client, error)
 }
 
 // New returns the MQTT input of cfg. The errors are fixed texts naming the
@@ -148,6 +151,9 @@ func newInput(cfg config.Input, clk clock.Clock, opts Options, d deps) (*Input, 
 	}
 	if in.deps.jitter == nil {
 		in.deps.jitter = rand.Float64
+	}
+	if in.deps.newClient == nil {
+		in.deps.newClient = newPahoClient
 	}
 	if in.tolerance <= 0 {
 		in.tolerance = config.DefaultDeathTolerance

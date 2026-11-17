@@ -117,7 +117,7 @@ func (in *Input) session(ctx context.Context, r *router, flaps *flapDetector) (s
 		return false, err
 	}
 
-	c, err := newPahoClient(in.conn, in.clientID, password, !in.conn.PersistentSession, r.message)
+	c, err := in.deps.newClient(in.conn, in.clientID, password, !in.conn.PersistentSession, r.message)
 	if err != nil {
 		return false, err
 	}
@@ -128,17 +128,17 @@ func (in *Input) session(ctx context.Context, r *router, flaps *flapDetector) (s
 	defer c.Disconnect()
 	established := in.clk.Now()
 
-	connCtx, cancel := context.WithCancel(ctx)
-	lost := make(chan struct{})
+	// A connection that ends with an error while the input still runs is a
+	// loss for the flap detector, whether the client reported it through
+	// Lost or it failed a pending SUBSCRIBE or UNSUBSCRIBE first.
 	defer func() {
-		select {
-		case <-lost:
-			if flaps.lost(in.clk.Now().Sub(established)) {
-				in.log.Warn(msgClientIDTakenOver, "input", in.cfg.ID, "client_id", in.clientID)
-			}
-		default:
+		if err != nil && ctx.Err() == nil && flaps.lost(in.clk.Now().Sub(established)) {
+			in.log.Warn(msgClientIDTakenOver, "input", in.cfg.ID, "client_id", in.clientID)
 		}
 	}()
+
+	connCtx, cancel := context.WithCancel(ctx)
+	lost := make(chan struct{})
 	var watch sync.WaitGroup
 	watch.Go(func() {
 		select {

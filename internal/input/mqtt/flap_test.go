@@ -1,10 +1,12 @@
 package mqtt
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input/mqtt/mqtttest"
 )
 
@@ -77,5 +79,52 @@ func TestInputWarnsOfAConnectionTakenOverAtOnce(t *testing.T) {
 		second.waitEvent(traceDown)
 		second.advanceToBackoffEnd()
 		second.waitEvent(traceServing)
+	}
+}
+
+// failingSubscribeClient connects, then fails every SUBSCRIBE without ever
+// reporting a lost connection: a connection dropped while the SUBSCRIBE was
+// pending, which the library reports through the token first.
+type failingSubscribeClient struct{}
+
+func (failingSubscribeClient) Connect(context.Context) (bool, error) { return false, nil }
+
+func (failingSubscribeClient) Subscribe(context.Context, []string, byte) ([]string, error) {
+	return nil, errSubscribe
+}
+
+func (failingSubscribeClient) Unsubscribe(context.Context, []string) error { return nil }
+func (failingSubscribeClient) Disconnect()                                 {}
+func (failingSubscribeClient) Lost() <-chan error                          { return nil }
+
+// TestInputCountsAFailedSubscribeAsAShortConnection: connections that end on a
+// failed SUBSCRIBE right after connecting feed the duplicate client id
+// warning like lost ones.
+func TestInputCountsAFailedSubscribeAsAShortConnection(t *testing.T) {
+	cfg := config.Input{
+		ID:             "line",
+		Driver:         config.DriverMQTT,
+		Connection:     []byte(`{"broker":"mqtt://192.0.2.1","client_id":"clone"}`),
+		DeathTolerance: testTolerance,
+		Devices:        []config.Device{device("press", subscribePoint("count", "plant/press/count", "int32"))},
+	}
+	var logs logBuffer
+	h := newHarnessWith(t, cfg, Options{Logger: logs.logger()}, func(Connection, string, string, bool, func(string, []byte) bool) (client, error) {
+		return failingSubscribeClient{}, nil
+	})
+	h.start()
+
+	for attempt := 1; attempt <= flapCount; attempt++ {
+		h.waitEvent(traceDown)
+		if n := len(logs.lines(t, slog.LevelWarn, msgClientIDTakenOver)); attempt < flapCount && n != 0 {
+			t.Fatalf("after attempt %d: %d warnings, want none yet", attempt, n)
+		}
+		if attempt < flapCount {
+			h.advanceToBackoffEnd()
+		}
+	}
+
+	if n := len(logs.lines(t, slog.LevelWarn, msgClientIDTakenOver)); n != 1 {
+		t.Errorf("%d warnings after %d failed subscriptions, want 1", n, flapCount)
 	}
 }
