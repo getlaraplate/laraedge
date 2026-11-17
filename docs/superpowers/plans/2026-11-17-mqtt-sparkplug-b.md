@@ -290,7 +290,7 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - After each message the run loop publishes, outside the router lock, the rebirths `RebirthNodes` returns, on the current client.
   - `session` calls `Reset` on every new connection.
 
-- [ ] **Step 1: Failing integration tests on mochi** (`go test -race`, each run `-count=20` before commit):
+- [x] **Step 1: Failing integration tests on mochi** (`go test -race`, each run `-count=20` before commit):
   - **Births and data:** NBIRTH then NDATA by alias gives samples with the right types and timestamps, and birth before the first sample.
   - **Node death:** NDEATH emits death for the node device and its devices. DDEATH emits death for one device.
   - **Stale will:** the agent connected; NBIRTH with bdSeq 1; an NDEATH with bdSeq 0. No death.
@@ -301,8 +301,8 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - **Persistent session and reload:** the session survives a stop and start of the input. After a reload that drops a node, its filter is unsubscribed and its queued NDATA counts `unmapped`. This reuses the plan 1 tests in table form over both formats where they apply.
   - **Ignored types:** NCMD, DCMD and STATE on subscribed filters change nothing and count nothing.
   - **Payload size:** a payload above `max_payload` counts `payload_too_large`.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run the checks; commit** `feat(mqtt): run the input under format sparkplug_b`.
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run the checks; commit** `feat(mqtt): run the input under format sparkplug_b`.
 
 ### Task 5: probe and browse for Sparkplug
 
