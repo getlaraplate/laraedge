@@ -163,7 +163,8 @@ value field does not match its datatype is a `bad` sample with kind `conversion`
 `sequence_gap` and `malformed_payload` are counted even when the message comes from a device no point addresses,
 since they describe the stream of the node. Amended 2026-11-17 by plan 2 (`../plans/2026-11-17-mqtt-sparkplug-b.md`,
 ruling R11): `missed_birth` is added, an NDATA or DDATA of a node or device held dead by a Sparkplug death, once
-per message (section 7).
+per message (section 7). Amended 2026-11-17 on branch `fix/sparkplug-minors` (ruling R13 reversed): a DBIRTH
+under a node held dead by an NDEATH counts `missed_birth` too.
 
 ## 7. Sparkplug B (plan 2)
 
@@ -194,6 +195,17 @@ S13 and S14 and the rulings of its execution, R11 and R12 included). They refine
   samples are emitted, the message counts `missed_birth` once, and with `rebirth: true` the node is due a
   rebirth (same 30 s limit). With `rebirth: false` the device revives all the same. The cost, if a sample after
   a real death was only reordered, is a device briefly revived.
+- **DBIRTH under a dead node (amended 2026-11-17, branch `fix/sparkplug-minors`, ruling R13 reversed).** R13 first
+  had a DBIRTH under a node held dead by an NDEATH revive only its device, the node waiting for its next NDATA. A
+  dead node publishes nothing until its NBIRTH, so a DBIRTH proves the node alive and its NBIRTH lost, exactly as
+  R11 reads data: the node's agent device comes online with the device's, the message counts `missed_birth` once,
+  and with `rebirth: true` the node is due a rebirth (same 30 s limit). A DBIRTH after a DDEATH of its own device
+  is an ordinary birth.
+- **Follow-up fixes (2026-11-17, branch `fix/sparkplug-minors`).** A metric with `is_null` is a `bad` sample with no
+  read error kind even when its timestamp is out of range (no `bad_timestamp`). One node waits at most once in the
+  running input's rebirth queue, across a reconnection too. `probe` asks no rebirth of a node whose filter the
+  broker refused. `browse` gives a node seen only through its devices its own line (`0 msg  -`), and stops after
+  1000 entries with `... stopped after 1000 entries`.
 - **`seq` (S10, with ruling R4).** The tracking is reset at every reconnection, since a gap across an outage is
   expected; an NDEATH ends it; a message without `seq` ends the node's tracking until the next one. An NBIRTH
   clears the node's aliases and a DBIRTH overwrites those of its device; aliases are kept per node and device

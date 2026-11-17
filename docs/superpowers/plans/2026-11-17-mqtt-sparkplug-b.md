@@ -418,6 +418,24 @@ re-review. `go test -race ./...`, `GOARCH=386 go test ./...`, `GOOS=windows go v
     - one overlong line in CONFIGURATION.md.
   - **Parked by the controller (R13, R14).** A DBIRTH under a node held dead revives only its device, and the
     node's next NDATA revives the node. A DDEATH of an unaddressed device marks nothing.
+- **Follow-up (2026-11-17), branch `fix/sparkplug-minors`:** the deferred minors above are fixed. `decodeMetric`
+  returns on a known field of the wrong wire type instead of an `ok` flag; `mqtttest` calls `math.Float32bits` and
+  `math.Float64bits`; new tests cover an integer datatype into a `bool` or `string` point, a malformed payload of
+  an unaddressed device, a metric's own datatype winning over its birth's, and the interleaved-seq test marks its
+  unaddressed steps with a field. A null metric with an implausible timestamp is `bad` without `bad_timestamp`.
+  The `RebirthNodes` doc says `now` is the publish time on the session's clock. The rebirth queue holds a node
+  once, across a reconnection too. `browse.go` uses `maps.Keys`; the `browse` command parses the connection once
+  and reports its error; `BrowseSparkplug` lists a node seen only through its devices (`Born` false, no message
+  of its own); the truncation line says "entries" under `sparkplug_b`; `probe` asks no rebirth of a node whose
+  filter was refused. `TestMQTTSparkplug` waits for the grant of the input's own filter (new
+  `mqtttest.Broker.WaitSubscribedTo`), and the "Refused subscriptions" paragraph is rewrapped. **R13 is
+  reversed:** a DBIRTH under a node held dead by an NDEATH proves the node alive, its NBIRTH lost, so the node's
+  agent device comes online, `missed_birth` is counted once and, with `rebirth: true`, the node is due a rebirth,
+  as R11 does for data; USAGE.md, CONFIGURATION.md and spec sections 6 and 7 say so. **Kept as is:**
+  `unknown_alias` in `probe` goes to every point of the target without a sample, because an unknown alias cannot
+  be mapped to a metric name (USAGE.md now says so); the agent's own NCMD that comes back through the node filter
+  is dropped as ignored, which is correct; a DDEATH of a device no point addresses marks nothing (R14), since no
+  agent device depends on it; `refuse` counts `max(points, 1)`, and a planned node filter always has a point.
 - **Declared limit.** The mochi test broker does not deliver retained node-level messages to a `.../<node>/#`
   filter, so the tests publish node messages after the subscription. Real brokers match per the MQTT standard.
   Brokers other than mochi stay untested in CI, as in plan 1.
