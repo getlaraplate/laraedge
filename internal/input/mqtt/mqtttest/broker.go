@@ -81,6 +81,9 @@ type Broker struct {
 	// own excluded, in order; changed is closed and replaced at every one.
 	published []Message
 	changed   chan struct{}
+	// subscribed counts, by client id, the SUBSCRIBE packets the broker
+	// processed; changed is closed and replaced at every one too.
+	subscribed map[string]int
 }
 
 // Message is a PUBLISH packet the broker received from a client.
@@ -123,6 +126,8 @@ func Start(t testing.TB, opts Options) *Broker {
 		acks:    map[string]int{},
 		acked:   make(chan struct{}),
 		changed: make(chan struct{}),
+
+		subscribed: map[string]int{},
 	}
 	b.SetRefused(opts.Refuse...)
 	if err := server.AddHook(&authHook{users: opts.Users, broker: b}, nil); err != nil {
@@ -250,6 +255,34 @@ func (b *Broker) WaitPublished(clientID string, n int) []Message {
 			b.t.Fatalf("mqtttest: %d of %d publishes from %q within the timeout", len(got), n, clientID)
 
 			return got
+		}
+	}
+}
+
+// WaitSubscribed waits until the broker has processed n SUBSCRIBE packets
+// from clientID, so a message published afterwards reaches it, retained or
+// not. It fails the test after a timeout, so call it from the test goroutine.
+func (b *Broker) WaitSubscribed(clientID string, n int) {
+	b.t.Helper()
+
+	timeout := time.NewTimer(waitTimeout)
+	defer timeout.Stop()
+
+	for {
+		b.mu.Lock()
+		count, changed := b.subscribed[clientID], b.changed
+		b.mu.Unlock()
+
+		if count >= n {
+			return
+		}
+
+		select {
+		case <-changed:
+		case <-timeout.C:
+			b.t.Fatalf("mqtttest: %d of %d subscriptions from %q within the timeout", count, n, clientID)
+
+			return
 		}
 	}
 }
@@ -464,7 +497,7 @@ type recordHook struct {
 func (h *recordHook) ID() string { return "mqtttest-record" }
 
 func (h *recordHook) Provides(b byte) bool {
-	return b == mochi.OnConnect || b == mochi.OnSubscribe || b == mochi.OnPublish
+	return b == mochi.OnConnect || b == mochi.OnSubscribe || b == mochi.OnSubscribed || b == mochi.OnPublish
 }
 
 func (h *recordHook) OnPublish(cl *mochi.Client, pk packets.Packet) (packets.Packet, error) {
@@ -495,6 +528,19 @@ func (h *recordHook) OnConnect(_ *mochi.Client, pk packets.Packet) error {
 	h.broker.connects = append(h.broker.connects, Connect{ClientID: pk.Connect.ClientIdentifier, CleanSession: pk.Connect.Clean})
 
 	return nil
+}
+
+func (h *recordHook) OnSubscribed(cl *mochi.Client, _ packets.Packet, _ []byte) {
+	if cl.Net.Inline {
+		return
+	}
+
+	h.broker.mu.Lock()
+	defer h.broker.mu.Unlock()
+
+	h.broker.subscribed[cl.ID]++
+	close(h.broker.changed)
+	h.broker.changed = make(chan struct{})
 }
 
 func (h *recordHook) OnSubscribe(cl *mochi.Client, pk packets.Packet) packets.Packet {

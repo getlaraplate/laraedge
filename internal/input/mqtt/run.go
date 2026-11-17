@@ -316,8 +316,7 @@ func (in *Input) keepAlive(ctx context.Context, lost <-chan struct{}, r *router,
 // session asks again at the next trigger after the interval.
 func (in *Input) publishRebirths(ctx context.Context, c client, nodes []SparkplugTarget) {
 	for _, node := range nodes {
-		topic := SparkplugNamespace + "/" + node.Group + "/" + spNCMD + "/" + node.Node
-		if err := c.Publish(ctx, topic, encodeRebirth(in.clk.Now()), 0); err != nil {
+		if err := c.Publish(ctx, sparkplugRebirthTopic(node), encodeRebirth(in.clk.Now()), 0); err != nil {
 			in.log.Debug("mqtt: the Sparkplug rebirth request cannot be published", "input", in.cfg.ID, "node", node.Key(), "error", err.Error())
 		}
 	}

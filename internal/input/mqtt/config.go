@@ -1,6 +1,7 @@
 // Package mqtt is the MQTT input driver: the parsing and validation of the
 // connection, of the point addresses and of the points (this file). The driver
-// never publishes (spec section 1: the agent is a plain subscriber).
+// is a plain subscriber (spec section 1); its only publish is the Sparkplug B
+// rebirth request, and only with rebirth: true.
 //
 // Every error of this file is a fixed message: it names the field, never the
 // value, so a broker address, a user name, a topic or a rejected setting cannot
