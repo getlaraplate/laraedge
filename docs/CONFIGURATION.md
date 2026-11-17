@@ -636,9 +636,10 @@ broker has answered the subscriptions.
 **Client id uniqueness.** A broker keeps one connection per client id: when a second client connects with the
 id of the first, it disconnects the first, and two clients sharing an id take each other's connection over
 endlessly. The default id contains the agent id and the input id, so it is unique as long as every agent has its
-own `agent_id`. `config validate` and every apply refuse two `mqtt` inputs of the document that would connect
-to the same broker with the same client id (an explicit `client_id`, or one equal to another input's default),
-with a message naming both inputs. Across agents (an explicit `client_id` reused on another agent, or a
+own `agent_id`. Every apply refuses two `mqtt` inputs of the document that would connect to the same broker
+with the same client id (two equal explicit `client_id`s, or an explicit one equal to another input's default),
+with a message naming both inputs. `config validate` refuses equal explicit ids too, but it has no bootstrap and
+so no agent id: an explicit id equal to another input's default id passes it and is refused at the apply. Across agents (an explicit `client_id` reused on another agent, or a
 cloned machine running with the same `agent_id`) nothing can be checked in advance: when three connections in
 a row drop less than 5 seconds after they were made, the input logs one warning that another client may be
 using its `client_id`, naming the id; it warns again only after a connection that lasted 5 seconds or more.
@@ -1146,7 +1147,8 @@ Outcomes, as reported to Laraplate:
 Besides, `config validate` and every apply refuse these `mqtt` connections, each with its own message:
 
 - two `mqtt` inputs with the same broker (scheme, host and port after the default port is filled in) and the
-  same effective client id: `inputs.<j>.connection.client_id: input "<b>" has the same broker and client id as
+  same effective client id (`config validate` compares the explicit ids only, the apply the default ones too,
+  with the agent id): `inputs.<j>.connection.client_id: input "<b>" has the same broker and client id as
   input "<a>" (inputs.<i>); every mqtt input needs its own client id on a broker` (see "Client id uniqueness");
 - a JSON `null` for `persistent_session` or for a string field such as the `tls` paths:
   `connection.persistent_session: must be true or false`, `connection.tls.ca_file: must be a string`;
