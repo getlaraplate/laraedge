@@ -96,6 +96,10 @@ type Config struct {
 	Clock clock.Clock
 	// Logger receives the logs; nil means slog.Default().
 	Logger *slog.Logger
+	// Check, when set, returns more reasons to refuse a document, checked
+	// before anything is built: the cross-input rules of the drivers (the
+	// client ids of the mqtt inputs).
+	Check func(config.Document) []string
 	// StartTimeout bounds the start of an input; zero means
 	// DefaultStartTimeout.
 	StartTimeout time.Duration
@@ -118,6 +122,7 @@ type Supervisor struct {
 	runDir     string
 	clk        clock.Clock
 	log        *slog.Logger
+	docCheck   func(config.Document) []string
 	timeout    time.Duration
 	client     *http.Client
 	router     *pipeline.Router
@@ -363,6 +368,7 @@ func New(cfg Config) (*Supervisor, error) {
 		runDir:     cfg.RunDir,
 		clk:        cfg.Clock,
 		log:        cfg.Logger,
+		docCheck:   cfg.Check,
 		timeout:    cfg.StartTimeout,
 		client:     cfg.HTTPClient,
 		inputs:     map[string]*runningInput{},
@@ -617,6 +623,10 @@ func (s *Supervisor) check(doc config.Document) ([]plugin.Spec, []string) {
 	// Decision P1: config cannot type-check the chains, the supervisor does
 	// before anything is built.
 	msgs = append(msgs, transform.CheckDocument(doc)...)
+
+	if s.docCheck != nil {
+		msgs = append(msgs, s.docCheck(doc)...)
+	}
 
 	// Plugin entries and plugin inputs: files, hashes, manifests (H2, H3).
 	specs, pluginMsgs := plugin.Resolve(doc, plugin.Paths{BaseDir: s.configDir, Provider: s.provider, PluginsDir: s.pluginsDir})

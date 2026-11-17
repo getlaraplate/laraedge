@@ -117,6 +117,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 		RunDir:     boot.RunDir,
 		Clock:      deps.clock,
 		Logger:     log,
+		Check:      func(doc config.Document) []string { return mqtt.CheckClientIDs(doc, boot.AgentID) },
 	})
 	if err != nil {
 		return err

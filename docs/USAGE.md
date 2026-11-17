@@ -227,7 +227,8 @@ response time: 3µs
 - An `mqtt` input is probed through a connection of its own, beside a running agent's, with the client id
   `<client_id>-probe`: it subscribes to the topics of the points and waits for the first message of each, up to
   the 30 seconds of the command (retained messages answer at once). A point with no message in that time is
-  printed as `no message` and is not an error. See "MQTT brokers".
+  printed as `no message` and is not an error; a point whose message did not decode, or whose topic the broker
+  refused, shows why instead. See "MQTT brokers".
 - A plugin input (`driver: plugin:<id>`) is probed by starting its plugin, with the hashes checked as at
   every start, configuring the input, reading each point once and stopping the plugin again. The
   plugin resolves the `secret://` values of its `connection` as the agent does. It runs a plugin
@@ -389,7 +390,10 @@ laraplate-edge probe broker --config config.yaml --bootstrap bootstrap.yaml
 press-07	running	true	boolean	good
 press-07	press_force	182.5	float	good
 press-07	cycle_count	no message
+press-07	mode	no value at path
+press-07	temp	0	float	bad	conversion
 furnace-02	door_open	false	boolean	good
+furnace-02	alarm	subscribe_refused
 response time: 1.204s
 ```
 
@@ -399,9 +403,14 @@ response time: 1.204s
   quiet device needs the full wait.
 - A point that got no sample in that time is printed as `<device><TAB><signal><TAB>no message`, after the
   samples. It is not an error: the exit code stays 0. The same line is printed for any driver whose point
-  returned no sample.
-- A first sample can be `bad` (a payload that is not JSON, a value that does not convert). The line shows what
-  the agent would send; `--record <file>` writes the samples as for the other drivers.
+  returned no sample. When the reason is known, it takes the place of `no message`: `payload_too_large` (the
+  message was above `max_payload`), `no value at path` (messages arrived but without the point's path; the
+  running input counts nothing for it) or `subscribe_refused` (the broker refused the topic, see
+  "Troubleshooting"). The points of a refused topic do not make the probe wait.
+- A first sample can be `bad` (a payload that is not JSON, a value that does not convert, an unreadable
+  timestamp). The line shows what the agent would send, followed by the read error kind that made it `bad`:
+  `malformed_json`, `bad_timestamp` or `conversion`. `--record <file>` writes the samples as for the other
+  drivers, without the kinds.
 - The time of a sample is the arrival time unless the document sets a `timestamp`, and a retained message is
   stamped with the time of the probe, not the time the device published it.
 - The command fails with exit code 1 when it cannot connect or subscribe, or loses the connection before the
@@ -424,7 +433,7 @@ plant/press-07/status  1 msg  6 B  retained  online
 ```
 
 - `--filter` is the topic filter to subscribe to, `#` (everything) by default; `+` and `#` must be whole
-  levels and `#` the last one. `--duration` is how long to collect messages, `10s` by default, from `1s` to
+  levels and `#` the last one. `--duration` is how long to collect messages once the broker has accepted the subscription, `10s` by default, from `1s` to
   `5m`. `--node` and `--depth` belong to OPC UA and plugin inputs and are a usage error here, as `--filter`
   and `--duration` are for any other input (exit 2).
 - One line per topic seen, sorted by topic: the topic, the number of messages, the size of the last message,
@@ -432,13 +441,15 @@ plant/press-07/status  1 msg  6 B  retained  online
   the text. Bytes that are not printable are escaped (`\x00`), so a payload cannot disturb the terminal.
 - For a JSON object or list, the topic line is followed by one indented line per leaf, sorted by path: the address, already in
   the `topic|path` form to copy into the `address` of a point, and a preview of the value (a string quoted).
-  A preview is at most 40 characters and ends in `...` when cut. At most 100 leaves are listed per topic. A
-  key that is empty or contains a dot has no path and is skipped. A payload above the input's `max_payload` is
+  A preview is at most 40 characters and ends in `...` when cut. At most 100 leaves are listed per topic; when
+  there are more, one last indented line says how many were not shown (`  ... 12 more leaves not shown`). A
+  key that is empty or contains a dot has no path and is skipped, and is not counted. A payload above the input's `max_payload` is
   counted and sized but not previewed.
 - `(no message received)` when nothing arrived. The scan stops after 1000 topics with `... stopped after 1000
   topics` on stdout: narrow it with `--filter`. Ctrl-C ends the collection early and prints what was seen.
 - With the default filter it sees only what the broker lets that client subscribe to: an ACL that hides a
-  topic hides it from `browse` too, and from the agent.
+  topic hides it from `browse` too, and from the agent. A filter the broker refuses altogether ends the command
+  with exit code 1 and "the broker refused the subscription".
 
 ## Running plugins
 
@@ -559,7 +570,7 @@ Every name starts with `laraplate_edge_`.
 | `laraplate_edge_config_version` | gauge | | version of the applied document, 0 when none |
 | `laraplate_edge_input_up` | gauge | `input` | 1 when the input runs, 0 when it failed |
 | `laraplate_edge_input_connected` | gauge | `input` | 1 when the input's connection to the machine is up, 0 when it is down; only inputs that run and keep a connection: the series of an input that failed or was removed ends (a stale series to Prometheus), so alert on `input_up == 0` for a failed input |
-| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, for every input that reports its health (an `mqtt` input counts only `connection` among them); an `mqtt` input adds the kinds `payload_too_large`, `malformed_json`, `bad_timestamp`, `conversion`, `availability` and `unmapped` (CONFIGURATION.md, "The `mqtt` driver"), whose series appear at their first count; the series restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
+| `laraplate_edge_input_read_errors_total` | counter | `input`, `kind` | read errors since the input was last started, by `kind` (the series of an input that failed or was removed ends, like `input_connected`'s): `timeout` (no answer in time), `connection` (refused, reset or closed, or an invalid frame), `exception` (the device answered a Modbus exception; for `opcua`, a Bad status from the server), `decode` (a value that does not decode); all four series exist from the start, at 0, for every input that reports its health (an `mqtt` input counts only `connection` among them); an `mqtt` input adds the kinds `payload_too_large`, `malformed_json`, `bad_timestamp`, `conversion`, `availability`, `unmapped` and `subscribe_refused` (a point on a topic the broker refused to subscribe, once per connection) (CONFIGURATION.md, "The `mqtt` driver"), whose series appear at their first count; the series restart from 0 when the input's configuration changes or a rollback restarts it, a counter reset that `rate()` and `increase()` handle |
 | `laraplate_edge_transform_errors_total` | counter | `input` | runtime errors of the input's transform chains since the agent started, across the restarts of the input; each one sent its sample `bad` (CONFIGURATION.md, "Transforms"). The series of a removed input disappears. |
 | `laraplate_edge_plugin_up` | gauge | `plugin` | 1 when the plugin process is up, 0 otherwise; only plugins the applied document uses |
 | `laraplate_edge_plugin_restarts_total` | counter | `plugin`, `reason` | restarts of the plugin process by `reason`: `exit` (the process died), `health` (three failed health checks), `memory` (above `max_memory`), `hash` (the files on disk no longer match); the four series exist from the start, at 0, and reset to 0 when a new document restarts the plugin |
@@ -683,8 +694,8 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | an `opcua` input `connected` true, its devices alive, but the values are stale or `bad` | the liveness is the server's: while the server answers, the devices are alive even if the machine behind it is off. A Bad status gives `bad` samples, `read_errors` `exception` grows; an unchanged value gives no sample at all with a subscription. | look at the machine and at the server's own status of the nodes. The devices are reported dead only when the server stops answering for `death_tolerance`. |
 | the agent stops with a Go panic whose trace is in the OPC UA library | the library panicked in one of its own goroutines (malformed data from a server): this cannot be caught | the service manager restarts the agent (`Restart=` under systemd). Report it with the trace; `--log-level debug` logs the library's lines with `source=gopcua`. |
 | an `mqtt` input `connected` false, `read_errors` `connection` growing, devices reported dead after `death_tolerance` | the agent cannot hold a connection to the broker: host, port or firewall wrong, a TLS handshake that fails (the CA in `tls.ca_file`, a certificate that does not name the host, an `mqtt://` broker behind a TLS port or the reverse), refused credentials, or a `secret://` password that does not resolve | check the address and the scheme (`mqtts://` for 8883), the CA and the host name in the certificate, the user and the secret. The log at `debug` has the fixed error texts, never the address or the password. `probe` shows the same failure from the command line. |
-| an `mqtt` input connects and is dropped again and again, `connection` growing, devices dying and born again | another client uses the same `client_id`: the broker disconnects the older one at each connect, so the two take turns. The default id is `laraplate-edge-<agent_id>-<input_id>`, so two agents with the same `agent_id` and input id collide, and so does a second agent on a copy of the same bootstrap | give each agent a distinct `agent_id`, or set a unique `client_id`. `probe` and `browse` use `<client_id>-probe` and `<client_id>-browse` and never collide with the agent. |
-| an `mqtt` input `connected` true at times but no sample, `read_errors` `connection` growing, devices dead, the broker log shows a denied subscription | the broker's ACL refuses the user a topic of the document (or the availability topic) and drops the connection or refuses the subscription: the agent subscribes again at each reconnection, and nothing but `connection` errors and the death of the devices shows it, since the topic is never named | allow the user to read the topics, or take the point away. `browse` with the same user lists only what the ACL lets it see, so a topic missing from it is a hint. |
+| `WARN` "the connection keeps dropping right after connecting; another client may be using the same client_id", an `mqtt` input connected and dropped again and again, `connection` growing, devices dying and born again | another client uses the same `client_id`: the broker disconnects the older one at each connect, so the two take turns. The agent warns once after three connections in a row that lasted less than 5 seconds, naming the id, and again only after a connection that lasted longer. The default id is `laraplate-edge-<agent_id>-<input_id>`, so a clone of an agent (a copied bootstrap, a cloned machine or disk image) with the same `agent_id` collides, and so does an explicit `client_id` reused on another agent or by another program. Two inputs of one document with one id on one broker are refused at validation | give each agent its own `agent_id`; an explicit `client_id` must be unique on its broker, across every agent and program that connects to it. `probe` and `browse` use `<client_id>-probe` and `<client_id>-browse` and never collide with the agent. |
+| `WARN` "the broker refused the subscription of a topic ...", `read_errors` `subscribe_refused`, the devices of that topic dead while the input stays `connected` | the broker's ACL does not let the user read the topic named in the warning (or an availability topic). The agent keeps the connection and the other topics; a device whose points are all on refused topics dies after `death_tolerance`. There is no retry timer | allow the user to read the topic on the broker, then reload the configuration (`SIGHUP`) or restart the agent: the next connection subscribes it again. Or take the point away. `probe` shows `subscribe_refused` for those points. A broker that drops the whole connection instead shows as `connection` errors (the first `mqtt` row). |
 | an `mqtt` point never gets a sample, no read error | the message arrives but the path is not in it (a message without the path gives no sample, since devices send partial updates), the topic is spelled differently (topics are case-sensitive), or nothing is published there | `browse --filter` on the topic shows the payload and the exact `topic\|path` address of each leaf to copy |
 | `read_errors` `malformed_json`, `bad_timestamp` or `conversion` growing, `mqtt` points `bad` | the payload is not JSON where an address has a path, a `timestamp` is set for a topic whose payload has none (every point of the topic, plain ones included, is `bad`), or a value does not convert to the point's `type` (`3.0` or `1e3` to an integer type, `70000` to `int16`, a JSON string to a number) | look at the payload with `browse`; set the `type` the value has; give the `timestamp` only to the JSON topics, per topic under `topics` |
 | `read_errors` `payload_too_large` growing | a message above `max_payload` (256 KiB by default) is dropped | raise `max_payload` (up to 16 MiB) if the message is expected; the topic is probably not one for a point |

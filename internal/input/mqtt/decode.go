@@ -71,12 +71,27 @@ func Plan(cfg config.Input, conn Connection) (map[string]*TopicPlan, error) {
 	return plans, nil
 }
 
+// NoValueAtPath is what probe says of a point whose path is missing from the
+// message of its topic. It is not a read error kind: the running input
+// counts nothing for it.
+const NoValueAtPath = "no value at path"
+
 // Decode turns one message payload into samples. received is the sample time
 // when the topic has no timestamp spec. errs holds one read error kind per
 // failure: one malformed_json and one bad_timestamp per message, one conversion
 // per point. A point whose path is missing from the message gives no sample.
 func Decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample, []string) {
+	samples, errs, _ := decode(plan, payload, received)
+
+	return samples, errs
+}
+
+// decode is Decode that also returns, for every point of the plan in order,
+// why it did not decode: the read error kind of its bad sample, NoValueAtPath
+// when it has no sample, "" for a good sample.
+func decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample, []string, []string) {
 	var errs []string
+	pointKinds := make([]string, len(plan.Points))
 
 	needsJSON := plan.Timestamp != nil
 	for _, pp := range plan.Points {
@@ -100,17 +115,21 @@ func Decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample
 			}
 			errs = append(errs, KindBadTimestamp)
 			samples := make([]model.Sample, 0, len(plan.Points))
-			for _, pp := range plan.Points {
+			for i, pp := range plan.Points {
 				samples = append(samples, badSample(pp, ts))
+				pointKinds[i] = KindBadTimestamp
+				if pp.Path != nil && !validJSON {
+					pointKinds[i] = KindMalformedJSON
+				}
 			}
-			return samples, errs
+			return samples, errs, pointKinds
 		}
 		ts = t.UTC()
 	}
 
 	var samples []model.Sample
 	malformedReported := false
-	for _, pp := range plan.Points {
+	for i, pp := range plan.Points {
 		var v model.Value
 		var ok bool
 		switch {
@@ -122,10 +141,12 @@ func Decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample
 				malformedReported = true
 			}
 			samples = append(samples, badSample(pp, ts))
+			pointKinds[i] = KindMalformedJSON
 			continue
 		default:
 			raw, found := walk(doc, pp.Path)
 			if !found {
+				pointKinds[i] = NoValueAtPath
 				continue
 			}
 			v, ok = convertJSON(pp.Point.Type, raw)
@@ -133,11 +154,12 @@ func Decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample
 		if !ok {
 			errs = append(errs, KindConversion)
 			samples = append(samples, badSample(pp, ts))
+			pointKinds[i] = KindConversion
 			continue
 		}
 		samples = append(samples, model.Sample{Device: pp.Device, Signal: pp.Signal, TS: ts, Value: v, Quality: model.Good, Priority: pp.Point.Priority})
 	}
-	return samples, errs
+	return samples, errs, pointKinds
 }
 
 func payloadTime(spec *TimestampSpec, doc any, validJSON bool) (time.Time, bool) {
@@ -244,7 +266,9 @@ func convertJSON(typ string, v any) (model.Value, bool) {
 }
 
 // convertText converts plain text. Numbers and bools are trimmed of
-// surrounding whitespace; a string is taken as is.
+// surrounding whitespace; a string is taken as is. A number must follow the
+// JSON number grammar, with one leading + allowed: strconv also reads hex
+// floats, inf, nan and underscores, which a JSON payload cannot carry either.
 func convertText(typ, text string) (model.Value, bool) {
 	switch typ {
 	case "string":
@@ -261,8 +285,63 @@ func convertText(typ, text string) (model.Value, bool) {
 		}
 		return model.Value{}, false
 	default:
-		return convertNumber(typ, strings.TrimSpace(text))
+		number := strings.TrimSpace(text)
+		if !isPlainNumber(number) {
+			return model.Value{}, false
+		}
+		return convertNumber(typ, number)
 	}
+}
+
+// isPlainNumber reports whether s is a JSON number, optionally preceded by
+// one +: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?.
+func isPlainNumber(s string) bool {
+	if rest, ok := strings.CutPrefix(s, "+"); ok {
+		s = rest
+	} else {
+		s = strings.TrimPrefix(s, "-")
+	}
+
+	i := 0
+	switch {
+	case i < len(s) && s[i] == '0':
+		i++
+	case i < len(s) && s[i] >= '1' && s[i] <= '9':
+		i = skipDigits(s, i)
+	default:
+		return false
+	}
+
+	if i < len(s) && s[i] == '.' {
+		j := skipDigits(s, i+1)
+		if j == i+1 {
+			return false
+		}
+		i = j
+	}
+
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		j := skipDigits(s, i)
+		if j == i {
+			return false
+		}
+		i = j
+	}
+
+	return i == len(s)
+}
+
+// skipDigits returns the index of the first byte of s at or after i that is
+// not an ASCII digit.
+func skipDigits(s string, i int) int {
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	return i
 }
 
 // convertNumber converts a numeric text to an integer or float type. An
@@ -285,13 +364,19 @@ func convertNumber(typ, s string) (model.Value, bool) {
 		return intInRange(s, 0, math.MaxInt64)
 	case "float32", "float64":
 		f, err := strconv.ParseFloat(s, 64)
-		if err != nil || (typ == "float32" && math.Abs(f) > math.MaxFloat32) {
+		if err != nil || (typ == "float32" && !fitsFloat32(f)) {
 			return model.Value{}, false
 		}
 		val, err := model.FloatValue(f)
 		return val, err == nil
 	}
 	return model.Value{}, false
+}
+
+// fitsFloat32 reports whether f is a float32 up to rounding: not above the
+// float32 range, and not a non-zero value that float32 turns into zero.
+func fitsFloat32(f float64) bool {
+	return math.Abs(f) <= math.MaxFloat32 && (f == 0 || float32(f) != 0)
 }
 
 func intInRange(s string, lo, hi int64) (model.Value, bool) {

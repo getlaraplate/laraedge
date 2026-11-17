@@ -19,17 +19,15 @@ func newCommandInput(t *testing.T, cfg config.Input, opts Options) (*Input, *clo
 	t.Helper()
 
 	clk := clock.NewFake(driverEpoch)
-	in, err := New(cfg, clk, opts)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
 	events := make(chan string, 1024)
-	in.trace = func(event string) {
+	in, err := newInput(cfg, clk, opts, deps{observe: func(event string) {
 		select {
 		case events <- event:
 		default:
 		}
+	}})
+	if err != nil {
+		t.Fatalf("newInput: %v", err)
 	}
 	t.Cleanup(func() { _ = in.Close() })
 

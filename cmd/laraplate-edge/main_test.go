@@ -179,6 +179,8 @@ func TestConfigValidate(t *testing.T) {
 	writeFile(t, opcuaOffline, opcuaDoc)
 	mqttOffline := filepath.Join(dir, "mqtt.yaml")
 	writeFile(t, mqttOffline, mqttDoc)
+	mqttClientIDs := filepath.Join(dir, "mqtt-client-ids.yaml")
+	writeFile(t, mqttClientIDs, mqttClientIDDoc)
 
 	tests := []struct {
 		name       string
@@ -238,6 +240,14 @@ func TestConfigValidate(t *testing.T) {
 			wantCode: 1,
 			wantStderr: []string{
 				mqttOffline + ": inputs.0: mqtt input \"line\": devices.0.points.1: address: topic: must not contain + or #\n",
+			},
+		},
+		{
+			name:     "two MQTT inputs with one client id on one broker",
+			file:     mqttClientIDs,
+			wantCode: 1,
+			wantStderr: []string{
+				mqttClientIDs + `: inputs.1.connection.client_id: input "oven" has the same broker and client id as input "press" (inputs.0); every mqtt input needs its own client id on a broker` + "\n",
 			},
 		},
 		{
@@ -336,6 +346,28 @@ inputs:
         points:
           - {signal: state, address: "plant/press/state|mode", type: string, read: subscribe}
           - {signal: temp, address: "plant/+/temp", type: float64, read: subscribe}
+outputs:
+  - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
+`
+
+// mqttClientIDDoc is a document with two MQTT inputs giving one broker the
+// same explicit client id, the second with the default port spelled out.
+const mqttClientIDDoc = `schema: laraplate-edge-config/1
+inputs:
+  - id: press
+    driver: mqtt
+    connection: {broker: 'mqtt://broker.example', client_id: gateway}
+    devices:
+      - device: press-07
+        points:
+          - {signal: temp, address: "plant/press/temp", type: float64, read: subscribe}
+  - id: oven
+    driver: mqtt
+    connection: {broker: 'mqtt://broker.example:1883', client_id: gateway}
+    devices:
+      - device: oven-02
+        points:
+          - {signal: temp, address: "plant/oven/temp", type: float64, read: subscribe}
 outputs:
   - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
 `

@@ -71,6 +71,11 @@ func (v *sampleValues) add(rec model.Record) {
 // minIntDigits is the shortest integer sample value the log scan looks for.
 const minIntDigits = 3
 
+// scanGuard bounds the traffic loop of the log scan. Like guard it is a
+// deadlock guard, never a timing assertion; it is longer because the loop
+// waits for about a thousand samples, not for one goroutine.
+const scanGuard = 60 * time.Second
+
 func (v *sampleValues) counts() (samples, floats, ints, strs int) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -304,8 +309,11 @@ outputs:
 
 	// The 401 suspends the output for five minutes, then the 422 drops a
 	// batch, then the backend accepts. The clock moves in steps the
-	// simulator replays.
-	deadline := time.Now().Add(guard)
+	// simulator replays. Five integers of minIntDigits digits need a counter
+	// past 100, about a thousand samples through the disk buffer: a few
+	// milliseconds on Linux, more than guard on a Windows runner, where the
+	// run once stopped at 807. scanGuard bounds that traffic instead.
+	deadline := time.Now().Add(scanGuard)
 	for {
 		samples, floats, ints, strs := values.counts()
 		if be.requests() >= 6 && samples >= 50 && floats >= 20 && ints >= 5 && strs >= 2 {

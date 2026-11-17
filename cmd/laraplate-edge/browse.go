@@ -27,6 +27,12 @@ import (
 // browseTimeout bounds the connection and the whole walk.
 const browseTimeout = 2 * time.Minute
 
+// mqttBrowseClock times the --duration of an mqtt browse, which starts once
+// the broker has answered the subscription. A variable so the tests can
+// collect for less than the 1 second --duration allows with a faster clock;
+// the real clock for users. Tests that change it must not run in parallel.
+var mqttBrowseClock = clock.Real()
+
 // runBrowse runs "browse <input>": it walks the hierarchical references of an
 // OPC UA server from the Objects folder, or from --node, and prints one line
 // per node, indented two spaces per level, as
@@ -180,7 +186,8 @@ func loadedInput(configFile, bootstrapPath, id string) (doc config.Document, boo
 // "<topic>  <n> msg  <size> B  <retained|->" followed, for a plain payload,
 // by "  <preview>"; for a JSON object or list it is followed by one line per
 // leaf, indented two spaces, "  <topic>|<path>  <preview>", the address being
-// usable as the address of a point (a string value is quoted). Previews are
+// usable as the address of a point (a string value is quoted); past 100
+// leaves one line "  ... <n> more leaves not shown" ends the list. Previews are
 // at most 40 characters, escaped; the count, size and retain flag are those
 // of the messages seen, the last one for size and retain. It stops after
 // 1000 topics. The connection settings and the password are never printed.
@@ -205,7 +212,7 @@ func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, conf
 
 	log := logging.New(stderr, slog.LevelWarn)
 
-	in, err := mqtt.New(cfg, clock.Real(), mqtt.Options{
+	in, err := mqtt.New(cfg, mqttBrowseClock, mqtt.Options{
 		DataDir:  boot.DataDir,
 		AgentID:  boot.AgentID,
 		Resolver: secrets.NewResolver(),
@@ -262,6 +269,9 @@ func mqttBrowseLines(entries []mqtt.BrowseEntry) []string {
 
 		for _, p := range e.Paths {
 			lines = append(lines, "  "+mqtt.Escape(p.Address)+"  "+p.Preview)
+		}
+		if e.MorePaths > 0 {
+			lines = append(lines, fmt.Sprintf("  ... %d more leaves not shown", e.MorePaths))
 		}
 	}
 

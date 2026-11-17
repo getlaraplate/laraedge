@@ -97,7 +97,7 @@ func TestPahoClientReceivesAPublishedMessage(t *testing.T) {
 	if present {
 		t.Error("a clean session reported a present session")
 	}
-	if err := c.Subscribe(ctx, []string{"plant/line1/temp"}, 1); err != nil {
+	if _, err := c.Subscribe(ctx, []string{"plant/line1/temp"}, 1); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
@@ -132,7 +132,7 @@ func TestPahoClientUnhandledMessageIsRedelivered(t *testing.T) {
 		if _, err := c.Connect(ctx); err != nil {
 			t.Fatalf("Connect: %v", err)
 		}
-		if err := c.Subscribe(ctx, []string{"plant/count"}, 1); err != nil {
+		if _, err := c.Subscribe(ctx, []string{"plant/count"}, 1); err != nil {
 			t.Fatalf("Subscribe: %v", err)
 		}
 
@@ -173,7 +173,7 @@ func TestPahoClientUnsubscribeStopsDelivery(t *testing.T) {
 	if _, err := c.Connect(ctx); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	if err := c.Subscribe(ctx, []string{"a/old", "a/kept"}, 1); err != nil {
+	if _, err := c.Subscribe(ctx, []string{"a/old", "a/kept"}, 1); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	if err := c.Unsubscribe(ctx, []string{"a/old"}); err != nil {
@@ -195,7 +195,7 @@ func TestPahoClientEmptyTopicListsAreNoOps(t *testing.T) {
 	c, _ := newTestClient(t, testConnection(b, SchemePlain), "empty", "", true)
 
 	// Not connected: a round trip would fail, so these must not make one.
-	if err := c.Subscribe(t.Context(), nil, 1); err != nil {
+	if _, err := c.Subscribe(t.Context(), nil, 1); err != nil {
 		t.Errorf("Subscribe(nil) = %v", err)
 	}
 	if err := c.Unsubscribe(t.Context(), nil); err != nil {
@@ -214,7 +214,7 @@ func TestPahoClientHonoursAnExpiredContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := c.Subscribe(ctx, []string{"a"}, 1); !errors.Is(err, context.Canceled) {
+	if _, err := c.Subscribe(ctx, []string{"a"}, 1); !errors.Is(err, context.Canceled) {
 		t.Errorf("Subscribe = %v, want context.Canceled", err)
 	}
 	if err := c.Unsubscribe(ctx, []string{"a"}); !errors.Is(err, context.Canceled) {
@@ -357,7 +357,7 @@ func TestPahoClientPersistentSessionKeepsQoS1Messages(t *testing.T) {
 	if _, err := c.Connect(ctx); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	if err := c.Subscribe(ctx, []string{"plant/counter"}, 1); err != nil {
+	if _, err := c.Subscribe(ctx, []string{"plant/counter"}, 1); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	b.Stop()

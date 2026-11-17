@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/plugin"
@@ -28,7 +30,8 @@ import (
 )
 
 // probeTimeout bounds the one read of every point. A variable so the tests
-// can shorten the wait for a silent mqtt topic.
+// can shorten the wait for a silent mqtt topic; tests that change it must not
+// run in parallel.
 var probeTimeout = 30 * time.Second
 
 // runProbe runs "probe <input>" (decision P8): it builds the input the
@@ -76,7 +79,7 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 	log := logging.New(stderr, slog.LevelWarn)
 	defer routeLibraryLogs(log)()
 
-	samples, elapsed, err := probeInput(doc, boot, positional[0], log)
+	samples, kinds, elapsed, err := probeInput(doc, boot, positional[0], log)
 	if err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge probe: %v\n", err)
 		return exitFailure
@@ -91,10 +94,14 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 
 	var out bytes.Buffer
 	for _, s := range samples {
-		fmt.Fprintf(&out, "%s\t%s\t%s\t%s\t%s\n", s.Device, s.Signal, formatValue(s.Value), kindName(s.Value.Kind), s.Quality)
+		fmt.Fprintf(&out, "%s\t%s\t%s\t%s\t%s", s.Device, s.Signal, formatValue(s.Value), kindName(s.Value.Kind), s.Quality)
+		if kind := kinds[mqtt.PointRef{Device: s.Device, Signal: s.Signal}]; kind != "" {
+			fmt.Fprintf(&out, "\t%s", kind)
+		}
+		out.WriteByte('\n')
 	}
 	for _, p := range pointsWithoutSample(doc, positional[0], samples) {
-		fmt.Fprintf(&out, "%s\t%s\t%s\n", p[0], p[1], probeNoMessage)
+		fmt.Fprintf(&out, "%s\t%s\t%s\n", p[0], p[1], cmp.Or(kinds[mqtt.PointRef{Device: p[0], Signal: p[1]}], probeNoMessage))
 	}
 	fmt.Fprintf(&out, "response time: %s\n", elapsed.Round(time.Microsecond))
 	if _, err := stdout.Write(out.Bytes()); err != nil {
@@ -107,8 +114,17 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 
 // probeNoMessage stands, in a probe line, for the value, the type and the
 // quality of a point the driver returned no sample for (an mqtt topic that
-// stayed silent until the timeout).
+// stayed silent until the timeout). An mqtt point that has no sample for a
+// known reason shows that reason instead (payload_too_large,
+// subscribe_refused, "no value at path"), and a bad sample of an mqtt point
+// ends with the read error kind that made it bad.
 const probeNoMessage = "no message"
+
+// pointKindProber is an input that says why a point has no good sample: the
+// mqtt input.
+type pointKindProber interface {
+	ProbePoints(ctx context.Context) ([]model.Sample, map[mqtt.PointRef]string, error)
+}
 
 // pointsWithoutSample returns the device and signal of the points of input id
 // that have no sample, in the order of the document.
@@ -186,10 +202,11 @@ func probeBootstrap(doc config.Document, boot bootstrap.File, id, configFile, bo
 }
 
 // probeInput builds the input id of doc and reads every point once. The
-// elapsed time is the response time of that read. Passwords resolve from
-// the environment and files of this process; log receives the drivers'
-// warnings.
-func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) ([]model.Sample, time.Duration, error) {
+// elapsed time is the response time of that read; kinds says, for an input
+// that can (pointKindProber), why a point has no good sample. Passwords
+// resolve from the environment and files of this process; log receives the
+// drivers' warnings.
+func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) (samples []model.Sample, kinds map[mqtt.PointRef]string, elapsed time.Duration, err error) {
 	var cfg *config.Input
 	for i := range doc.Inputs {
 		if doc.Inputs[i].ID == id {
@@ -199,23 +216,25 @@ func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.L
 		}
 	}
 	if cfg == nil {
-		return nil, 0, fmt.Errorf("the configuration has no input %q (inputs: %s)", id, inputIDs(doc))
+		return nil, nil, 0, fmt.Errorf("the configuration has no input %q (inputs: %s)", id, inputIDs(doc))
 	}
 
 	if strings.HasPrefix(cfg.Driver, plugin.DriverPrefix) {
-		return probePlugin(doc, boot, *cfg, log)
+		samples, elapsed, err := probePlugin(doc, boot, *cfg, log)
+
+		return samples, nil, elapsed, err
 	}
 
 	factory := inputDrivers(boot, secrets.NewResolver(), log, nil)[cfg.Driver]
 	if factory == nil {
-		return nil, 0, fmt.Errorf("input %q: driver %s is not available in this build", id, cfg.Driver)
+		return nil, nil, 0, fmt.Errorf("input %q: driver %s is not available in this build", id, cfg.Driver)
 	}
 
 	clk := clock.Real()
 
 	in, err := factory(*cfg, clk)
 	if err != nil {
-		return nil, 0, fmt.Errorf("input %q: %w", id, err)
+		return nil, nil, 0, fmt.Errorf("input %q: %w", id, err)
 	}
 	defer func() { _ = in.Close() }()
 
@@ -224,12 +243,16 @@ func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.L
 
 	start := clk.Now()
 
-	samples, err := in.Probe(ctx)
+	if prober, ok := in.(pointKindProber); ok {
+		samples, kinds, err = prober.ProbePoints(ctx)
+	} else {
+		samples, err = in.Probe(ctx)
+	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("input %q: %w", id, err)
+		return nil, nil, 0, fmt.Errorf("input %q: %w", id, err)
 	}
 
-	return samples, clk.Now().Sub(start), nil
+	return samples, kinds, clk.Now().Sub(start), nil
 }
 
 // pluginStopTimeout bounds the stop of the plugin process, which has its own
