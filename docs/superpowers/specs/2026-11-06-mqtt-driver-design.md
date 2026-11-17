@@ -168,7 +168,7 @@ per message (section 7).
 ## 7. Sparkplug B (plan 2)
 
 **Amendments of 2026-11-17** (plan 2, `../plans/2026-11-17-mqtt-sparkplug-b.md`, decisions S1b, S2, S3, S6, S10,
-S13 and S14 and the rulings of its execution). They refine what follows, which is kept as first written:
+S13 and S14 and the rulings of its execution, R11 and R12 included). They refine what follows, which is kept as first written:
 
 - **Subscriptions (S1b, amended by ruling R3).** The two filters below were refined twice. The first
   amendment added the node filter for every target, since a device alone would miss the NBIRTH (`bdSeq`, aliases)
@@ -198,9 +198,13 @@ S13 and S14 and the rulings of its execution). They refine what follows, which i
   expected; an NDEATH ends it; a message without `seq` ends the node's tracking until the next one. An NBIRTH
   clears the node's aliases and a DBIRTH overwrites those of its device; aliases are kept per node and device
   (ruling R6, equivalent for conforming nodes).
-- **Rebirth (S11, S13, S14, rulings R7).** The request is an `NCMD` at QoS 0, not retained, built in production
+- **Rebirth (S11, S13, S14, rulings R7 and R12).** The request is an `NCMD` at QoS 0, not retained, built in production
   code; the running input logs a failed publish at debug, `probe` and `browse` at warn. `probe` and `browse`
   publish a rebirth, one per addressed node, only with `rebirth: true`; with `false` nothing is published.
+  `probe` asks every addressed node once subscribed. S14 first had `browse` ask each node at its first message
+  in the window, which with the default filter `spBv1.0/#` reached every node on the broker; ruling R12
+  (2026-11-17) narrows it to the nodes the input's points address, at their first message, and lists the other
+  nodes without writing to them.
   `probe` shows `unknown_alias`, `malformed_payload`, `payload_too_large` or `subscribe_refused` for a point with
   no sample.
 - **Float and Double (ruling R9).** A whole, in-range Float or Double also converts to an integer point type, a fraction or

@@ -521,8 +521,9 @@ plant/line-2  3 msg  -  1 malformed
   `int16`, Int32 `int32`, Int64 and DateTime `int64`, UInt8 and UInt16 `uint16`, UInt32 `uint32`, UInt64
   `uint64`, Float `float32`, Double `float64`, Boolean `bool`, String, Text and UUID `string`, and
   `unsupported:<DataType name>` for the rest. A node that was not born in the window lists no metrics: browse
-  longer, or with `rebirth: true`, which makes browse publish one rebirth to each node at its first message in
-  the window.
+  longer, or with `rebirth: true`, which makes browse publish one rebirth to each node the input's points
+  address, at its first message in the window. A node no point addresses is listed but never written to, even
+  with the default filter, which shows every node on the broker: a rebirth is a write to someone else's equipment.
 - Neither command writes anything with `rebirth: false`, the default.
 
 ## Running plugins

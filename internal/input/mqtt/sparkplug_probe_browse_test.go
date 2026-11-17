@@ -268,29 +268,50 @@ func TestBrowseSparkplugListsEntriesAndMetrics(t *testing.T) {
 	}
 }
 
-func TestBrowseSparkplugRebirthPublishesOneNCMDPerNodeSeen(t *testing.T) {
+// TestBrowseSparkplugRebirthAsksOnlyAddressedNodes (ruling R12): with
+// rebirth on, browse asks a rebirth of a node the input's points address at
+// its first message, and lists a node no point addresses without writing to
+// it. The unaddressed node publishes first: the requests are published in
+// order on one connection, so one wrongly made for it would reach the broker
+// before the addressed node's.
+func TestBrowseSparkplugRebirthAsksOnlyAddressedNodes(t *testing.T) {
 	b := mqtttest.Start(t, mqtttest.Options{})
-	publishBrowseFixture(b)
-
 	in, clk, events := newCommandInput(t, sparkplugInput(t, "line", b, map[string]any{"rebirth": true}, sparkplugDevices()...), Options{})
 	id := in.clientID + "-browse"
-	browseSparkplug(t, in, DefaultSparkplugBrowseFilter, 3, events, func() {
-		b.WaitPublished(id, 2)
-		clk.BlockUntil(t, 1)
-		clk.Advance(time.Second)
-	})
+
+	type result struct {
+		entries []SparkplugEntry
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		e, _, err := in.BrowseSparkplug(t.Context(), DefaultSparkplugBrowseFilter, time.Second)
+		done <- result{e, err}
+	}()
+	b.WaitSubscribed(id, 1)
+
+	b.Publish("spBv1.0/g/NDATA/n2", payload(nil, temp(1, 1)), false, 1)
+	waitFor(t, events, traceBrowseMessage, 1)
+	b.Publish("spBv1.0/g/NBIRTH/n1", payload(ptr(uint64(0)), mqtttest.BdSeq(1), temp(1, 20.5)), false, 1)
+	b.Publish("spBv1.0/g/NDATA/n1", payload(ptr(uint64(1)), temp(1, 21)), false, 1)
+	b.WaitPublished(id, 1)
+	clk.BlockUntil(t, 1)
+	clk.Advance(time.Second)
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("BrowseSparkplug: %v", r.err)
+	}
 
 	got := b.Published(id)
-	topics := make([]string, len(got))
-	for i, m := range got {
-		topics[i] = m.Topic
-		if m.QoS != 0 || m.Retain {
-			t.Errorf("NCMD %q: QoS %d retain %v", m.Topic, m.QoS, m.Retain)
-		}
+	if len(got) != 1 || got[0].Topic != "spBv1.0/g/NCMD/n1" || got[0].QoS != 0 || got[0].Retain {
+		t.Errorf("published = %+v, want one QoS 0 NCMD of the addressed node g/n1 only", got)
 	}
-	slices.Sort(topics)
-	if !slices.Equal(topics, []string{"spBv1.0/g/NCMD/n1", "spBv1.0/g/NCMD/n2"}) {
-		t.Errorf("published = %v, want one NCMD per node (n1 has two messages)", topics)
+	listed := make(map[string]int)
+	for _, e := range r.entries {
+		listed[SparkplugTarget{Group: e.Group, Node: e.Node, Device: e.Device}.Key()] = e.Messages
+	}
+	if listed["g/n1"] != 2 || listed["g/n2"] != 1 {
+		t.Errorf("entries = %+v, want g/n1 with two messages and the unaddressed g/n2 listed with one", r.entries)
 	}
 }
 

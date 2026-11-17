@@ -360,8 +360,10 @@ type SparkplugEntry struct {
 // returns one entry per node and device seen, sorted by group, node and
 // device, and whether it stopped early at the 1001st entry. NCMD, DCMD and
 // STATE messages are not listed. With rebirth on, it publishes one rebirth
-// request to each node at its first message in the window, and that is its
-// only write; otherwise it never publishes.
+// request to each node the input's points address at the node's first
+// message in the window, and that is its only write (ruling R12): a node no
+// point addresses is listed but never written to. With rebirth off it never
+// publishes.
 func (in *Input) BrowseSparkplug(ctx context.Context, filter string, duration time.Duration) (entries []SparkplugEntry, truncated bool, err error) {
 	if err := CheckFilter(filter); err != nil {
 		return nil, false, fmt.Errorf("mqtt input %q: browse: filter: %w", in.cfg.ID, err)
@@ -376,12 +378,20 @@ func (in *Input) BrowseSparkplug(ctx context.Context, filter string, duration ti
 	}
 
 	var (
-		mu       sync.Mutex
-		found    = make(map[SparkplugTarget]*seen)
-		asked    = make(map[SparkplugTarget]bool)
-		full     = make(chan struct{})
-		rebirths = make(chan SparkplugTarget, BrowseMaxTopics+1)
+		mu    sync.Mutex
+		found = make(map[SparkplugTarget]*seen)
+		asked = make(map[SparkplugTarget]bool)
+		// addressed are the nodes a rebirth may be asked of.
+		addressed = make(map[SparkplugTarget]bool)
+		full      = make(chan struct{})
+		rebirths  = make(chan SparkplugTarget, BrowseMaxTopics+1)
 	)
+
+	if in.conn.Rebirth && in.sparkplug != nil {
+		for _, node := range in.sparkplugNodes() {
+			addressed[node] = true
+		}
+	}
 
 	onMessage := func(topic string, payload []byte, _ bool) {
 		defer in.traceEvent(traceBrowseMessage)
@@ -417,7 +427,7 @@ func (in *Input) BrowseSparkplug(ctx context.Context, filter string, duration ti
 		}
 		e.Messages++
 
-		if node := (SparkplugTarget{Group: target.Group, Node: target.Node}); in.conn.Rebirth && !asked[node] {
+		if node := (SparkplugTarget{Group: target.Group, Node: target.Node}); in.conn.Rebirth && addressed[node] && !asked[node] {
 			asked[node] = true
 			rebirths <- node
 		}
