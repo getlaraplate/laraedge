@@ -230,9 +230,14 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 	mu.Unlock()
 
 	// With rebirth on, the probe asks every addressed node for its births, now
-	// that its subscription is acknowledged; this is its only write (S13).
+	// that its subscription is acknowledged; this is its only write (S13). A
+	// node whose filter the broker refused is not asked: its births could not
+	// reach the probe.
 	if session != nil && in.conn.Rebirth {
-		in.requestRebirths(ctx, c, in.sparkplugNodes())
+		nodes := slices.DeleteFunc(in.sparkplugNodes(), func(node SparkplugTarget) bool {
+			return slices.Contains(refused, sparkplugNodeFilter(node))
+		})
+		in.requestRebirths(ctx, c, nodes)
 	}
 
 	var lostErr error

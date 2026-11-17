@@ -2,6 +2,7 @@ package mqtt
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -190,6 +191,33 @@ func TestProbeSparkplugRebirthPublishesOneNCMDPerNodeAndReadsTheBirths(t *testin
 	}
 }
 
+// TestProbeSparkplugRebirthSkipsARefusedNode: with rebirth on, the probe
+// asks no rebirth of a node whose filter the broker refused. The refused
+// node g/n1 sorts first: the requests are published in order on one
+// connection, so one wrongly made for it would reach the broker before
+// g/n2's.
+func TestProbeSparkplugRebirthSkipsARefusedNode(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{Refuse: []string{"spBv1.0/g/+/n1/#"}})
+	in, _, _ := newCommandInput(t, sparkplugInput(t, "line", b, map[string]any{"rebirth": true}, twoNodeDevices()...), Options{})
+	ctx, cancel := context.WithTimeout(t.Context(), waitTimeout)
+	defer cancel()
+	id := in.clientID + "-probe"
+
+	done := startProbe(t, b, in, ctx)
+	if got := b.WaitPublished(id, 1); got[0].Topic != "spBv1.0/g/NCMD/n2" {
+		t.Fatalf("first published = %+v, want the NCMD of g/n2, none for the refused g/n1", got[0])
+	}
+
+	b.Publish("spBv1.0/g/NBIRTH/n2", payload(ptr(uint64(0)), mqtttest.BdSeq(1), temp(1, 2.5)), false, 1)
+	r := (<-done).check(t)
+	if len(r.samples) != 1 || r.kinds[PointRef{"press", "temp"}] != KindSubscribeRefused {
+		t.Fatalf("probe = %+v, want saw's sample and press refused", r)
+	}
+	if got := b.Published(id); len(got) != 1 {
+		t.Errorf("published = %+v, want the NCMD of g/n2 only", got)
+	}
+}
+
 func TestProbeSparkplugWithoutRebirthPublishesNothing(t *testing.T) {
 	b := mqtttest.Start(t, mqtttest.Options{})
 	in, _, _ := newCommandInput(t, sparkplugInput(t, "line", b, nil, twoNodeDevices()...), Options{})
@@ -265,6 +293,30 @@ func TestBrowseSparkplugListsEntriesAndMetrics(t *testing.T) {
 			got.Born != want[i].Born || got.Malformed != want[i].Malformed || !slices.Equal(got.Metrics, want[i].Metrics) {
 			t.Errorf("entry %d = %+v, want %+v", i, got, want[i])
 		}
+	}
+}
+
+// TestBrowseSparkplugListsTheNodeOfADeviceOnlyNode: a node seen only
+// through its devices' messages has its own entry, not born and without
+// messages of its own, so every device line has its node line.
+func TestBrowseSparkplugListsTheNodeOfADeviceOnlyNode(t *testing.T) {
+	b := mqtttest.Start(t, mqtttest.Options{})
+	b.Publish("spBv1.0/g/DDATA/n3/d4", payload(ptr(uint64(4)), speed(2, 7)), true, 1)
+	b.Publish("spBv1.0/g/DDATA/n3/d5", payload(ptr(uint64(5)), speed(2, 8)), true, 1)
+
+	in, clk, events := newCommandInput(t, sparkplugInput(t, "line", b, nil, sparkplugDevices()...), Options{})
+	entries, truncated := browseSparkplug(t, in, DefaultSparkplugBrowseFilter, 2, events, func() {
+		clk.BlockUntil(t, 1)
+		clk.Advance(time.Second)
+	})
+
+	want := []SparkplugEntry{
+		{Group: "g", Node: "n3"},
+		{Group: "g", Node: "n3", Device: "d4", Messages: 1},
+		{Group: "g", Node: "n3", Device: "d5", Messages: 1},
+	}
+	if truncated || !reflect.DeepEqual(entries, want) {
+		t.Fatalf("entries = %+v, truncated %v, want %+v", entries, truncated, want)
 	}
 }
 

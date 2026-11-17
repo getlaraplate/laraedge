@@ -494,9 +494,11 @@ line-1-drive	running	no message
 
 - `probe` subscribes to the filters of the document and decodes the messages as the running input does. A point
   shows its first sample, or the reason it has none: `unknown_alias` (data by alias arrived, no birth in the
-  window), `malformed_payload`, `payload_too_large`, `subscribe_refused` or `no message`. With `rebirth: true` it
-  publishes one rebirth request per addressed node once subscribed, so the births arrive within its wait; that
-  is the only thing it writes. The running agent sees those births too and only learns from them.
+  window), `malformed_payload`, `payload_too_large`, `subscribe_refused` or `no message`. An unknown alias
+  cannot be mapped to a metric name, so `unknown_alias` is shown for every point of that node or device without
+  a sample. With `rebirth: true` it publishes one rebirth request per addressed node once subscribed, except a
+  node whose filter the broker refused, so the births arrive within its wait; that is the only thing it writes.
+  The running agent sees those births too and only learns from them.
 
 ```bash
 laraplate-edge browse sparkplug --config config.yaml --bootstrap bootstrap.yaml --duration 20s
@@ -512,10 +514,12 @@ plant/line-1/drive  17 msg  born
 plant/line-2  3 msg  -  1 malformed
 ```
 
-- The default filter is `spBv1.0/#` (a Sparkplug input) and `--filter` and `--duration` work as for JSON.
+- The default filter is `spBv1.0/#` (a Sparkplug input) and `--filter` and `--duration` work as for JSON. The
+  scan stops after 1000 lines of nodes and devices with `... stopped after 1000 entries`.
 - One line per group, node and device seen: `<group>/<edge_node>[/<device>]`, the number of messages, `born`
   when a birth was seen in the window (`-` otherwise) and, when there were any, the number of `malformed`
-  payloads.
+  payloads. A node seen only through its devices' messages has its own line too, `0 msg  -`, so every device
+  line follows the line of its node.
 - Each entry that had a birth is followed by one indented line per metric of the birth, `<address>  <type>`,
   sorted: the address is ready to copy into a point, and the type is the suggested point `type`: Int8 and Int16
   `int16`, Int32 `int32`, Int64 and DateTime `int64`, UInt8 and UInt16 `uint16`, UInt32 `uint32`, UInt64
