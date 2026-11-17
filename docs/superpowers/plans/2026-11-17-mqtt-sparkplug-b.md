@@ -1,5 +1,5 @@
 ---
-status: open
+status: closed
 created_on: 2026-11-17
 ---
 # MQTT driver, Sparkplug B. Implementation Plan
@@ -359,9 +359,105 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - section 6 gains `malformed_payload` (S6);
   - section 7 gains the S3 rule that a Sparkplug death holds until the next birth, the S2 refusals, the node filter of S1b, the reset of `seq` at reconnection, and probe and browse publishing a rebirth only with `rebirth: true`;
   - the status line says plan 2 is delivered.
-- [ ] **Step 5: Close.**
+- [x] **Step 5: Close.**
   - Tick every box.
   - Set `status: closed`, with a `## Delivery status (date)` section that holds every divergence from this plan and the rulings of the execution.
   - Add the `**Documented in:**` line.
   - Update both INDEX lines.
 - [x] **Step 6: Run the checks, including `go test -tags e2e -race ./internal/e2e/...`; commit** `docs(mqtt): document Sparkplug B and close plan 2`.
+
+## Delivery status (2026-11-17): shipped
+
+`format: sparkplug_b` is delivered on branch `docs/mqtt-sparkplug-plan` (PR getlaraplate/laraedge#17). It was executed
+subagent-driven: each task had its own review, then a whole-branch review was followed by one fix wave and a scoped
+re-review. `go test -race ./...`, `GOARCH=386 go test ./...`, `GOOS=windows go vet ./...` and
+`go test -tags e2e -race ./internal/e2e/...` pass. The mqtt package passes `-race -count=20`.
+
+- **Divergences from the text above.** The controller rulings below record why each was taken.
+  - **Subscriptions (R3, amends S1b and Task 1).** There is one filter, `spBv1.0/<group>/+/<edge_node>/#`, per
+    node, not per-node and per-device filters. Sparkplug's `seq` is shared by a node and all its devices, so
+    subscribing only the addressed devices made every message look like a gap.
+  - **Unaddressed devices (R3, R5).** A message of a device no point addresses is handled without samples. It still
+    takes part in `seq` and alias tracking, and its `sequence_gap` and `malformed_payload` are counted.
+  - **Missed births (R11, amends S3).** A death no longer holds a target until its next birth when data arrives.
+    Data for a target held dead by a Sparkplug death is a missed birth: the target comes back online, the samples
+    are emitted, a rebirth is asked when `rebirth` is true, and the new read error kind `missed_birth` is counted.
+    The final review found the case: a QoS 1 NDEATH Will was replayed from the persistent session after the QoS 0
+    births were lost, and it held a live node dead for good.
+  - **browse (R12, amends S14).** `browse` asks a rebirth only of the nodes the input's points address, not of
+    every node it sees.
+  - **Values and logs (R9, R7).** A whole, in-range Float or Double converts to integer point types. `probe` and
+    `browse` log a failed rebirth publish at warn.
+  - **Device entries (R1).** Device entries with one name in an input are one agent device for S2.
+  - **Aliases (R6).** Aliases are kept per node and device.
+  - **Refused subscriptions.** They are format-aware: a refused node filter affects only that node's devices, and
+    `subscribe_refused` is counted once per point.
+- **Not done, deferred (minor, triaged by the final review as safe to keep).**
+  - **Task 2:**
+    - `decodeMetric`'s `ok` flag;
+    - two redundant float-bits wrappers in `mqtttest`;
+    - no test of an integer datatype into a `bool` or `string` point.
+  - **Task 3:**
+    - no test of a malformed payload from an unaddressed device;
+    - no test of a metric's own datatype overriding a learnt one;
+    - a topic-suffix check in one test;
+    - a null metric with an implausible timestamp reports `bad_timestamp`;
+    - the `RebirthNodes` doc does not say that `now` is the publish time.
+  - **Task 4:**
+    - the rebirth queue is not deduplicated across a reconnection (two NCMD back to back at most);
+    - the agent's own NCMD comes back through the node filter and is dropped as ignored.
+  - **Task 5:**
+    - `mapKeysOf` duplicates `maps.Keys`;
+    - `ParseConnection` is called twice in the `browse` command;
+    - a node seen only through its devices has no `browse` entry;
+    - the truncation text says "topics";
+    - `unknown_alias` is attributed to every point without a sample of a target;
+    - the probe rebirth also goes to a node whose filter was refused.
+  - **Task 6:**
+    - the e2e test depends on the default client id and a single SUBSCRIBE packet;
+    - one overlong line in CONFIGURATION.md.
+  - **Parked by the controller (R13, R14).** A DBIRTH under a node held dead revives only its device, and the
+    node's next NDATA revives the node. A DDEATH of an unaddressed device marks nothing.
+- **Declared limit.** The mochi test broker does not deliver retained node-level messages to a `.../<node>/#`
+  filter, so the tests publish node messages after the subscription. Real brokers match per the MQTT standard.
+  Brokers other than mochi stay untested in CI, as in plan 1.
+
+**Documented in:** `docs/CONFIGURATION.md` ("The `mqtt` driver", "Sparkplug B"), `docs/USAGE.md` ("MQTT brokers",
+"Reading the points once: `probe`", "Finding the topics and paths: `browse`", "Sparkplug B", Metrics,
+Troubleshooting), `examples/mqtt/config.yaml`, and the amendments of 2026-11-17 to spec sections 6 and 7.
+
+## Controller rulings (subagent-driven execution, 2026-11-17)
+
+Each ruling gives what was decided, why, and what it costs if wrong.
+
+- **P1. The branch.** The work is on `docs/mqtt-sparkplug-plan`, the branch of PR #17, because the user asked for
+  the commits there. If wrong: a rename of the branch.
+- **R1. Device entries of one name.** Entries with one device name in an input are one agent device: all their
+  points address one target, and the same-metric check spans them. The configuration allows such entries. If
+  wrong: a stricter refusal later.
+- **R2. Float32 and narrow unsigned values.** A float32 is formatted with bitSize 32, and UInt8 and UInt16 values
+  are checked against their own width, both in the same conversion fix. If wrong: two test rows.
+- **R3. One filter per node.** The filter is `spBv1.0/<group>/+/<edge_node>/#`, and unaddressed devices are handled
+  silently, because `seq` is shared by a node and its devices. If wrong: more broker traffic for nodes with many
+  unused devices.
+- **R4. Missing `seq` and DBIRTH aliases.** A message without `seq` ends the node's tracking, and a DBIRTH
+  overwrites the aliases it declares. If wrong: a stale alias resolves until the next NBIRTH.
+- **R5. Node-level kinds.** `sequence_gap` and `malformed_payload` from an unaddressed device are counted. If wrong:
+  counts a user may not expect.
+- **R6. Alias scope.** Aliases are kept per node and device; resolution is the same for conforming nodes. If wrong:
+  none for conforming nodes.
+- **R7. Log level of a failed rebirth.** `probe` and `browse` log it at warn; the running input logs it at debug.
+  If wrong: one log level.
+- **R8. Who closes the plan.** The controller closes the plan after the final review. If wrong: none.
+- **R9. Whole floats.** A whole, in-range Float or Double converts to integer point types; the JSON text `3.0`
+  stays refused. If wrong: a stricter refusal later.
+- **R10. A docs-only fix round.** The controller read the fix diff of Task 6, and the final review covered it. If
+  wrong: a wording slip.
+- **R11. Missed births.** Data on a target held dead is a missed birth: the target comes back online, the samples
+  are emitted, a rebirth is asked when enabled, and `missed_birth` is counted. If wrong: a reordered sample after a
+  real death briefly revives a device.
+- **R12. Who `browse` asks to rebirth.** Only the nodes the input addresses. If wrong: `browse` on an input without
+  points cannot trigger births.
+- **R13. DBIRTH under a dead node.** It revives only the device; the node's next NDATA revives the node. If wrong:
+  the node device stays dead until its next NDATA.
+- **R14. DDEATH of an unaddressed device.** It marks nothing. If wrong: one uncounted diagnostic.
