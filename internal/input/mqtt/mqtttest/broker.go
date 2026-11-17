@@ -73,8 +73,8 @@ type Broker struct {
 
 	// refuse are the topic filters refused at subscribe.
 	refuse map[string]bool
-	// clientIDs are the client ids of the CONNECT packets, in order.
-	clientIDs []string
+	// connects are the CONNECT packets received, in order.
+	connects []Connect
 	// hold, when set, holds every SUBSCRIBE until it is released.
 	hold *Hold
 }
@@ -206,13 +206,19 @@ func (b *Broker) SetRefused(filters ...string) {
 	}
 }
 
-// ClientIDs returns the client ids of every CONNECT packet the broker
-// received since the start of the test, in arrival order.
-func (b *Broker) ClientIDs() []string {
+// Connect is what the broker recorded of a CONNECT packet.
+type Connect struct {
+	ClientID     string
+	CleanSession bool
+}
+
+// Connects returns the CONNECT packets the broker received since the start
+// of the test, in arrival order.
+func (b *Broker) Connects() []Connect {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	return append([]string(nil), b.clientIDs...)
+	return append([]Connect(nil), b.connects...)
 }
 
 // HoldSubscriptions makes the broker hold every SUBSCRIBE, and so its
@@ -388,7 +394,7 @@ func (h *ackHook) OnQosComplete(cl *mochi.Client, _ packets.Packet) {
 	h.broker.acknowledged(cl.ID)
 }
 
-// recordHook records the client id of every CONNECT and holds the
+// recordHook records every CONNECT and holds the
 // SUBSCRIBE packets while a Hold is set.
 type recordHook struct {
 	mochi.HookBase
@@ -401,11 +407,11 @@ func (h *recordHook) Provides(b byte) bool {
 	return b == mochi.OnConnect || b == mochi.OnSubscribe
 }
 
-func (h *recordHook) OnConnect(cl *mochi.Client, _ packets.Packet) error {
+func (h *recordHook) OnConnect(_ *mochi.Client, pk packets.Packet) error {
 	h.broker.mu.Lock()
 	defer h.broker.mu.Unlock()
 
-	h.broker.clientIDs = append(h.broker.clientIDs, cl.ID)
+	h.broker.connects = append(h.broker.connects, Connect{ClientID: pk.Connect.ClientIdentifier, CleanSession: pk.Connect.Clean})
 
 	return nil
 }

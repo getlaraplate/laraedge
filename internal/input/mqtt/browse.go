@@ -41,16 +41,18 @@ type PathPreview struct {
 // BrowseEntry is one topic seen by browse. Messages counts what arrived;
 // Retained and Size are those of the last message. For a JSON object or
 // list, Paths lists its leaves sorted, object keys by name and list items by
-// index (at most 100); otherwise, and for a payload above max_payload
-// nothing, Text is the escaped preview of the payload. Topic and the previews hold the raw text: escape the topic with
-// Escape before printing it.
+// index (at most 100), and MorePaths counts the leaves beyond those;
+// otherwise, and for a payload above max_payload nothing, Text is the
+// escaped preview of the payload. Topic and the previews hold the raw text:
+// escape the topic with Escape before printing it.
 type BrowseEntry struct {
-	Topic    string
-	Messages int
-	Retained bool
-	Size     int
-	Paths    []PathPreview
-	Text     string
+	Topic     string
+	Messages  int
+	Retained  bool
+	Size      int
+	Paths     []PathPreview
+	MorePaths int
+	Text      string
 }
 
 // CheckFilter reports why filter is not a valid MQTT topic filter, as a fixed
@@ -122,9 +124,9 @@ func (in *Input) Browse(ctx context.Context, filter string, duration time.Durati
 		e.Messages++
 		e.Retained = retained
 		e.Size = len(payload)
-		e.Paths, e.Text = nil, ""
+		e.Paths, e.MorePaths, e.Text = nil, 0, ""
 		if len(payload) <= in.conn.MaxPayload {
-			e.Paths, e.Text = describePayload(topic, payload)
+			e.Paths, e.MorePaths, e.Text = describePayload(topic, payload)
 		}
 
 		in.traceEvent(traceBrowseMessage)
@@ -168,33 +170,37 @@ func (in *Input) Browse(ctx context.Context, filter string, duration time.Durati
 	return entries, truncated, nil
 }
 
+// leaves collects the JSON leaves of a payload: the first browseMaxPaths,
+// and the count of the others.
+type leaves struct {
+	paths []PathPreview
+	more  int
+}
+
 // describePayload returns the JSON leaves of a payload that is an object or a
-// list, or else the preview of the payload text.
-func describePayload(topic string, payload []byte) ([]PathPreview, string) {
+// list, at most browseMaxPaths, with the count of the leaves beyond them, or
+// else the preview of the payload text.
+func describePayload(topic string, payload []byte) ([]PathPreview, int, string) {
 	if v, ok := parseJSON(payload); ok {
 		switch v.(type) {
 		case map[string]any, []any:
-			var paths []PathPreview
-			collectLeaves(v, nil, topic, &paths)
-			if len(paths) > 0 {
-				return paths, ""
+			var out leaves
+			collectLeaves(v, nil, topic, &out)
+			if len(out.paths) > 0 {
+				return out.paths, out.more, ""
 			}
 		}
 	}
 
 	head := payload[:min(len(payload), 4*PreviewMax)]
 
-	return nil, preview(string(head), false)
+	return nil, 0, preview(string(head), false)
 }
 
-// collectLeaves appends the scalar leaves of v, depth first, objects in key
+// collectLeaves adds the scalar leaves of v, depth first, objects in key
 // order. A key that is empty or holds a dot has no dot path and is skipped; an
 // empty object or list is a leaf.
-func collectLeaves(v any, path []string, topic string, out *[]PathPreview) {
-	if len(*out) >= browseMaxPaths {
-		return
-	}
-
+func collectLeaves(v any, path []string, topic string, out *leaves) {
 	switch node := v.(type) {
 	case map[string]any:
 		if len(node) == 0 {
@@ -238,12 +244,15 @@ func mapKeys(m map[string]any) func(yield func(string) bool) {
 	}
 }
 
-func addLeaf(path []string, topic, text string, out *[]PathPreview) {
-	if len(path) == 0 || len(*out) >= browseMaxPaths {
-		return
+// addLeaf adds the leaf at path, or counts it once browseMaxPaths are kept.
+func addLeaf(path []string, topic, text string, out *leaves) {
+	switch {
+	case len(path) == 0:
+	case len(out.paths) >= browseMaxPaths:
+		out.more++
+	default:
+		out.paths = append(out.paths, PathPreview{Address: topic + "|" + strings.Join(path, "."), Preview: text})
 	}
-
-	*out = append(*out, PathPreview{Address: topic + "|" + strings.Join(path, "."), Preview: text})
 }
 
 // preview escapes s and cuts it to PreviewMax characters, ending with "..."

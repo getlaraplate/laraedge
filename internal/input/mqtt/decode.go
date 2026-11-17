@@ -71,12 +71,27 @@ func Plan(cfg config.Input, conn Connection) (map[string]*TopicPlan, error) {
 	return plans, nil
 }
 
+// NoValueAtPath is what probe says of a point whose path is missing from the
+// message of its topic. It is not a read error kind: the running input
+// counts nothing for it.
+const NoValueAtPath = "no value at path"
+
 // Decode turns one message payload into samples. received is the sample time
 // when the topic has no timestamp spec. errs holds one read error kind per
 // failure: one malformed_json and one bad_timestamp per message, one conversion
 // per point. A point whose path is missing from the message gives no sample.
 func Decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample, []string) {
+	samples, errs, _ := decode(plan, payload, received)
+
+	return samples, errs
+}
+
+// decode is Decode that also returns, for every point of the plan in order,
+// why it did not decode: the read error kind of its bad sample, NoValueAtPath
+// when it has no sample, "" for a good sample.
+func decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample, []string, []string) {
 	var errs []string
+	pointKinds := make([]string, len(plan.Points))
 
 	needsJSON := plan.Timestamp != nil
 	for _, pp := range plan.Points {
@@ -100,17 +115,21 @@ func Decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample
 			}
 			errs = append(errs, KindBadTimestamp)
 			samples := make([]model.Sample, 0, len(plan.Points))
-			for _, pp := range plan.Points {
+			for i, pp := range plan.Points {
 				samples = append(samples, badSample(pp, ts))
+				pointKinds[i] = KindBadTimestamp
+				if pp.Path != nil && !validJSON {
+					pointKinds[i] = KindMalformedJSON
+				}
 			}
-			return samples, errs
+			return samples, errs, pointKinds
 		}
 		ts = t.UTC()
 	}
 
 	var samples []model.Sample
 	malformedReported := false
-	for _, pp := range plan.Points {
+	for i, pp := range plan.Points {
 		var v model.Value
 		var ok bool
 		switch {
@@ -122,10 +141,12 @@ func Decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample
 				malformedReported = true
 			}
 			samples = append(samples, badSample(pp, ts))
+			pointKinds[i] = KindMalformedJSON
 			continue
 		default:
 			raw, found := walk(doc, pp.Path)
 			if !found {
+				pointKinds[i] = NoValueAtPath
 				continue
 			}
 			v, ok = convertJSON(pp.Point.Type, raw)
@@ -133,11 +154,12 @@ func Decode(plan *TopicPlan, payload []byte, received time.Time) ([]model.Sample
 		if !ok {
 			errs = append(errs, KindConversion)
 			samples = append(samples, badSample(pp, ts))
+			pointKinds[i] = KindConversion
 			continue
 		}
 		samples = append(samples, model.Sample{Device: pp.Device, Signal: pp.Signal, TS: ts, Value: v, Quality: model.Good, Priority: pp.Point.Priority})
 	}
-	return samples, errs
+	return samples, errs, pointKinds
 }
 
 func payloadTime(spec *TimestampSpec, doc any, validJSON bool) (time.Time, bool) {
