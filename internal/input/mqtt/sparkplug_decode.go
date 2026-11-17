@@ -334,8 +334,21 @@ func metricValue(m spMetric, datatype uint32, pointType string) (model.Value, st
 			text = strconv.FormatInt(int64(int16(u)), 10)
 		case spInt32:
 			text = strconv.FormatInt(int64(int32(u)), 10)
+		case spUInt8:
+			if u > math.MaxUint8 {
+				return model.Value{}, KindConversion
+			}
+			text = strconv.FormatUint(u, 10)
+		case spUInt16:
+			if u > math.MaxUint16 {
+				return model.Value{}, KindConversion
+			}
+			text = strconv.FormatUint(u, 10)
 		default:
-			text = strconv.FormatUint(uint64(uint32(u)), 10)
+			if u > math.MaxUint32 {
+				return model.Value{}, KindConversion
+			}
+			text = strconv.FormatUint(u, 10)
 		}
 	case spInt64:
 		if m.Value.Field != spFieldLong {
@@ -356,7 +369,17 @@ func metricValue(m spMetric, datatype uint32, pointType string) (model.Value, st
 		if m.Value.Field != want || math.IsNaN(f) || math.IsInf(f, 0) {
 			return model.Value{}, KindConversion
 		}
-		text = strconv.FormatFloat(f, 'g', -1, 64)
+		bits := 64
+		if datatype == spFloat {
+			bits = 32
+		}
+		// Integer points need plain digits: 'g' switches to an exponent at
+		// 1e6, which the integer parse refuses.
+		format := byte('g')
+		if pointType != "float32" && pointType != "float64" {
+			format = 'f'
+		}
+		text = strconv.FormatFloat(f, format, -1, bits)
 	case spBoolean:
 		if m.Value.Field != spFieldBool || pointType != "bool" {
 			return model.Value{}, KindConversion
