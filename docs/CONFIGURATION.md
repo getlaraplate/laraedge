@@ -502,9 +502,10 @@ writes its own lines through the standard logger: the agent sends them to its lo
 ### The `mqtt` driver
 
 Subscribes to an MQTT broker (MQTT 3.1.1, over TCP or TLS) and turns the messages that devices and gateways
-publish into typed samples. The driver is read-only: it subscribes and never publishes a message. In this
-build the payloads are JSON (values read through a path) and plain text (the whole payload is the value);
-Sparkplug B comes with a later plan. `examples/mqtt` is a complete document; [USAGE.md](USAGE.md#mqtt-brokers)
+publish into typed samples. The driver is read-only: it subscribes and publishes nothing, with one exception:
+the Sparkplug B rebirth request of `rebirth: true` (see "Sparkplug B"). The payloads are JSON (values read
+through a path), plain text (the whole payload is the value) or, with `format: sparkplug_b`, Sparkplug B.
+`examples/mqtt` is a complete document; [USAGE.md](USAGE.md#mqtt-brokers)
 describes the `probe` and `browse` commands that go with it.
 
 **Connection.** An unknown field in `connection`, `auth`, `tls`, `timestamp` or an `availability` entry is an
@@ -520,7 +521,8 @@ false`.
 | `client_id` | `laraplate-edge-<agent_id>-<input_id>` | the MQTT client id. It must be unique on the broker: a second client with the same id makes the broker disconnect the first. Two `mqtt` inputs of one document with the same broker (scheme, host and port, the default port filled in) and the same client id are refused (see "Client id uniqueness"). |
 | `auth` | anonymous | `anonymous`, or `{user, password}` with `password` a `secret://` reference |
 | `tls` | the system CA pool | `{ca_file, cert_file, key_file, server_name}`, all optional; mutual TLS needs `cert_file` and `key_file` together. There is no option to skip the certificate check. Refused with `mqtt://`. |
-| `format` | `json` | `json`, which covers plain payloads too. `sparkplug_b` and `rebirth` are refused by this build (see "What this build refuses"). |
+| `format` | `json` | `json`, which covers plain payloads too, or `sparkplug_b` (see "Sparkplug B"). |
+| `rebirth` | `false` | only with `format: sparkplug_b`: ask a node for a new birth when an alias is unknown or a message is missing (see "Sparkplug B"). Refused with `json` as `connection.rebirth: needs format sparkplug_b`. |
 | `qos` | `1` | the QoS of the subscriptions, `0` or `1` |
 | `persistent_session` | `true` | a session the broker keeps (clean session false): with QoS 1 it holds the messages published while the agent is down and delivers them at the next start, so a restart loses nothing |
 | `keepalive` | `30s` | the MQTT keep alive, a positive duration |
@@ -644,11 +646,146 @@ cloned machine running with the same `agent_id`) nothing can be checked in advan
 a row drop less than 5 seconds after they were made, the input logs one warning that another client may be
 using its `client_id`, naming the id; it warns again only after a connection that lasted 5 seconds or more.
 
+### Sparkplug B
+
+`connection.format: sparkplug_b` reads Sparkplug B (protobuf payloads under the
+namespace `spBv1.0`) instead of JSON. Everything under "Connection" holds, except what the table below
+lists as refused. The agent decodes the payloads itself, follows the births and deaths of the edge nodes and
+their devices, and turns the metrics into samples of the points.
+
+**Address.** `<group>/<edge_node>[/<device>]|<metric>`, split at the first `|`.
+
+- The part before `|` has two levels (a metric of the edge node) or three (a metric of one of its Sparkplug
+  devices), each non-empty and without `+`, `#` or `/`.
+- The metric is the Sparkplug metric name, any non-empty string. It may contain `/` (`Node Control/Rebirth`)
+  and a later `|`.
+- `plant/line-1|Line/Speed` is the metric `Line/Speed` of the edge node `line-1` of the group `plant`;
+  `plant/line-1/drive|Motor/Current` is a metric of its device `drive`.
+- A metric is found by its name, or by its alias when the message carries only the alias (see "Aliases").
+
+**One target per agent device.** A target is an edge node (group and edge node) or a Sparkplug device (group,
+edge node and device). Sparkplug births and deaths belong to one target, and an agent device lives and dies
+with its target, so:
+
+- every point of an agent device must address the same target; `devices` entries with the same `device` name
+  are one agent device, so this holds across them;
+- two agent devices may not share a target;
+- two points of one agent device may not address the same metric, entries with that name included.
+
+A document that breaks one of these is refused with a fixed message naming the positions, never an address
+(`devices[1]: points address more than one Sparkplug target`, `devices[1]: same Sparkplug target as
+devices[0]`, `devices[0].points[2]: same metric as devices[0].points[0]`). The points of a node and the points
+of one of its devices are two agent devices.
+
+**What is refused with `sparkplug_b`.**
+
+| Setting | Message |
+|---|---|
+| `timestamp` | `connection.timestamp: not with format sparkplug_b` (Sparkplug carries its own timestamps) |
+| `topics` | `connection.topics: not with format sparkplug_b` |
+| `availability` | `connection.availability: not with format sparkplug_b` (births and deaths are the availability) |
+| `rebirth` with `json` | `connection.rebirth: needs format sparkplug_b` |
+
+`read` is `subscribe` and `type` is required, as for `json`. A point address that is not in the Sparkplug form
+is refused as `address: want <group>/<edge_node>[/<device>]|<metric>`.
+
+**Subscriptions.** The agent subscribes, for every edge node a point addresses, to the one filter
+`spBv1.0/<group>/+/<edge_node>/#`. It takes the node's own messages and those of all its devices, because the
+Sparkplug sequence number `seq` is one counter shared by the node and all its devices: a gap can only be seen
+by reading them all. A node that only devices of the document address is still read as a whole, so the NBIRTH
+and NDEATH of the node reach those devices. The cost is broker traffic: a node with many devices that no point
+addresses still delivers all their messages to the agent. The messages of a device no point addresses are
+handled silently (the sequence number and the aliases are kept up to date) and give no samples and no
+`unmapped` count. A message of a node that no point addresses, or on a topic that is not Sparkplug, is
+`unmapped`. `NCMD`, `DCMD` and `STATE` messages are ignored without a count.
+
+**Births and deaths.** The message types handled are `NBIRTH`, `NDEATH`, `NDATA`, `DBIRTH`, `DDEATH` and
+`DDATA`.
+
+- An NBIRTH puts the agent device of the node alive, and a DBIRTH that of the device; the metrics of the birth
+  that points address give the first samples.
+- An NDEATH puts dead the agent device of the node and every agent device of a Sparkplug device under that
+  node; a DDEATH that of the device only.
+- A device the agent has seen no birth for since it started is alive while the broker is connected, as every
+  `json` device is, because births are not retained and waiting for one would leave every device dead until its
+  node restarts. The broker missing for longer than `death_tolerance` is death, as for `json`.
+- **A death holds until the next birth.** A data message does not revive a device a death put offline: under
+  Sparkplug a death is authoritative. This differs from an availability topic, where a sample revives. The
+  samples of a device held dead are dropped without a count, since after a death they can only be reordered
+  messages.
+- The `bdSeq` metric ties a death to its birth. An NDEATH whose `bdSeq` differs from the last NBIRTH's is the
+  stale Last Will of an earlier session and is ignored. With no NBIRTH seen, or an NDEATH without `bdSeq`, the
+  NDEATH is honoured.
+
+**Aliases.** A birth declares each metric with its name, an alias (a number) and a data type; later data
+messages may carry only the alias. The agent keeps the names, aliases and data types of the births, per
+edge node and device, and resolves a metric by alias through them. An NBIRTH replaces the node's table, a
+DBIRTH replaces the aliases of its device. The tables survive deaths and reconnections. A data metric with an
+alias no birth declared is dropped and counted `unknown_alias`, once per metric: it happens when the agent
+starts after the node's birth (the births are not retained). The node publishes a new birth when asked or when
+it restarts; with `rebirth: true` the agent asks.
+
+**Sequence numbers.** `seq` runs 0 to 255 and wraps. The NBIRTH sets it. For NDATA, DBIRTH, DDATA and DDEATH
+the agent expects the previous value plus one (modulo 256); another value counts `sequence_gap` and becomes
+the last. A message without `seq`, the first message of a node after a connection, and the first one after an
+NDEATH set the last value without a check, and a message without `seq` ends the tracking of that node until
+the next one. A reconnection resets the tracking of every node, since a gap across an outage is expected.
+`sequence_gap` and `malformed_payload` are counted even when the message comes from a device no point
+addresses: they describe the node's stream.
+
+**Rebirth.** With `rebirth: true` (default `false`), an unknown alias or a sequence gap makes the agent publish
+an `NCMD` to `spBv1.0/<group>/NCMD/<edge_node>` with the Boolean metric `Node Control/Rebirth` set to true, at
+QoS 0, not retained, at most once every 30 s per node. The node answers with new births. This is the only
+message the agent ever publishes, and nothing is published with `rebirth: false`. The broker user then needs
+the right to publish on that topic. A failed publish is logged at `debug` and tried again at the next trigger
+after the 30 seconds. `probe` and `browse` publish a rebirth only with `rebirth: true` (see
+[USAGE.md](USAGE.md#sparkplug-b)).
+
+**Values.** Samples follow the lossless rules of "Conversion to the point's `type`", from the metric's
+datatype, which is the one in the message or else the one learnt from the birth.
+
+| Sparkplug datatype | Point `type` that takes it |
+|---|---|
+| Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, DateTime (milliseconds, as an integer) | the integer types, when the value fits (`uint64` above 2^63-1 is `bad`) |
+| Float, Double | `float32` and `float64`, with the rules of `json` |
+| Boolean | `bool` |
+| String, Text, UUID | `string` |
+
+Signed integers are two's complement at the datatype's width. Everything else is a `bad` sample with the read
+error `conversion`: DataSet, Bytes, File, Template, PropertySet, PropertySetList, arrays, an unknown datatype, a
+metric with no datatype, and a value that does not fit the point's type. A metric with `is_null` is a `bad`
+sample and no read error, since it is the device's own report. A `bad` sample carries the zero of the point's
+kind. `is_historical` metrics are ordinary samples.
+
+**Quality.** The `Quality` property of a metric
+sets the sample's quality: 192 and above `good`, 64 to 191 `uncertain`, below 64 `bad`. A property of another
+type is ignored, and no property is `good`.
+
+**Timestamp.** The metric's timestamp, else the payload's, else the arrival time. A timestamp before 1970 or
+after year 9999 makes the sample `bad` with the read error `bad_timestamp`.
+
+**Message outcomes.**
+
+| Case | Result |
+|---|---|
+| The payload is above `max_payload` | dropped, read error `payload_too_large`, before any parsing |
+| The payload is not a Sparkplug B protobuf | dropped, no sample; read error `malformed_payload`, once per message |
+| A data metric with an alias no birth declared | dropped; read error `unknown_alias`, once per metric |
+| `seq` is not the expected one | the messages are handled; read error `sequence_gap` |
+| A metric no point addresses | ignored, no count |
+| A value that does not convert, a datatype that is not scalar | `bad` sample; read error `conversion` |
+| A topic that is not `spBv1.0/<group>/<type>/<node>[/<device>]`, or of a node no point addresses | dropped; read error `unmapped` |
+
+The read error kinds of this format are `unknown_alias`, `sequence_gap` and `malformed_payload`, besides the
+`payload_too_large`, `bad_timestamp`, `conversion`, `unmapped` and `subscribe_refused` kinds of `json`.
+Payload values are never written to a log, as for `json`.
+
 **Read errors.** `read_errors` of `/status` and `laraplate_edge_input_read_errors_total{input, kind}` use the
 kinds below. Like every input that reports its health, an `mqtt` input shows `timeout`, `connection`,
 `exception` and `decode` from the start, at 0; this driver counts only `connection` among them and never
 `timeout`, `exception` or `decode`. The kinds specific to `mqtt` (`payload_too_large`, `malformed_json`,
-`bad_timestamp`, `conversion`, `availability`, `unmapped`, `subscribe_refused`) appear at their first count.
+`bad_timestamp`, `conversion`, `availability`, `unmapped`, `subscribe_refused`, and under `sparkplug_b`
+`unknown_alias`, `sequence_gap`, `malformed_payload`) appear at their first count.
 
 | Kind | Counts |
 |---|---|
@@ -658,7 +795,10 @@ kinds below. Like every input that reports its health, an `mqtt` input shows `ti
 | `bad_timestamp` | a message whose `timestamp` is missing, unreadable, before 1970 or after year 9999, once per message |
 | `conversion` | a value that does not convert to the point's `type`, per point |
 | `availability` | an availability payload that is neither `online` nor `offline` |
-| `unmapped` | a message on a topic no point subscribes to |
+| `unmapped` | a message on a topic no point subscribes to (under `sparkplug_b`: a topic that is not Sparkplug, or of a node no point addresses) |
+| `unknown_alias` | `sparkplug_b`: a data metric with an alias no birth declared, once per metric |
+| `sequence_gap` | `sparkplug_b`: a message whose `seq` does not follow the node's last one |
+| `malformed_payload` | `sparkplug_b`: a payload that is not a Sparkplug B protobuf, once per message |
 | `subscribe_refused` | a point on a topic whose subscription the broker refused, once per connection (once for a refused availability topic) |
 
 Payload values, user names, passwords and broker addresses are never written to the logs at `info` and above.
@@ -678,6 +818,9 @@ warning names the client id.
   recover them. Retained messages still arrive.
 - A device with a Last Will that is not retained is seen only when the broker publishes it: an agent that was
   down at that moment misses the death until the device publishes `online` or data.
+- Sparkplug B: the metrics of a point are scalars only (no DataSet, Template, arrays or bytes); the agent reads
+  data and never writes: no `NCMD` or `DCMD` other than the rebirth request; the Sparkplug 3.0 primary host
+  `STATE` is ignored.
 - Only MQTT 3.1.1 over TCP and TLS: no MQTT 5, no WebSockets. The automated tests run the agent against an
   in-process broker only; try a new broker with `probe` before relying on it.
 
@@ -1139,7 +1282,6 @@ Outcomes, as reported to Laraplate:
 | Part | Comes with |
 |---|---|
 | drivers other than `simulated`, `modbus`, `opcua` and `mqtt` | the driver plans, in the design's order: `serial` and `file` |
-| `connection.format: sparkplug_b` and `connection.rebirth` of an `mqtt` input | the Sparkplug B plan (the second plan of the `mqtt` driver); refused as `connection.format: not available in this build` |
 | output types other than `laraplate-http` and `plugin:<id>` | the MQTT output plan (`laraplate-mqtt`) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references, `outputs[].config` and `processors[].config` included | a later plan with the OS keystore |

@@ -1,8 +1,8 @@
 # MQTT driver: design
 
 **Status:** Approved (2026-11-06), section by section. Plan 1 (`mqtt` with JSON and plain payloads, `../plans/2026-11-06-mqtt-json.md`)
-was delivered on 2026-11-06; Sparkplug B (sections 7 and the rest of 8) is plan 2, `../plans/2026-11-17-mqtt-sparkplug-b.md`,
-written on 2026-11-17 and not yet delivered.
+was delivered on 2026-11-06. Plan 2 (Sparkplug B, sections 7 and the rest of 8, `../plans/2026-11-17-mqtt-sparkplug-b.md`)
+was delivered on 2026-11-17.
 
 **Date:** 2026-11-06
 
@@ -150,14 +150,54 @@ hold the probe. The arrival time is still not shown, R9 of plan 1.)
 **`browse <input> [--filter <topic filter>] [--duration 10s]`:** subscribes to the filter (`#` by default) and, for
 the duration, lists the observed topics with message count, retained flag and size. For JSON payloads it lists
 the leaf paths with a value preview, already in the `topic|path` form to copy into the document; for plain
-payloads a preview of the text.
+payloads a preview of the text. (Amended 2026-11-17 by plan 2: under `sparkplug_b` the default filter is
+`spBv1.0/#` and the output is one entry per group, node and device seen, see section 7.)
 
 **Metrics:** those of the driver kit, `laraplate_edge_input_connected{input}` and
 `laraplate_edge_input_read_errors_total{input,kind}`, with the kinds `payload_too_large`, `malformed_json`,
 `bad_timestamp`, `conversion`, `availability`, `unmapped` and `subscribe_refused` (added 2026-11-17 by the
-follow-up on branch `fix/mqtt-known-limits`); plan 2 adds `unknown_alias` and `sequence_gap`.
+follow-up on branch `fix/mqtt-known-limits`); plan 2 adds `unknown_alias` and `sequence_gap`, and, amended
+2026-11-17 by plan 2 (`../plans/2026-11-17-mqtt-sparkplug-b.md`, decision S6), `malformed_payload`: a payload that
+`protowire` cannot parse is dropped and counted once per message. The spec listed no kind for it. A metric whose
+value field does not match its datatype is a `bad` sample with kind `conversion`, as before. Under `sparkplug_b`,
+`sequence_gap` and `malformed_payload` are counted even when the message comes from a device no point addresses,
+since they describe the stream of the node.
 
 ## 7. Sparkplug B (plan 2)
+
+**Amendments of 2026-11-17** (plan 2, `../plans/2026-11-17-mqtt-sparkplug-b.md`, decisions S1b, S2, S3, S6, S10,
+S13 and S14 and the rulings of its execution). They refine what follows, which is kept as first written:
+
+- **Subscriptions (S1b, amended by ruling R3).** The two filters below were refined twice. The first
+  amendment added the node filter for every target, since a device alone would miss the NBIRTH (`bdSeq`, aliases)
+  and NDEATH of its node. The second replaced the filters with one, `spBv1.0/<group>/+/<edge_node>/#`, per edge
+  node of every target: it takes the node and all its devices, because `seq` is one counter shared by a node and all its devices. The messages of a
+  device no point addresses are handled silently (sequence, aliases), give no samples and are not `unmapped`; a
+  node only devices address is still a known node. The cost is more broker traffic for a node with many unused
+  devices. A message of a node no point addresses, or off the Sparkplug topic shape, is `unmapped`.
+- **One target per agent device (S2, with ruling R1).** Devices entries with one name are one agent device: all
+  its points address one target, no metric twice (the check spans entries), and two agent devices may not share
+  a target. Otherwise the document is refused with a fixed message naming the positions. `timestamp`, `topics` and
+  `availability` are refused with `sparkplug_b`, and `rebirth` with `json`.
+- **Death holds until the next birth (S3).** A Sparkplug death puts the device offline until its next birth: a data message does not revive it
+  (unlike an availability topic), and the samples of a device held offline are dropped uncounted. A device with
+  no birth seen since the agent started is alive while the broker is connected, as every `json` device is, since
+  births are not retained. The tracker gained `Offline` and `Online` for this.
+- **`seq` (S10, with ruling R4).** The tracking is reset at every reconnection, since a gap across an outage is
+  expected; an NDEATH ends it; a message without `seq` ends the node's tracking until the next one. An NBIRTH
+  clears the node's aliases and a DBIRTH overwrites those of its device; aliases are kept per node and device
+  (ruling R6, equivalent for conforming nodes).
+- **Rebirth (S11, S13, S14, rulings R7).** The request is an `NCMD` at QoS 0, not retained, built in production
+  code; the running input logs a failed publish at debug, `probe` and `browse` at warn. `probe` and `browse`
+  publish a rebirth, one per addressed node, only with `rebirth: true`; with `false` nothing is published.
+  `probe` shows `unknown_alias`, `malformed_payload`, `payload_too_large` or `subscribe_refused` for a point with
+  no sample.
+- **`browse` output (S14).** Default filter `spBv1.0/#`. One line per group, node and device seen,
+  `<group>/<node>[/<device>]  <n> msg  born|-` with `  <m> malformed` when there were malformed payloads,
+  followed by indented `  <address>  <type>` lines from the births, with the suggested point type (Int8 and Int16
+  `int16`, Int32 `int32`, Int64 and DateTime `int64`, UInt8 and UInt16 `uint16`, UInt32 `uint32`, UInt64 `uint64`,
+  Float `float32`, Double `float64`, Boolean `bool`, String, Text and UUID `string`, else
+  `unsupported:<DataType name>`).
 
 **Address:** `<group>/<edge_node>[/<device>]|<metric>`. The driver subscribes to `spBv1.0/<group>/+/<edge_node>`
 and `spBv1.0/<group>/+/<edge_node>/<device>` for what the points address. STATE, NCMD and DCMD are ignored. All
