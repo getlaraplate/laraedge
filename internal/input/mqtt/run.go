@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	edgeinput "github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/input/driverkit"
@@ -24,6 +25,45 @@ const (
 	KindSubscribeRefused = "subscribe_refused"
 )
 
+// Thresholds of the duplicate client id warning: flapCount connections in a
+// row lost less than flapWindow after they were established.
+const (
+	flapWindow = 5 * time.Second
+	flapCount  = 3
+)
+
+// msgClientIDTakenOver is the warning logged when the connections keep
+// dropping right after they are established, which is what a broker does to
+// two clients sharing a client id: each connection takes the other's over.
+const msgClientIDTakenOver = "mqtt: the connection keeps dropping right after connecting; another client may be using the same client_id"
+
+// flapDetector counts the connections lost less than flapWindow after they
+// were established. It belongs to the goroutine owning the client.
+type flapDetector struct {
+	streak int
+	warned bool
+}
+
+// lost records a connection lost after it lasted lasted, and reports
+// whether to warn now: at the flapCount-th short one in a row, and again
+// only after a connection that lasted flapWindow or more reset the streak.
+func (f *flapDetector) lost(lasted time.Duration) (warn bool) {
+	if lasted >= flapWindow {
+		f.streak, f.warned = 0, false
+
+		return false
+	}
+
+	f.streak++
+	if f.streak >= flapCount && !f.warned {
+		f.warned = true
+
+		return true
+	}
+
+	return false
+}
+
 // msgSubscribeRefused is the warning logged once per connection for every
 // topic the broker refused to subscribe.
 const msgSubscribeRefused = "mqtt: the broker refused the subscription of a topic; fix the broker ACL, then reload the configuration or restart the agent"
@@ -40,9 +80,10 @@ const (
 // whose subscriptions were acknowledged.
 func (in *Input) run(ctx context.Context, r *router) {
 	backoff := driverkit.NewBackoff(in.clk, in.deps.jitter)
+	var flaps flapDetector
 
 	for {
-		subscribed, err := in.session(ctx, r)
+		subscribed, err := in.session(ctx, r, &flaps)
 		if subscribed {
 			backoff.Reset()
 		}
@@ -70,7 +111,7 @@ func (in *Input) run(ctx context.Context, r *router) {
 // the connection: it is logged, counted, left out of the subscription set
 // so the next connection subscribes it again, and a device whose points are
 // all on refused topics is not kept alive.
-func (in *Input) session(ctx context.Context, r *router) (subscribed bool, err error) {
+func (in *Input) session(ctx context.Context, r *router, flaps *flapDetector) (subscribed bool, err error) {
 	password, err := in.password(ctx)
 	if err != nil {
 		return false, err
@@ -85,9 +126,19 @@ func (in *Input) session(ctx context.Context, r *router) (subscribed bool, err e
 		return false, err
 	}
 	defer c.Disconnect()
+	established := in.clk.Now()
 
 	connCtx, cancel := context.WithCancel(ctx)
 	lost := make(chan struct{})
+	defer func() {
+		select {
+		case <-lost:
+			if flaps.lost(in.clk.Now().Sub(established)) {
+				in.log.Warn(msgClientIDTakenOver, "input", in.cfg.ID, "client_id", in.clientID)
+			}
+		default:
+		}
+	}()
 	var watch sync.WaitGroup
 	watch.Go(func() {
 		select {
