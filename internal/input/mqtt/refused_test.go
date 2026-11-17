@@ -118,8 +118,11 @@ func TestInputRefusedSubscriptionKeepsTheConnection(t *testing.T) {
 		t.Errorf("subscription set = %q, %v, want the accepted topic only", got, err)
 	}
 
-	b.Publish("plant/press/count", []byte("3"), false, 1)
-	h.waitValue("count", model.IntValue(3))
+	// The accepted topic delivers. warmUp, and the acknowledgements reaching
+	// the broker, keep mochi's shared packet ids from colliding with the
+	// SUBSCRIBE of the next connection.
+	warmUp(t, b, h, "plant/press/count", "count")
+	b.WaitAcknowledged("laraplate-edge-agent-line", warmUpMessages)
 
 	// Over the tolerance the vault, never kept alive, dies; the press lives.
 	for range 3 {
