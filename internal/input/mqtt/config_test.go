@@ -227,11 +227,15 @@ func TestParseConnectionRefusals(t *testing.T) {
 		{"auth password bare scheme", `{"broker":"mqtt://b","auth":{"user":"u","password":"secret://"}}`, nil, "connection.auth.password: must be a secret:// reference"},
 		{"client_id not a string", `{"broker":"mqtt://b","client_id":3}`, nil, "connection.client_id: must be a string"},
 		{"client_id empty", `{"broker":"mqtt://b","client_id":""}`, nil, "connection.client_id: must not be empty"},
-		{"format sparkplug_b", `{"broker":"mqtt://b","format":"sparkplug_b"}`, nil, "connection.format: not available in this build"},
 		{"format other", `{"broker":"mqtt://b","format":"xml"}`, nil, "connection.format: want json or sparkplug_b"},
 		{"format not a string", `{"broker":"mqtt://b","format":1}`, nil, "connection.format: must be a string"},
-		{"rebirth true", `{"broker":"mqtt://b","rebirth":true}`, nil, "connection.rebirth: not available in this build"},
-		{"rebirth false", `{"broker":"mqtt://b","rebirth":false}`, nil, "connection.rebirth: not available in this build"},
+		{"rebirth true with json", `{"broker":"mqtt://b","rebirth":true}`, nil, "connection.rebirth: needs format sparkplug_b"},
+		{"rebirth false with json", `{"broker":"mqtt://b","format":"json","rebirth":false}`, nil, "connection.rebirth: needs format sparkplug_b"},
+		{"rebirth null", `{"broker":"mqtt://b","format":"sparkplug_b","rebirth":null}`, nil, "connection.rebirth: must be a boolean"},
+		{"rebirth string", `{"broker":"mqtt://b","format":"sparkplug_b","rebirth":"yes"}`, nil, "connection.rebirth: must be a boolean"},
+		{"sparkplug timestamp", `{"broker":"mqtt://b","format":"sparkplug_b","timestamp":{"path":"t","format":"unix_s"}}`, nil, "connection.timestamp: not with format sparkplug_b"},
+		{"sparkplug topics", `{"broker":"mqtt://b","format":"sparkplug_b","topics":{}}`, nil, "connection.topics: not with format sparkplug_b"},
+		{"sparkplug availability", `{"broker":"mqtt://b","format":"sparkplug_b","availability":[]}`, nil, "connection.availability: not with format sparkplug_b"},
 		{"qos 2", `{"broker":"mqtt://b","qos":2}`, nil, "connection.qos: want 0 or 1"},
 		{"qos negative", `{"broker":"mqtt://b","qos":-1}`, nil, "connection.qos: want 0 or 1"},
 		{"qos fraction", `{"broker":"mqtt://b","qos":0.5}`, nil, "connection.qos: want 0 or 1"},
@@ -414,6 +418,26 @@ func TestCheckPointAcceptsEveryType(t *testing.T) {
 	for _, typ := range []string{"bool", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "string"} {
 		if err := CheckPoint(config.Point{Read: config.Read{Mode: config.ReadSubscribe}, Type: typ}); err != nil {
 			t.Errorf("%s: %v", typ, err)
+		}
+	}
+}
+
+func TestParseConnectionSparkplug(t *testing.T) {
+	tests := []struct {
+		raw     string
+		rebirth bool
+	}{
+		{`{"broker":"mqtt://b","format":"sparkplug_b"}`, false},
+		{`{"broker":"mqtt://b","format":"sparkplug_b","rebirth":true}`, true},
+		{`{"broker":"mqtt://b","format":"sparkplug_b","rebirth":false}`, false},
+	}
+	for _, tt := range tests {
+		c, err := ParseConnection(json.RawMessage(tt.raw), testInput())
+		if err != nil {
+			t.Fatalf("%s: %v", tt.raw, err)
+		}
+		if c.Format != FormatSparkplugB || c.Rebirth != tt.rebirth {
+			t.Errorf("%s: format %q rebirth %v", tt.raw, c.Format, c.Rebirth)
 		}
 	}
 }
