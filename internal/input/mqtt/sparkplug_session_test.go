@@ -276,8 +276,9 @@ func TestSessionNDEATHEndsSeqTracking(t *testing.T) {
 	s.Handle(tNBIRTH, nbirth(5, 0), spStart)
 	s.Handle(tNDEATH, ndeath(ptr(uint64(5))), spStart)
 
-	if r := s.Handle(tNDATA, payload(ptr(uint64(42)), temp(1, 1)), spStart); r.Kinds != nil {
-		t.Fatalf("Kinds after NDEATH = %q, want none", r.Kinds)
+	// The data is a missed birth (ruling R11), never a sequence gap.
+	if r := s.Handle(tNDATA, payload(ptr(uint64(42)), temp(1, 1)), spStart); !reflect.DeepEqual(r.Kinds, []string{KindMissedBirth}) {
+		t.Fatalf("Kinds after NDEATH = %q, want only missed_birth", r.Kinds)
 	}
 }
 
@@ -304,17 +305,118 @@ func TestSessionDDEATHPutsOnlyThatDeviceOffline(t *testing.T) {
 	}
 }
 
-func TestSessionDataDoesNotReviveButBirthDoes(t *testing.T) {
+// TestSessionBirthRevivesAfterADeath: an NBIRTH after an NDEATH puts the
+// node online, and its data is then no missed birth.
+func TestSessionBirthRevivesAfterADeath(t *testing.T) {
 	s, _ := newTestSession(t, false)
 	s.Handle(tNBIRTH, nbirth(1, 0), spStart)
 	s.Handle(tNDEATH, ndeath(ptr(uint64(1))), spStart)
 
-	if r := s.Handle(tNDATA, payload(nil, temp(1, 1)), spStart); r.Online != nil {
-		t.Fatalf("NDATA Online = %q, want none", r.Online)
-	}
 	if r := s.Handle(tNBIRTH, nbirth(2, 0), spStart); !reflect.DeepEqual(r.Online, []string{"press"}) {
 		t.Fatalf("NBIRTH Online = %q, want [press]", r.Online)
 	}
+	if r := s.Handle(tNDATA, payload(ptr(uint64(1)), temp(1, 1)), spStart); r.Online != nil || r.Kinds != nil || len(r.Samples) != 1 {
+		t.Fatalf("NDATA after the NBIRTH = %+v, want one sample, nobody online, no kinds", r)
+	}
+}
+
+// TestSessionReplayedNDEATHThenDataIsAMissedBirth is the persistent session
+// replay of ruling R11: an agent started fresh receives the node's NDEATH
+// queued while it was down, the NBIRTH and DBIRTH (QoS 0) were not queued,
+// and the node publishes data by name. The data puts the node online, its
+// samples are kept, the message counts missed_birth once and, with rebirth
+// on, the node is due one rebirth.
+func TestSessionReplayedNDEATHThenDataIsAMissedBirth(t *testing.T) {
+	node := []SparkplugTarget{{Group: "g", Node: "n1"}}
+
+	for _, rebirth := range []bool{true, false} {
+		t.Run(map[bool]string{true: "rebirth on", false: "rebirth off"}[rebirth], func(t *testing.T) {
+			s, clk := newTestSession(t, rebirth)
+
+			if r := s.Handle(tNDEATH, ndeath(ptr(uint64(1))), spStart); !reflect.DeepEqual(r.Offline, []string{"oven", "press"}) {
+				t.Fatalf("replayed NDEATH Offline = %q, want [oven press]", r.Offline)
+			}
+
+			r := s.Handle(tNDATA, payload(ptr(uint64(5)), temp(0, 21.5)), spStart)
+			if !reflect.DeepEqual(r.Online, []string{"press"}) || !reflect.DeepEqual(r.Kinds, []string{KindMissedBirth}) {
+				t.Fatalf("NDATA = %+v, want press online and one missed_birth", r)
+			}
+			if want := []model.Sample{tempSample(21.5, spStart)}; !reflect.DeepEqual(r.Samples, want) {
+				t.Fatalf("NDATA Samples = %+v, want %+v", r.Samples, want)
+			}
+			got := s.RebirthNodes(clk.Now())
+			if rebirth && !reflect.DeepEqual(got, node) {
+				t.Fatalf("RebirthNodes = %+v, want %+v", got, node)
+			}
+			if !rebirth && got != nil {
+				t.Fatalf("RebirthNodes = %+v, want none with rebirth off", got)
+			}
+
+			// The node is alive again: its next data is no missed birth.
+			if r := s.Handle(tNDATA, payload(ptr(uint64(6)), temp(0, 22)), spStart); r.Online != nil || r.Kinds != nil {
+				t.Fatalf("second NDATA = %+v, want nobody online, no kinds", r)
+			}
+
+			// The device, held dead by the NDEATH too, revives with its own
+			// data; the rebirth is not asked again within 30 s.
+			r = s.Handle(tDDATA, payload(ptr(uint64(7)), speed(0, 9)), spStart)
+			if !reflect.DeepEqual(r.Online, []string{"oven"}) || !reflect.DeepEqual(r.Kinds, []string{KindMissedBirth}) || len(r.Samples) != 1 {
+				t.Fatalf("DDATA = %+v, want oven online, one sample, one missed_birth", r)
+			}
+			if got := s.RebirthNodes(clk.Now()); got != nil {
+				t.Fatalf("RebirthNodes within 30 s = %+v, want none", got)
+			}
+		})
+	}
+}
+
+// TestSessionMissedBirthTargets: which agent devices data held dead by a
+// death puts online, and that a stale NDEATH holds nothing.
+func TestSessionMissedBirthTargets(t *testing.T) {
+	tests := []struct {
+		name   string
+		deaths []string
+		data   string
+		online []string
+		kinds  []string
+	}{
+		{"DDATA under a dead node revives the node and the device", []string{tNDEATH}, tDDATA, []string{"oven", "press"}, []string{KindMissedBirth}},
+		{"NDATA under a dead node revives the node only", []string{tNDEATH}, tNDATA, []string{"press"}, []string{KindMissedBirth}},
+		{"DDATA after a DDEATH revives the device", []string{tDDEATH}, tDDATA, []string{"oven"}, []string{KindMissedBirth}},
+		{"NDATA after a DDEATH is no missed birth", []string{tDDEATH}, tNDATA, nil, nil},
+		{"DDATA after the DBIRTH that followed a death", []string{tDDEATH, tDBIRTH}, tDDATA, nil, nil},
+		{"DDATA after an NBIRTH still misses the DBIRTH", []string{tNDEATH, tNBIRTH}, tDDATA, []string{"oven"}, []string{KindMissedBirth}},
+		{"an unplanned device under a dead node revives the node", []string{tNDEATH}, "spBv1.0/g/DDATA/n1/d9", []string{"press"}, []string{KindMissedBirth}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _ := newTestSession(t, false)
+			s.Handle(tNBIRTH, nbirth(1, 0), spStart)
+			for _, topic := range tt.deaths {
+				p := payload(nil, mqtttest.BdSeq(1))
+				if topic == tNBIRTH {
+					p = nbirth(2, 0)
+				}
+				s.Handle(topic, p, spStart)
+			}
+
+			r := s.Handle(tt.data, payload(nil, temp(0, 1), speed(0, 1)), spStart)
+			if !reflect.DeepEqual(r.Online, tt.online) || !reflect.DeepEqual(r.Kinds, tt.kinds) {
+				t.Fatalf("data = %+v, want Online %q, Kinds %q", r, tt.online, tt.kinds)
+			}
+		})
+	}
+
+	t.Run("a stale NDEATH holds nothing", func(t *testing.T) {
+		s, _ := newTestSession(t, true)
+		s.Handle(tNBIRTH, nbirth(5, 0), spStart)
+		s.Handle(tNDEATH, ndeath(ptr(uint64(4))), spStart)
+
+		if r := s.Handle(tNDATA, payload(nil, temp(1, 1)), spStart); r.Online != nil || r.Kinds != nil {
+			t.Fatalf("NDATA = %+v, want nobody online, no kinds", r)
+		}
+	})
 }
 
 func TestSessionDBIRTHWithoutNBIRTH(t *testing.T) {

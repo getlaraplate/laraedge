@@ -17,6 +17,10 @@ const (
 	// KindSequenceGap is a message whose seq does not follow the last one of
 	// its node (decision S10).
 	KindSequenceGap = "sequence_gap"
+	// KindMissedBirth is a data message of a node or device held dead by a
+	// Sparkplug death: the birth that followed the death was lost (ruling
+	// R11).
+	KindMissedBirth = "missed_birth"
 )
 
 const (
@@ -48,7 +52,8 @@ type spResult struct {
 	// Samples are the samples of the addressed metrics.
 	Samples []model.Sample
 	// Online and Offline are the agent devices a birth or a death puts
-	// online or offline, sorted.
+	// online or offline, sorted. Data that proves a missed birth puts its
+	// target online too (ruling R11).
 	Online, Offline []string
 	// Kinds are the read error kinds, one per occurrence.
 	Kinds []string
@@ -83,6 +88,12 @@ type spNode struct {
 
 	lastRebirth time.Time
 	rebirthDue  bool
+
+	// dead is true from an honoured NDEATH to the next NBIRTH.
+	dead bool
+	// deadDevices are the Sparkplug devices of the node that points address,
+	// held dead by a DDEATH or by the node's NDEATH, until their DBIRTH.
+	deadDevices map[string]bool
 }
 
 // sparkplugSession is the Sparkplug B state machine of one input: births,
@@ -103,25 +114,29 @@ type sparkplugSession struct {
 	// devicesOf are the agent devices of the Sparkplug devices under a node,
 	// sorted.
 	devicesOf map[SparkplugTarget][]string
+	// spDevicesOf are the Sparkplug device names of those agent devices.
+	spDevicesOf map[SparkplugTarget][]string
 }
 
 // newSparkplugSession returns the session of plan. With rebirth false,
 // RebirthNodes never returns a node.
 func newSparkplugSession(plan *SparkplugPlan, rebirth bool, clk clock.Clock) *sparkplugSession {
 	s := &sparkplugSession{
-		plan:      plan,
-		rebirth:   rebirth,
-		clk:       clk,
-		nodes:     make(map[SparkplugTarget]*spNode),
-		devicesOf: make(map[SparkplugTarget][]string),
+		plan:        plan,
+		rebirth:     rebirth,
+		clk:         clk,
+		nodes:       make(map[SparkplugTarget]*spNode),
+		devicesOf:   make(map[SparkplugTarget][]string),
+		spDevicesOf: make(map[SparkplugTarget][]string),
 	}
 	for target, tp := range plan.Targets {
 		node := SparkplugTarget{Group: target.Group, Node: target.Node}
 		if s.nodes[node] == nil {
-			s.nodes[node] = &spNode{}
+			s.nodes[node] = &spNode{deadDevices: make(map[string]bool)}
 		}
 		if target.Device != "" {
 			s.devicesOf[node] = append(s.devicesOf[node], tp.Device)
+			s.spDevicesOf[node] = append(s.spDevicesOf[node], target.Device)
 		}
 	}
 	for node := range s.devicesOf {
@@ -184,6 +199,7 @@ func (s *sparkplugSession) Handle(topic string, payload []byte, received time.Ti
 		node.datatypes = make(map[spMetricKey]uint32)
 		node.bdSeq, node.hasBdSeq = bdSeqOf(p)
 		node.seq, node.hasSeq = p.Seq, p.HasSeq
+		node.dead = false
 		node.learn("", p)
 		s.samples(&r, node, target, p, received)
 		if tp := s.plan.Targets[target]; tp != nil {
@@ -191,6 +207,7 @@ func (s *sparkplugSession) Handle(topic string, payload []byte, received time.Ti
 		}
 	case spDBIRTH:
 		s.checkSeq(&r, node, p)
+		delete(node.deadDevices, target.Device)
 		node.learn(target.Device, p)
 		s.samples(&r, node, target, p, received)
 		if tp := s.plan.Targets[target]; tp != nil {
@@ -198,12 +215,17 @@ func (s *sparkplugSession) Handle(topic string, payload []byte, received time.Ti
 		}
 	case spNDATA, spDDATA:
 		s.checkSeq(&r, node, p)
+		s.missedBirth(&r, node, nodeKey, target)
 		s.samples(&r, node, target, p, received)
 	case spNDEATH:
 		if bdSeq, ok := bdSeqOf(p); ok && node.hasBdSeq && bdSeq != node.bdSeq {
 			return r
 		}
 		node.hasSeq = false
+		node.dead = true
+		for _, device := range s.spDevicesOf[nodeKey] {
+			node.deadDevices[device] = true
+		}
 		if tp := s.plan.Targets[target]; tp != nil {
 			r.Offline = append(r.Offline, tp.Device)
 		}
@@ -212,6 +234,7 @@ func (s *sparkplugSession) Handle(topic string, payload []byte, received time.Ti
 	case spDDEATH:
 		s.checkSeq(&r, node, p)
 		if tp := s.plan.Targets[target]; tp != nil {
+			node.deadDevices[target.Device] = true
 			r.Offline = []string{tp.Device}
 		}
 	}
@@ -257,6 +280,36 @@ func (s *sparkplugSession) trigger(node *spNode) {
 		return
 	}
 	node.rebirthDue = true
+}
+
+// missedBirth applies ruling R11 to a data message of target: data of a node
+// held dead since its NDEATH, or of a device held dead since a death, proves
+// the birth that followed was lost (an NBIRTH is QoS 0 and not queued for an
+// offline client, while the NDEATH Will is QoS 1 and replayed from the
+// persistent session). The node's agent device (dead since an NDEATH) and the
+// target's come online, the message counts missed_birth once and the node is
+// due a rebirth (S11).
+func (s *sparkplugSession) missedBirth(r *spResult, node *spNode, nodeKey, target SparkplugTarget) {
+	deviceDead := target.Device != "" && node.deadDevices[target.Device]
+	if !node.dead && !deviceDead {
+		return
+	}
+
+	if node.dead {
+		node.dead = false
+		if tp := s.plan.Targets[nodeKey]; tp != nil {
+			r.Online = append(r.Online, tp.Device)
+		}
+	}
+	if deviceDead {
+		delete(node.deadDevices, target.Device)
+		if tp := s.plan.Targets[target]; tp != nil {
+			r.Online = append(r.Online, tp.Device)
+		}
+	}
+	slices.Sort(r.Online)
+	r.Kinds = append(r.Kinds, KindMissedBirth)
+	s.trigger(node)
 }
 
 // checkSeq applies decision S10 to NDATA, DBIRTH, DDATA and DDEATH. A

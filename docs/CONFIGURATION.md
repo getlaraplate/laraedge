@@ -709,10 +709,14 @@ handled silently (the sequence number and the aliases are kept up to date) and g
 - A device the agent has seen no birth for since it started is alive while the broker is connected, as every
   `json` device is, because births are not retained and waiting for one would leave every device dead until its
   node restarts. The broker missing for longer than `death_tolerance` is death, as for `json`.
-- **A death holds until the next birth.** A data message does not revive a device a death put offline: under
-  Sparkplug a death is authoritative. This differs from an availability topic, where a sample revives. The
-  samples of a device held dead are dropped without a count, since after a death they can only be reordered
-  messages.
+- **Data after a death is a missed birth.** A node that died publishes no data until its next NBIRTH, so data
+  of a node or device a death put offline proves that the birth which followed was lost. This happens after an
+  agent outage with `persistent_session: true`: the node's NDEATH (its Last Will, QoS 1) is queued in the
+  agent's session and delivered at the reconnection, while the NBIRTH and DBIRTH (QoS 0) are not queued. The
+  NDATA or DDATA puts the target's agent device alive again (a DDATA under a node dead since its NDEATH puts the
+  node's agent device alive too, an NDATA leaves the node's devices dead until their own data or birth), its
+  samples are emitted, the message counts `missed_birth` once, and with `rebirth: true` the agent asks the node
+  for a rebirth (at most once every 30 s per node). With `rebirth: false` the device revives all the same.
 - The `bdSeq` metric ties a death to its birth. An NDEATH whose `bdSeq` differs from the last NBIRTH's is the
   stale Last Will of an earlier session and is ignored. The NDEATH is honoured when no NBIRTH was seen, when the last NBIRTH carried no `bdSeq`, or when the NDEATH has none.
 
@@ -732,7 +736,7 @@ the next one. A reconnection resets the tracking of every node, since a gap acro
 `sequence_gap` and `malformed_payload` are counted even when the message comes from a device no point
 addresses: they describe the node's stream.
 
-**Rebirth.** With `rebirth: true` (default `false`), an unknown alias or a sequence gap makes the agent publish
+**Rebirth.** With `rebirth: true` (default `false`), an unknown alias, a sequence gap or a missed birth makes the agent publish
 an `NCMD` to `spBv1.0/<group>/NCMD/<edge_node>` with the Boolean metric `Node Control/Rebirth` set to true, at
 QoS 0, not retained, at most once every 30 s per node. The node answers with new births. This is the only
 message the agent ever publishes, and nothing is published with `rebirth: false`. The broker user then needs
@@ -774,11 +778,12 @@ after year 9999 makes the sample `bad` with the read error `bad_timestamp`.
 | The payload is not a Sparkplug B protobuf | dropped, no sample; read error `malformed_payload`, once per message |
 | A data metric with an alias no birth declared | dropped; read error `unknown_alias`, once per metric |
 | `seq` is not the expected one | the messages are handled; read error `sequence_gap` |
+| NDATA or DDATA of a node or device a death put offline | the device is alive again and the samples are emitted; read error `missed_birth`, once per message |
 | A metric no point addresses | ignored, no count |
 | A value that does not convert, a datatype that is not scalar | `bad` sample; read error `conversion` |
 | A topic that is not `spBv1.0/<group>/<type>/<node>[/<device>]`, or of a node no point addresses | dropped; read error `unmapped` |
 
-The read error kinds of this format are `unknown_alias`, `sequence_gap` and `malformed_payload`, besides the
+The read error kinds of this format are `unknown_alias`, `sequence_gap`, `missed_birth` and `malformed_payload`, besides the
 `payload_too_large`, `bad_timestamp`, `conversion`, `unmapped` and `subscribe_refused` kinds of `json`.
 Payload values are never written to a log, as for `json`.
 
@@ -787,7 +792,7 @@ kinds below. Like every input that reports its health, an `mqtt` input shows `ti
 `exception` and `decode` from the start, at 0; this driver counts only `connection` among them and never
 `timeout`, `exception` or `decode`. The kinds specific to `mqtt` (`payload_too_large`, `malformed_json`,
 `bad_timestamp`, `conversion`, `availability`, `unmapped`, `subscribe_refused`, and under `sparkplug_b`
-`unknown_alias`, `sequence_gap`, `malformed_payload`) appear at their first count.
+`unknown_alias`, `sequence_gap`, `missed_birth`, `malformed_payload`) appear at their first count.
 
 | Kind | Counts |
 |---|---|
@@ -800,6 +805,7 @@ kinds below. Like every input that reports its health, an `mqtt` input shows `ti
 | `unmapped` | a message on a topic no point subscribes to (under `sparkplug_b`: a topic that is not Sparkplug, or of a node no point addresses) |
 | `unknown_alias` | `sparkplug_b`: a data metric with an alias no birth declared, once per metric |
 | `sequence_gap` | `sparkplug_b`: a message whose `seq` does not follow the node's last one |
+| `missed_birth` | `sparkplug_b`: an NDATA or DDATA of a node or device a death put offline, which proves its birth was lost, once per message |
 | `malformed_payload` | `sparkplug_b`: a payload that is not a Sparkplug B protobuf, once per message |
 | `subscribe_refused` | a point on a topic whose subscription the broker refused, once per connection (once for a refused availability topic) |
 

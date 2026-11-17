@@ -161,7 +161,9 @@ follow-up on branch `fix/mqtt-known-limits`); plan 2 adds `unknown_alias` and `s
 `protowire` cannot parse is dropped and counted once per message. The spec listed no kind for it. A metric whose
 value field does not match its datatype is a `bad` sample with kind `conversion`, as before. Under `sparkplug_b`,
 `sequence_gap` and `malformed_payload` are counted even when the message comes from a device no point addresses,
-since they describe the stream of the node.
+since they describe the stream of the node. Amended 2026-11-17 by plan 2 (`../plans/2026-11-17-mqtt-sparkplug-b.md`,
+ruling R11): `missed_birth` is added, an NDATA or DDATA of a node or device held dead by a Sparkplug death, once
+per message (section 7).
 
 ## 7. Sparkplug B (plan 2)
 
@@ -179,10 +181,19 @@ S13 and S14 and the rulings of its execution). They refine what follows, which i
   its points address one target, no metric twice (the check spans entries), and two agent devices may not share
   a target. Otherwise the document is refused with a fixed message naming the positions. `timestamp`, `topics` and
   `availability` are refused with `sparkplug_b`, and `rebirth` with `json`.
-- **Death holds until the next birth (S3).** A Sparkplug death puts the device offline until its next birth: a data message does not revive it
-  (unlike an availability topic), and the samples of a device held offline are dropped uncounted. A device with
-  no birth seen since the agent started is alive while the broker is connected, as every `json` device is, since
-  births are not retained. The tracker gained `Offline` and `Online` for this.
+- **Death and missed births (S3, amended by ruling R11).** A Sparkplug death puts the device offline until its
+  next birth. A device with no birth seen since the agent started is alive while the broker is connected, as
+  every `json` device is, since births are not retained. The tracker gained `Offline` and `Online` for this. S3
+  first said that a data message never revives a device held dead and that its samples are dropped uncounted,
+  since after a death they could only be reordered messages. That does not hold with persistent sessions: the
+  NDEATH Will (QoS 1) of a node that restarts while the agent is away is queued and replayed, its NBIRTH and
+  DBIRTH (QoS 0) are not, and a node sending metrics by name would stay dead with no count and no rebirth until
+  its next restart. Ruling R11 replaces it: a dead node publishes no data until its next NBIRTH, so an NDATA or
+  DDATA for a target held dead by an NDEATH or DDEATH is a missed birth. The target's agent device comes online
+  (for a DDATA also the node's agent device, if an NDEATH holds it; an NDATA leaves the node's devices held), the
+  samples are emitted, the message counts `missed_birth` once, and with `rebirth: true` the node is due a
+  rebirth (same 30 s limit). With `rebirth: false` the device revives all the same. The cost, if a sample after
+  a real death was only reordered, is a device briefly revived.
 - **`seq` (S10, with ruling R4).** The tracking is reset at every reconnection, since a gap across an outage is
   expected; an NDEATH ends it; a message without `seq` ends the node's tracking until the next one. An NBIRTH
   clears the node's aliases and a DBIRTH overwrites those of its device; aliases are kept per node and device
@@ -220,7 +231,8 @@ otherwise the document is refused.
 - Aliases are learnt from the birth. A data message with an unknown alias (the agent started after the birth,
   which is never retained) is dropped with kind `unknown_alias`.
 - A gap in `seq` is counted (`sequence_gap`) and the driver goes on.
-- `rebirth: true` (default `false`): on an unknown alias or a sequence gap the agent publishes an NCMD
+- `rebirth: true` (default `false`): on an unknown alias or a sequence gap (amended 2026-11-17, ruling R11: or a
+  missed birth) the agent publishes an NCMD
   `Node Control/Rebirth`, at most one every 30 s per node. It is the driver's only write and must be enabled
   explicitly, since the parent calls the agent a plain subscriber.
 

@@ -117,9 +117,10 @@ func (t *Tracker) offline(device string) {
 }
 
 // Seen records a Sparkplug sample of device: it reads the device unless it is
-// held dead, and reports whether it did. Under Sparkplug a death is
-// authoritative until the next birth, so a sample does not revive a device
-// (decision S3); the caller drops the samples of a device Seen refuses.
+// held dead, and reports whether it did. Under Sparkplug a sample does not
+// revive a device: the session puts online a device whose data proves a
+// missed birth before its samples (ruling R11), and the caller drops the
+// samples of a device Seen refuses (decision S3).
 func (t *Tracker) Seen(device string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -84,17 +84,18 @@ func TestSparkplugInputBirthsDataAndDeaths(t *testing.T) {
 		t.Errorf("events of a live node: %s", describe(rs))
 	}
 
-	// NDEATH kills the node and every device under it; a data message does
-	// not revive them, only a birth does, its birth event before its sample.
+	// NDEATH kills the node and every device under it. Data of the dead node
+	// is a missed birth (ruling R11): it revives the node, its birth event
+	// before its sample, and leaves the device dead until its own birth.
 	b.Publish(tNDEATH, ndeath(ptr(uint64(1))), false, 1)
 	h.waitEvents(model.Death, 1, "press", "oven")
 	b.Publish(tNDATA, payload(nil, byAlias(1, 99)), false, 1)
 	b.Publish(tNBIRTH, payload(nil, mqtttest.BdSeq(2), temp(1, 30)), false, 1)
-	h.waitSamples("temp", 3)
+	h.waitSamples("temp", 4)
 
 	rs := h.snapshot()
-	if got := samplesOf(rs, "temp"); got[2].Value.Float != 30 {
-		t.Errorf("third temp sample = %+v, want 30 (the sample of a dead node dropped)", got[2])
+	if got := samplesOf(rs, "temp"); got[2].Value.Float != 99 || got[3].Value.Float != 30 {
+		t.Errorf("temp samples = %+v, want 99 (the data that proves a missed birth) then 30", got)
 	}
 	if birth, sample := eventIndex(rs, model.Birth, "press", 1), sampleIndex(rs, "temp", 3); birth < 0 || birth > sample {
 		t.Errorf("records = %s, want the press birth before its sample", describe(rs))
@@ -108,14 +109,14 @@ func TestSparkplugInputBirthsDataAndDeaths(t *testing.T) {
 	b.Publish(tDDEATH, payload(nil), false, 1)
 	h.waitEvents(model.Death, 2, "oven")
 	b.Publish(tNDATA, payload(nil, byAlias(1, 31)), false, 1)
-	h.waitSamples("temp", 4)
+	h.waitSamples("temp", 5)
 
 	rs = h.snapshot()
 	if countEvents(rs, model.Birth, "oven") != 1 || countEvents(rs, model.Death, "press") != 1 || countEvents(rs, model.Birth, "press") != 1 {
 		t.Errorf("records = %s, want the oven born once and killed twice, the press killed and born once", describe(rs))
 	}
-	if errs := h.readErrors(); len(errs) != 0 {
-		t.Errorf("read errors = %v, want none", errs)
+	if errs := h.readErrors(); !maps.Equal(errs, map[string]uint64{KindMissedBirth: 1}) {
+		t.Errorf("read errors = %v, want one missed_birth", errs)
 	}
 }
 
@@ -258,5 +259,69 @@ func TestSparkplugInputSubscribesTheNodeFilters(t *testing.T) {
 	got, err := readTopics(h.in.opts.DataDir, "line")
 	if err != nil || !slices.Equal(got, []string{"spBv1.0/g/+/n1/#"}) {
 		t.Errorf("subscription set = %q, %v", got, err)
+	}
+}
+
+// TestSparkplugInputReplayedNDEATHIsAMissedBirth is the agent outage of
+// ruling R11 on a real broker: while no client is connected the node dies
+// (its NDEATH Will, QoS 1, is queued in the persistent session) and is born
+// again (its NBIRTH, QoS 0, is not queued, so it is not published here). The
+// next input receives the NDEATH, then data by name: the press revives, its
+// birth before its sample, the message counts missed_birth and, with rebirth
+// on, the agent asks the node for one rebirth; with rebirth off it publishes
+// nothing and the press revives all the same.
+func TestSparkplugInputReplayedNDEATHIsAMissedBirth(t *testing.T) {
+	for _, rebirth := range []bool{true, false} {
+		t.Run(map[bool]string{true: "rebirth on", false: "rebirth off"}[rebirth], func(t *testing.T) {
+			b := mqtttest.Start(t, mqtttest.Options{})
+			cfg := sparkplugInput(t, "line", b, map[string]any{"rebirth": rebirth}, sparkplugDevices()...)
+			opts := Options{DataDir: t.TempDir(), AgentID: "agent"}
+
+			first := newHarness(t, cfg, opts)
+			first.start()
+			first.serving()
+			b.Publish(tNBIRTH, payload(ptr(uint64(0)), mqtttest.BdSeq(1), temp(1, 20.5)), false, 1)
+			first.waitSamples("temp", 1)
+			first.close()
+
+			b.Publish(tNDEATH, ndeath(ptr(uint64(1))), false, 1)
+
+			next := newHarness(t, cfg, opts)
+			next.start()
+			next.serving()
+			next.waitEvents(model.Death, 1, "press", "oven")
+			clientID := next.in.clientID
+
+			b.Publish(tNDATA, payload(nil, temp(0, 21.5)), false, 1)
+			b.Publish(tNDATA, payload(nil, temp(0, 22)), false, 1)
+			temps := next.waitSamples("temp", 2)
+			if temps[0].Value.Float != 21.5 || temps[1].Value.Float != 22 {
+				t.Errorf("temp samples = %+v, want 21.5 then 22", temps)
+			}
+
+			rs := next.snapshot()
+			if birth, death, sample := eventIndex(rs, model.Birth, "press", 1), eventIndex(rs, model.Death, "press", 1), sampleIndex(rs, "temp", 1); death < 0 || birth < death || birth > sample {
+				t.Errorf("records = %s, want the press death, then its birth, then its sample", describe(rs))
+			}
+			if n := countEvents(rs, model.Birth, "oven"); n != 0 {
+				t.Errorf("oven births = %d, want 0: node data says nothing of its devices", n)
+			}
+			if errs := next.readErrors(); !maps.Equal(errs, map[string]uint64{KindMissedBirth: 1}) {
+				t.Errorf("read errors = %v, want one missed_birth", errs)
+			}
+
+			if rebirth {
+				got := b.WaitPublished(clientID, 1)
+				if got[0].Topic != "spBv1.0/g/NCMD/n1" {
+					t.Errorf("published = %+v, want an NCMD of g/n1", got)
+				}
+			}
+			// Close disconnects after the outgoing packets are flushed.
+			next.close()
+			want := map[bool]int{true: 1, false: 0}[rebirth]
+			if got := b.Published(clientID); len(got) != want {
+				t.Errorf("published = %+v, want %d NCMD", got, want)
+			}
+		})
 	}
 }

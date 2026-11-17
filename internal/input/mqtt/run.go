@@ -427,8 +427,9 @@ func (r *router) message(topic string, payload []byte) (handled bool) {
 // size check: NCMD, DCMD and STATE are dropped uncounted, a topic outside the
 // Sparkplug shape or of a node not in the plan is unmapped. The births and
 // deaths go to the tracker before the samples, so a birth comes before the
-// sample of the birth, and a sample of a device held dead is dropped
-// uncounted (decision S3). The rebirth requests due are queued for the
+// sample of the birth; data of a target held dead by a death puts it
+// online first (ruling R11), and any other sample of a device held dead is
+// dropped uncounted (decision S3). The rebirth requests due are queued for the
 // goroutine owning the client. Called with mu held.
 func (r *router) sparkplug(topic string, payload []byte) {
 	in := r.in
