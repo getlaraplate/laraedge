@@ -1,7 +1,8 @@
 # MQTT driver: design
 
 **Status:** Approved (2026-11-06), section by section. Plan 1 (`mqtt` with JSON and plain payloads, `../plans/2026-11-06-mqtt-json.md`)
-was delivered on 2026-11-06; Sparkplug B (sections 7 and the rest of 8) is plan 2, not yet written.
+was delivered on 2026-11-06; Sparkplug B (sections 7 and the rest of 8) is plan 2, `../plans/2026-11-17-mqtt-sparkplug-b.md`,
+written on 2026-11-17 and not yet delivered.
 
 **Date:** 2026-11-06
 
