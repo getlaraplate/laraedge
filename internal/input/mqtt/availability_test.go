@@ -157,6 +157,33 @@ func TestTrackerKeepAliveSpansTheTolerance(t *testing.T) {
 	}
 }
 
+// TestTrackerRefusedDevicesAreNotKeptAlive: a device whose subscriptions the
+// broker refused is left out of KeepAlive and dies at the tolerance; a later
+// SetRefused without it makes KeepAlive revive it.
+func TestTrackerRefusedDevicesAreNotKeptAlive(t *testing.T) {
+	clk := clock.NewFake(start)
+	rec := &recorder{}
+	life := input.NewLifecycle(lifecycleInput(), clk, rec.emit)
+	tracker := mqtt.NewTracker(life, nil, []string{"press-07", "oven-02", "saw-01"})
+
+	tracker.SetRefused([]string{"saw-01"})
+	for range 2 {
+		clk.Advance(15 * time.Second)
+		tracker.KeepAlive()
+	}
+	life.Check()
+
+	if got, want := rec.got(), []string{"death saw-01"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+
+	tracker.SetRefused(nil)
+	tracker.KeepAlive()
+	if got, want := rec.got(), []string{"death saw-01", "birth saw-01"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
 func TestTrackerWithoutKeepAliveDevicesDieAtTheTolerance(t *testing.T) {
 	clk := clock.NewFake(start)
 	rec := &recorder{}

@@ -24,6 +24,9 @@ type Tracker struct {
 
 	mu   sync.Mutex
 	held map[string]bool
+	// refused are the devices whose subscriptions the broker refused on the
+	// current connection.
+	refused map[string]bool
 }
 
 type availabilityRule struct {
@@ -96,15 +99,30 @@ func (t *Tracker) Sample(device string) {
 	t.life.Read(device)
 }
 
-// KeepAlive reads every device of the input that is not held dead.
+// KeepAlive reads every device of the input that is not held dead and not
+// refused.
 func (t *Tracker) KeepAlive() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	for _, device := range t.devices {
-		if !t.held[device] {
+		if !t.held[device] && !t.refused[device] {
 			t.life.Read(device)
 		}
+	}
+}
+
+// SetRefused replaces the devices KeepAlive leaves out because the broker
+// refused the subscriptions of all their points: nothing can arrive for
+// them, so they die after the death tolerance. A sample or an online
+// availability payload still revives one.
+func (t *Tracker) SetRefused(devices []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.refused = make(map[string]bool, len(devices))
+	for _, device := range devices {
+		t.refused[device] = true
 	}
 }
 

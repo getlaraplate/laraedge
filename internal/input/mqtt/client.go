@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"os"
+	"slices"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/eclipse/paho.mqtt.golang/packets"
@@ -22,8 +23,10 @@ type client interface {
 	// abandons the attempt.
 	Connect(ctx context.Context) (sessionPresent bool, err error)
 	// Subscribe subscribes topics at qos and waits for the broker's answer;
-	// no topics is a no-op.
-	Subscribe(ctx context.Context, topics []string, qos byte) error
+	// no topics is a no-op. refused lists, in the order of topics, those the
+	// broker refused (SUBACK return code 0x80, an ACL); the others are
+	// subscribed and the connection is kept.
+	Subscribe(ctx context.Context, topics []string, qos byte) (refused []string, err error)
 	// Unsubscribe unsubscribes topics and waits for the broker's answer; no
 	// topics is a no-op.
 	Unsubscribe(ctx context.Context, topics []string) error
@@ -49,7 +52,7 @@ var (
 	errProtocolRefused    = errors.New("mqtt: the broker refused MQTT 3.1.1")
 	errConnectionLost     = errors.New("mqtt: connection to the broker lost")
 	errSubscribe          = errors.New("mqtt: subscribe failed")
-	errSubscribeRefused   = errors.New("mqtt: the broker refused a subscription")
+	errSubscribeRefused   = errors.New("mqtt: the broker refused the subscription")
 	errUnsubscribe        = errors.New("mqtt: unsubscribe failed")
 	errBrokerURL          = errors.New("mqtt: connection.broker: unsupported scheme")
 	errCAFile             = errors.New("mqtt: connection.tls.ca_file: cannot be read as PEM certificates")
@@ -253,12 +256,12 @@ func connectError(token paho.Token) error {
 }
 
 // Subscribe implements client.
-func (c *pahoClient) Subscribe(ctx context.Context, topics []string, qos byte) error {
+func (c *pahoClient) Subscribe(ctx context.Context, topics []string, qos byte) ([]string, error) {
 	if len(topics) == 0 {
-		return nil
+		return nil, nil
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	filters := make(map[string]byte, len(topics))
@@ -269,21 +272,26 @@ func (c *pahoClient) Subscribe(ctx context.Context, topics []string, qos byte) e
 	token := c.lib.SubscribeMultiple(filters, nil)
 	if err := wait(ctx, token); err != nil {
 		if ctx.Err() != nil {
-			return err
+			return nil, err
 		}
 
-		return errSubscribe
+		return nil, errSubscribe
 	}
 
-	if st, ok := token.(*paho.SubscribeToken); ok {
-		for _, code := range st.Result() {
-			if code == subscribeFailure {
-				return errSubscribeRefused
-			}
+	st, ok := token.(*paho.SubscribeToken)
+	if !ok {
+		return nil, nil
+	}
+
+	results := st.Result()
+	var refused []string
+	for _, topic := range topics {
+		if code, answered := results[topic]; answered && code == subscribeFailure && !slices.Contains(refused, topic) {
+			refused = append(refused, topic)
 		}
 	}
 
-	return nil
+	return refused, nil
 }
 
 // Unsubscribe implements client.

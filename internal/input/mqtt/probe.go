@@ -27,31 +27,33 @@ type pointKey struct{ device, signal string }
 // settings and password, and subscribes filters at QoS 0. It never touches
 // the input's own client, lifecycle or topics file, so a running input does
 // not see it. lost receives the loss of the connection; the caller must
-// Disconnect the client. Errors are the client's fixed texts.
-func (in *Input) commandClient(ctx context.Context, suffix string, filters []string, onMessage func(topic string, payload []byte, retained bool)) (client, error) {
+// Disconnect the client. refused are the filters the broker refused, the
+// others being subscribed. Errors are the client's fixed texts.
+func (in *Input) commandClient(ctx context.Context, suffix string, filters []string, onMessage func(topic string, payload []byte, retained bool)) (c client, refused []string, err error) {
 	password, err := in.password(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	c, err := newPahoClientRetained(in.conn, in.clientID+suffix, password, true, onMessage)
+	c, err = newPahoClientRetained(in.conn, in.clientID+suffix, password, true, onMessage)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if _, err := c.Connect(ctx); err != nil {
 		c.Disconnect()
 
-		return nil, err
+		return nil, nil, err
 	}
 
-	if err := c.Subscribe(ctx, filters, commandQoS); err != nil {
+	refused, err = c.Subscribe(ctx, filters, commandQoS)
+	if err != nil {
 		c.Disconnect()
 
-		return nil, err
+		return nil, nil, err
 	}
 
-	return c, nil
+	return c, refused, nil
 }
 
 // Probe subscribes to the topics of the points with the client id
@@ -100,7 +102,7 @@ func (in *Input) Probe(ctx context.Context) ([]model.Sample, error) {
 		in.traceEvent(traceProbeMessage)
 	}
 
-	c, err := in.commandClient(ctx, "-probe", slices.Sorted(maps.Keys(in.plan)), onMessage)
+	c, _, err := in.commandClient(ctx, "-probe", slices.Sorted(maps.Keys(in.plan)), onMessage)
 	if err != nil {
 		return nil, fmt.Errorf("mqtt input %q: probe: %w", in.cfg.ID, err)
 	}

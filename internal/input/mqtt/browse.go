@@ -83,8 +83,8 @@ func CheckFilter(filter string) error {
 // clock, or until ctx ends, whichever is first; retained messages arrive at
 // once. It returns the topics sorted, and whether it stopped early because a
 // 1001st topic arrived. It never publishes and ignores the input's own
-// subscriptions. A connection failure, and a connection lost before the end,
-// are errors; a ctx that ends is not.
+// subscriptions. A connection failure, a filter the broker refuses and a
+// connection lost before the end are errors; a ctx that ends is not.
 func (in *Input) Browse(ctx context.Context, filter string, duration time.Duration) (entries []BrowseEntry, truncated bool, err error) {
 	if err := CheckFilter(filter); err != nil {
 		return nil, false, fmt.Errorf("mqtt input %q: browse: filter: %w", in.cfg.ID, err)
@@ -130,11 +130,15 @@ func (in *Input) Browse(ctx context.Context, filter string, duration time.Durati
 		in.traceEvent(traceBrowseMessage)
 	}
 
-	c, err := in.commandClient(ctx, "-browse", []string{filter}, onMessage)
+	c, refused, err := in.commandClient(ctx, "-browse", []string{filter}, onMessage)
 	if err != nil {
 		return nil, false, fmt.Errorf("mqtt input %q: browse: %w", in.cfg.ID, err)
 	}
 	defer c.Disconnect()
+
+	if len(refused) > 0 {
+		return nil, false, fmt.Errorf("mqtt input %q: browse: %w", in.cfg.ID, errSubscribeRefused)
+	}
 
 	timer := in.clk.NewTimer(duration)
 	defer timer.Stop()

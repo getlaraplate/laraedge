@@ -47,6 +47,10 @@ type Options struct {
 	// Users are the accepted user name and password pairs; empty accepts
 	// every client, with or without credentials.
 	Users map[string]string
+	// Refuse are the topic filters the broker refuses to subscribe, as an
+	// ACL would: their SUBACK return code is 0x80 (MQTT 3.1.1). SetRefused
+	// changes them later.
+	Refuse []string
 }
 
 // Broker is an in-process MQTT broker.
@@ -66,7 +70,29 @@ type Broker struct {
 	// is closed and replaced at every count.
 	acks  map[string]int
 	acked chan struct{}
+
+	// refuse are the topic filters refused at subscribe.
+	refuse map[string]bool
+	// clientIDs are the client ids of the CONNECT packets, in order.
+	clientIDs []string
+	// hold, when set, holds every SUBSCRIBE until it is released.
+	hold *Hold
 }
+
+// Hold holds the SUBSCRIBE packets the broker receives until Release.
+type Hold struct {
+	arrived     chan struct{}
+	arrivedOnce sync.Once
+	released    chan struct{}
+	releaseOnce sync.Once
+}
+
+// Arrived is closed when the broker holds its first SUBSCRIBE.
+func (h *Hold) Arrived() <-chan struct{} { return h.arrived }
+
+// Release lets the held SUBSCRIBE packets, and every later one, through;
+// it is safe to call twice.
+func (h *Hold) Release() { h.releaseOnce.Do(func() { close(h.released) }) }
 
 // Start starts a broker on a free port of 127.0.0.1 and stops it at the end
 // of the test.
@@ -84,11 +110,15 @@ func Start(t testing.TB, opts Options) *Broker {
 		acks:   map[string]int{},
 		acked:  make(chan struct{}),
 	}
-	if err := server.AddHook(&authHook{users: opts.Users}, nil); err != nil {
+	b.SetRefused(opts.Refuse...)
+	if err := server.AddHook(&authHook{users: opts.Users, broker: b}, nil); err != nil {
 		t.Fatalf("mqtttest: auth hook: %v", err)
 	}
 	if err := server.AddHook(&ackHook{broker: b}, nil); err != nil {
 		t.Fatalf("mqtttest: ack hook: %v", err)
+	}
+	if err := server.AddHook(&recordHook{broker: b}, nil); err != nil {
+		t.Fatalf("mqtttest: record hook: %v", err)
 	}
 	if err := server.Serve(); err != nil {
 		t.Fatalf("mqtttest: serve: %v", err)
@@ -162,6 +192,49 @@ func (b *Broker) WaitAcknowledged(clientID string, n int) {
 			return
 		}
 	}
+}
+
+// SetRefused replaces the topic filters the broker refuses to subscribe; a
+// subscription already granted is kept.
+func (b *Broker) SetRefused(filters ...string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.refuse = make(map[string]bool, len(filters))
+	for _, f := range filters {
+		b.refuse[f] = true
+	}
+}
+
+// ClientIDs returns the client ids of every CONNECT packet the broker
+// received since the start of the test, in arrival order.
+func (b *Broker) ClientIDs() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return append([]string(nil), b.clientIDs...)
+}
+
+// HoldSubscriptions makes the broker hold every SUBSCRIBE, and so its
+// SUBACK, until the returned hold is released; the end of the test
+// releases it.
+func (b *Broker) HoldSubscriptions() *Hold {
+	h := &Hold{arrived: make(chan struct{}), released: make(chan struct{})}
+	b.t.Cleanup(h.Release)
+
+	b.mu.Lock()
+	b.hold = h
+	b.mu.Unlock()
+
+	return h
+}
+
+// refused reports whether a subscription to filter is refused.
+func (b *Broker) refused(filter string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.refuse[filter]
 }
 
 // acknowledged counts a QoS flow the broker completed with clientID.
@@ -271,10 +344,12 @@ func (b *Broker) untrack(conn net.Conn) {
 }
 
 // authHook accepts the configured user and password pairs, or every client
-// when none is configured, and allows every topic.
+// when none is configured, and allows every topic but the refused filters,
+// which it denies for reading: a subscription to one of them is refused.
 type authHook struct {
 	mochi.HookBase
-	users map[string]string
+	users  map[string]string
+	broker *Broker
 }
 
 func (h *authHook) ID() string { return "mqtttest-auth" }
@@ -293,7 +368,9 @@ func (h *authHook) OnConnectAuthenticate(_ *mochi.Client, pk packets.Packet) boo
 	return ok && pk.Connect.PasswordFlag && bytes.Equal(pk.Connect.Password, []byte(password))
 }
 
-func (h *authHook) OnACLCheck(_ *mochi.Client, _ string, _ bool) bool { return true }
+func (h *authHook) OnACLCheck(_ *mochi.Client, topic string, write bool) bool {
+	return write || !h.broker.refused(topic)
+}
 
 // ackHook tells the broker of every QoS flow completed: a PUBACK or PUBCOMP
 // received for a message the broker sent, or the acknowledgement the broker
@@ -309,6 +386,45 @@ func (h *ackHook) Provides(b byte) bool { return b == mochi.OnQosComplete }
 
 func (h *ackHook) OnQosComplete(cl *mochi.Client, _ packets.Packet) {
 	h.broker.acknowledged(cl.ID)
+}
+
+// recordHook records the client id of every CONNECT and holds the
+// SUBSCRIBE packets while a Hold is set.
+type recordHook struct {
+	mochi.HookBase
+	broker *Broker
+}
+
+func (h *recordHook) ID() string { return "mqtttest-record" }
+
+func (h *recordHook) Provides(b byte) bool {
+	return b == mochi.OnConnect || b == mochi.OnSubscribe
+}
+
+func (h *recordHook) OnConnect(cl *mochi.Client, _ packets.Packet) error {
+	h.broker.mu.Lock()
+	defer h.broker.mu.Unlock()
+
+	h.broker.clientIDs = append(h.broker.clientIDs, cl.ID)
+
+	return nil
+}
+
+func (h *recordHook) OnSubscribe(cl *mochi.Client, pk packets.Packet) packets.Packet {
+	if cl.Net.Inline {
+		return pk
+	}
+
+	h.broker.mu.Lock()
+	hold := h.broker.hold
+	h.broker.mu.Unlock()
+
+	if hold != nil {
+		hold.arrivedOnce.Do(func() { close(hold.arrived) })
+		<-hold.released
+	}
+
+	return pk
 }
 
 // newTLS generates a CA and a server certificate for 127.0.0.1 and localhost

@@ -3,6 +3,7 @@ package mqtt
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	edgeinput "github.com/getlaraplate/laraedge/internal/input"
@@ -17,7 +18,15 @@ const (
 	KindPayloadTooLarge = "payload_too_large"
 	// KindUnmapped is a message on a topic no point subscribes to.
 	KindUnmapped = "unmapped"
+	// KindSubscribeRefused is a point, or an availability topic, whose
+	// subscription the broker refused (SUBACK 0x80), counted once per
+	// connection.
+	KindSubscribeRefused = "subscribe_refused"
 )
+
+// msgSubscribeRefused is the warning logged once per connection for every
+// topic the broker refused to subscribe.
+const msgSubscribeRefused = "mqtt: the broker refused the subscription of a topic; fix the broker ACL, then reload the configuration or restart the agent"
 
 // Events given to the observer of the deps, for the tests.
 const (
@@ -56,7 +65,11 @@ func (in *Input) run(ctx context.Context, r *router) {
 // connects, unsubscribes the topics the input no longer uses, subscribes its
 // own, writes the subscription set and keeps the devices alive until the
 // connection is lost or ctx is done. It disconnects without unsubscribing.
-// subscribed reports whether the broker acknowledged the subscriptions.
+// subscribed reports whether the broker answered the subscriptions; the
+// input is connected from that answer on. A topic the broker refused keeps
+// the connection: it is logged, counted, left out of the subscription set
+// so the next connection subscribes it again, and a device whose points are
+// all on refused topics is not kept alive.
 func (in *Input) session(ctx context.Context, r *router) (subscribed bool, err error) {
 	password, err := in.password(ctx)
 	if err != nil {
@@ -72,9 +85,6 @@ func (in *Input) session(ctx context.Context, r *router) (subscribed bool, err e
 		return false, err
 	}
 	defer c.Disconnect()
-
-	in.health.SetConnected(true)
-	defer in.health.SetConnected(false)
 
 	connCtx, cancel := context.WithCancel(ctx)
 	lost := make(chan struct{})
@@ -96,14 +106,68 @@ func (in *Input) session(ctx context.Context, r *router) (subscribed bool, err e
 	if err := in.unsubscribeStale(connCtx, c, topics); err != nil {
 		return false, lostOr(lost, err)
 	}
-	if err := c.Subscribe(connCtx, topics, in.conn.QoS); err != nil {
+	refused, err := c.Subscribe(connCtx, topics, in.conn.QoS)
+	if err != nil {
 		return false, lostOr(lost, err)
 	}
-	if err := writeTopics(in.opts.DataDir, in.cfg.ID, topics); err != nil {
+
+	in.health.SetConnected(true)
+	defer in.health.SetConnected(false)
+
+	in.refuse(refused, r.tracker)
+	accepted := slices.DeleteFunc(slices.Clone(topics), func(topic string) bool { return slices.Contains(refused, topic) })
+	if err := writeTopics(in.opts.DataDir, in.cfg.ID, accepted); err != nil {
 		in.log.Debug("mqtt: the subscription set cannot be written", "input", in.cfg.ID, "error", err.Error())
 	}
 
 	return true, in.keepAlive(connCtx, lost, r.tracker)
+}
+
+// refuse handles the topics the broker refused on this connection: each is
+// logged at warn and counted subscribe_refused, once per point on it or once
+// for an availability topic, and the devices whose points are all on refused
+// topics are no longer kept alive (an empty refused list keeps them all).
+func (in *Input) refuse(refused []string, tracker *Tracker) {
+	for _, topic := range refused {
+		in.log.Warn(msgSubscribeRefused, "input", in.cfg.ID, "topic", topic)
+
+		count := 1
+		if plan := in.plan[topic]; plan != nil {
+			count = len(plan.Points)
+		}
+		for range count {
+			in.health.CountError(KindSubscribeRefused)
+		}
+	}
+
+	tracker.SetRefused(in.refusedDevices(refused))
+}
+
+// refusedDevices returns the devices of the input whose points are all on
+// topics of refused.
+func (in *Input) refusedDevices(refused []string) []string {
+	if len(refused) == 0 {
+		return nil
+	}
+
+	accepted := make(map[string]bool, len(in.devices))
+	for topic, plan := range in.plan {
+		if slices.Contains(refused, topic) {
+			continue
+		}
+		for _, pp := range plan.Points {
+			accepted[pp.Device] = true
+		}
+	}
+
+	var devices []string
+	for _, device := range in.devices {
+		if !accepted[device] {
+			devices = append(devices, device)
+		}
+	}
+
+	return devices
 }
 
 // password resolves the password reference of the connection, at every
