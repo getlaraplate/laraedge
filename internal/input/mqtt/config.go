@@ -239,7 +239,8 @@ func ParseConnection(raw json.RawMessage, cfg config.Input) (Connection, error) 
 	return conn, nil
 }
 
-// parseBroker decodes `broker`, required, and fills in the default port.
+// parseBroker decodes `broker`, required, and fills in the default port when
+// the URL has none; a colon without a port (mqtt://b:) is refused.
 func parseBroker(fields map[string]json.RawMessage, conn *Connection) error {
 	var text string
 	if err := stringField(fields, "connection.broker", "broker", &text); err != nil {
@@ -257,6 +258,9 @@ func parseBroker(fields map[string]json.RawMessage, conn *Connection) error {
 	}
 	if u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(text, "?#") {
 		return errors.New("connection.broker: must not contain a path or query")
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return errors.New("connection.broker: empty port")
 	}
 	port := u.Port()
 	switch {
@@ -390,7 +394,7 @@ func parseSession(fields map[string]json.RawMessage, conn *Connection) error {
 
 	conn.PersistentSession = DefaultPersistentSession
 	if v, ok := fields["persistent_session"]; ok {
-		if err := json.Unmarshal(v, &conn.PersistentSession); err != nil {
+		if isNull(v) || json.Unmarshal(v, &conn.PersistentSession) != nil {
 			return errors.New("connection.persistent_session: must be true or false")
 		}
 	}
@@ -721,16 +725,22 @@ func objectFields(raw json.RawMessage, name string) (map[string]json.RawMessage,
 }
 
 // stringField decodes the JSON string at key into dst when the key is present;
-// name is the path the error names.
+// name is the path the error names. A JSON null is not a string: encoding/json
+// would leave dst as it was.
 func stringField(fields map[string]json.RawMessage, name, key string, dst *string) error {
 	v, ok := fields[key]
 	if !ok {
 		return nil
 	}
-	if err := json.Unmarshal(v, dst); err != nil {
+	if isNull(v) || json.Unmarshal(v, dst) != nil {
 		return errors.New(name + ": must be a string")
 	}
 	return nil
+}
+
+// isNull reports whether raw is the JSON literal null.
+func isNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
 }
 
 func sortedKeys(m map[string]json.RawMessage) []string {
