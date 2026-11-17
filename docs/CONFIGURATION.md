@@ -624,17 +624,18 @@ apply once a document with `persistent_session: false` for that input before rem
 discards the broker's session), or clear the session of its client id on the broker.
 
 **Refused subscriptions.** A broker can refuse the subscription of a topic (SUBACK `0x80`, typically an ACL that
-does not let the client read it). The input keeps the connection and its other topics. It logs a warning
-once per connection for each refused topic, naming the topic and the input, and counts `subscribe_refused`
-once for every point on that topic (once for a refused availability topic). A device whose points are all on
-refused topics is no longer kept alive, so it dies after `death_tolerance`; a device with at least one accepted
-topic stays alive. Under `sparkplug_b` the topic is the node filter `spBv1.0/<group>/+/<edge_node>/#`: its refusal
-counts every point of the node and its devices, and only those agent devices stop being kept alive. Every connection subscribes the document's topics again, so a refused topic is retried at the
-next connection: after a reconnection, a reload or a restart. A topic refused at its first subscription is not
-written to the subscription set; one the set already held (granted on an earlier connection, which a broker
-usually keeps in the session) stays in it, so a document that drops it still unsubscribes it. There is no retry timer: fix the ACL on the
-broker, then reload the configuration (`SIGHUP`) or restart the agent. `connected` turns true only once the
-broker has answered the subscriptions.
+does not let the client read it). The input keeps the connection and its other topics. It logs a warning once
+per connection for each refused topic, naming the topic and the input, and counts `subscribe_refused` once for
+every point on that topic (once for a refused availability topic). A device whose points are all on refused
+topics is no longer kept alive, so it dies after `death_tolerance`; a device with at least one accepted topic
+stays alive. Under `sparkplug_b` the topic is the node filter `spBv1.0/<group>/+/<edge_node>/#`: its refusal
+counts every point of the node and its devices, and only those agent devices stop being kept alive. Every
+connection subscribes the document's topics again, so a refused topic is retried at the next connection: after a
+reconnection, a reload or a restart. A topic refused at its first subscription is not written to the
+subscription set; one the set already held (granted on an earlier connection, which a broker usually keeps in
+the session) stays in it, so a document that drops it still unsubscribes it. There is no retry timer: fix the
+ACL on the broker, then reload the configuration (`SIGHUP`) or restart the agent. `connected` turns true only
+once the broker has answered the subscriptions.
 
 **Client id uniqueness.** A broker keeps one connection per client id: when a second client connects with the
 id of the first, it disconnects the first, and two clients sharing an id take each other's connection over
