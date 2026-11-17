@@ -85,7 +85,7 @@ old retained value takes the current time; the documentation says so.
 | JSON number | integer types: only when it is integral and fits the type, else `bad`; `float32`/`float64`: as is |
 | JSON boolean | `bool` |
 | JSON string | `string` |
-| Plain payload | parsed by `type`: `bool` accepts `true`/`false`, `1`/`0`, `on`/`off`, case-insensitive; numbers by the standard parser, with the same integer rule; `string` is the text as is |
+| Plain payload | parsed by `type`: `bool` accepts `true`/`false`, `1`/`0`, `on`/`off`, case-insensitive; numbers by the JSON number grammar with one leading `+` allowed, with the same integer rule; `string` is the text as is (amended 2026-11-17 by the follow-up on branch `fix/mqtt-known-limits`: "the standard parser" also read hex floats, `inf`, `nan` and underscores, now `conversion`; a non-zero value that `float32` turns into 0 is `conversion` too) |
 | Anything else (a JSON value of another kind, an object or list at the path) | `bad`, read error kind `conversion` |
 
 **Message outcomes:**
@@ -105,7 +105,16 @@ broker runs in the background. An unreachable broker is death after `death_toler
 
 **Reconnection:** our own loop with the driver kit's backoff (1 s to 1 min with jitter, injected clock); paho's
 automatic reconnection is off. The subscriptions are made again on every connection, also with a persistent
-session, since a broker may have lost it. `laraplate_edge_input_connected{input}` follows the connection.
+session, since a broker may have lost it. `laraplate_edge_input_connected{input}` follows the connection, from
+the broker's answer to the subscriptions on.
+
+**Refused subscription** (amended 2026-11-17 by the follow-up on branch `fix/mqtt-known-limits`; before it, a
+refusal failed the connection, which was retried forever and shown only as `connection` errors): a topic the
+broker refuses (SUBACK `0x80`) keeps the connection and the other topics. It is logged at warn once per
+connection, naming the topic and the input, and counted with kind `subscribe_refused` once per point on it. A
+device whose points are all on refused topics is not kept alive, so it dies after `death_tolerance`. The topic is
+left out of the subscription set and subscribed again at the next connection (a reconnection, a reload or a
+restart); there is no retry timer.
 
 **Death and birth:**
 
@@ -132,7 +141,10 @@ persistent session.
 
 **`probe <input>`:** subscribes to the points' topics and waits for the first sample of each point up to the
 command's timeout; retained messages often answer at once. It shows value, type, quality and arrival time, or
-"no message".
+"no message". (Amended 2026-11-17 by the follow-up on branch `fix/mqtt-known-limits`: a `bad` sample ends with
+the read error kind that made it bad, and a point without a sample shows the known reason instead of "no
+message": `payload_too_large`, `no value at path` or `subscribe_refused`. The points of a refused topic do not
+hold the probe. The arrival time is still not shown, R9 of plan 1.)
 
 **`browse <input> [--filter <topic filter>] [--duration 10s]`:** subscribes to the filter (`#` by default) and, for
 the duration, lists the observed topics with message count, retained flag and size. For JSON payloads it lists
@@ -141,7 +153,8 @@ payloads a preview of the text.
 
 **Metrics:** those of the driver kit, `laraplate_edge_input_connected{input}` and
 `laraplate_edge_input_read_errors_total{input,kind}`, with the kinds `payload_too_large`, `malformed_json`,
-`bad_timestamp`, `conversion`, `availability` and `unmapped`; plan 2 adds `unknown_alias` and `sequence_gap`.
+`bad_timestamp`, `conversion`, `availability`, `unmapped` and `subscribe_refused` (added 2026-11-17 by the
+follow-up on branch `fix/mqtt-known-limits`); plan 2 adds `unknown_alias` and `sequence_gap`.
 
 ## 7. Sparkplug B (plan 2)
 

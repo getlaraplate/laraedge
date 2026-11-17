@@ -509,12 +509,15 @@ describes the `probe` and `browse` commands that go with it.
 
 **Connection.** An unknown field in `connection`, `auth`, `tls`, `timestamp` or an `availability` entry is an
 error, named with its path (`connection.<key>: unknown field`). Every error of the driver names the field and
-never repeats the value, so a broker address, a user name or a topic does not reach a log.
+never repeats the value, so a broker address, a user name or a topic does not reach a log. A JSON `null` is not
+a value: `null` for a string field (the `tls` paths, `server_name`, `client_id`, ...) is refused as
+`<path>: must be a string`, and for `persistent_session` as `connection.persistent_session: must be true or
+false`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `broker` | | required: `mqtt://<host>[:<port>]` (port 1883) or `mqtts://<host>[:<port>]` (port 8883), without a user name, a path or a query |
-| `client_id` | `laraplate-edge-<agent_id>-<input_id>` | the MQTT client id. It must be unique on the broker: a second client with the same id makes the broker disconnect the first. |
+| `broker` | | required: `mqtt://<host>[:<port>]` (port 1883) or `mqtts://<host>[:<port>]` (port 8883), without a user name, a path or a query. A colon without a port (`mqtt://b:`) is refused as `connection.broker: empty port`; without the colon the default port applies. |
+| `client_id` | `laraplate-edge-<agent_id>-<input_id>` | the MQTT client id. It must be unique on the broker: a second client with the same id makes the broker disconnect the first. Two `mqtt` inputs of one document with the same broker (scheme, host and port, the default port filled in) and the same client id are refused (see "Client id uniqueness"). |
 | `auth` | anonymous | `anonymous`, or `{user, password}` with `password` a `secret://` reference |
 | `tls` | the system CA pool | `{ca_file, cert_file, key_file, server_name}`, all optional; mutual TLS needs `cert_file` and `key_file` together. There is no option to skip the certificate check. Refused with `mqtt://`. |
 | `format` | `json` | `json`, which covers plain payloads too. `sparkplug_b` and `rebirth` are refused by this build (see "What this build refuses"). |
@@ -554,10 +557,10 @@ value at once.
 
 | Value | Result |
 |---|---|
-| JSON number | the integer types take it only when it is an integer inside the type's range: `3.5`, `3.0`, `1e3` and `70000` for `int16` are `bad`, never rounded. `uint64` above 2^63-1 is `bad` (the model's integers are signed 64-bit, as for `modbus`). `float32` and `float64` take the value; a number that is not finite (`1e400`) is `bad` |
+| JSON number | the integer types take it only when it is an integer inside the type's range: `3.5`, `3.0`, `1e3` and `70000` for `int16` are `bad`, never rounded. `uint64` above 2^63-1 is `bad` (the model's integers are signed 64-bit, as for `modbus`). `float32` and `float64` take the value; a number that is not finite (`1e400`) is `bad`, and so is, for `float32`, a number above its range (`1e39`) or a non-zero number so small that it would become 0 (`1e-50`). Ordinary rounding (`0.1`) is accepted |
 | JSON boolean | `bool` |
 | JSON string | `string`; for any other type it is `bad` (the text `"12"` is not converted to a number) |
-| Plain payload | parsed by `type`: `bool` accepts `true`/`false`, `1`/`0` and `on`/`off` in any case, around optional white space; numbers go through the standard parser with the same integer rule; `string` is the text as it is (it must be valid UTF-8) |
+| Plain payload | parsed by `type`: `bool` accepts `true`/`false`, `1`/`0` and `on`/`off` in any case, around optional white space; a number, around optional white space, must be written as a JSON number, optionally after one leading `+` (`+12`, `-2.5e3`), with the same integer rule: hex (`0x10`, `0x1p-2`), `inf`, `nan`, `Infinity`, underscores (`1_000`), leading zeros (`012`) and a bare `.5` or `5.` are `bad`; `string` is the text as it is (it must be valid UTF-8) |
 | Anything else: `null`, an object or a list at the path | `bad`, read error `conversion` |
 
 A `bad` sample carries the zero of the point's kind, as in the other drivers.
@@ -603,7 +606,7 @@ device is alive.
 the messages published while the agent is down, and the input receives them as samples, in order, when it
 connects again. Stopping an input for a reload disconnects without unsubscribing, so the session keeps the
 messages. The set of topics the input subscribed to is kept in `data_dir/mqtt/topics/<input id>.json` (a
-sorted JSON list, written after the broker acknowledged the subscriptions). At every connection the input
+sorted JSON list, written after the broker acknowledged the subscriptions, without the topics it refused). At every connection the input
 unsubscribes the topics of that file that its document no longer uses, then subscribes its own: so a topic
 removed by a reload is dropped from the session at the next connection, and a message of it still queued in the
 session is dropped and counted as `unmapped`, never emitted. The file is outside `data_dir/inputs/<input id>`,
@@ -618,32 +621,55 @@ on queuing the QoS 1 messages of its topics until the broker expires the session
 apply once a document with `persistent_session: false` for that input before removing it (a clean session
 discards the broker's session), or clear the session of its client id on the broker.
 
+**Refused subscriptions.** A broker can refuse the subscription of a topic (SUBACK `0x80`, typically an ACL that
+does not let the client read it). The input keeps the connection and its other topics. It logs a warning
+once per connection for each refused topic, naming the topic and the input, and counts `subscribe_refused`
+once for every point on that topic (once for a refused availability topic). A device whose points are all on
+refused topics is no longer kept alive, so it dies after `death_tolerance`; a device with at least one accepted
+topic stays alive. A refused topic is not written to the subscription set, so it is subscribed again at the
+next connection: after a reconnection, a reload or a restart. There is no retry timer: fix the ACL on the
+broker, then reload the configuration (`SIGHUP`) or restart the agent. `connected` turns true only once the
+broker has answered the subscriptions.
+
+**Client id uniqueness.** A broker keeps one connection per client id: when a second client connects with the
+id of the first, it disconnects the first, and two clients sharing an id take each other's connection over
+endlessly. The default id contains the agent id and the input id, so it is unique as long as every agent has its
+own `agent_id`. `config validate` and every apply refuse two `mqtt` inputs of the document that would connect
+to the same broker with the same client id (an explicit `client_id`, or one equal to another input's default),
+with a message naming both inputs. Across agents (an explicit `client_id` reused on another agent, or a
+cloned machine running with the same `agent_id`) nothing can be checked in advance: when three connections in
+a row drop less than 5 seconds after they were made, the input logs one warning that another client may be
+using its `client_id`, naming the id; it warns again only after a connection that lasted 5 seconds or more.
+
 **Read errors.** `read_errors` of `/status` and `laraplate_edge_input_read_errors_total{input, kind}` use the
 kinds below. Like every input that reports its health, an `mqtt` input shows `timeout`, `connection`,
 `exception` and `decode` from the start, at 0; this driver counts only `connection` among them and never
 `timeout`, `exception` or `decode`. The kinds specific to `mqtt` (`payload_too_large`, `malformed_json`,
-`bad_timestamp`, `conversion`, `availability`, `unmapped`) appear at their first count.
+`bad_timestamp`, `conversion`, `availability`, `unmapped`, `subscribe_refused`) appear at their first count.
 
 | Kind | Counts |
 |---|---|
-| `connection` | any failure of the broker connection: a refused or reset connection, a failed TLS handshake, bad credentials, a password that does not resolve, a lost connection. A subscription the broker refuses (an ACL that forbids the topic) is shown only this way, by repeated `connection` errors and the death of the devices; nothing else names the topic |
+| `connection` | any failure of the broker connection: a refused or reset connection, a failed TLS handshake, bad credentials, a password that does not resolve, a lost connection |
 | `payload_too_large` | a message above `max_payload`, dropped |
 | `malformed_json` | a message that is not valid JSON where a path or a timestamp needs it, once per message |
 | `bad_timestamp` | a message whose `timestamp` is missing, unreadable, before 1970 or after year 9999, once per message |
 | `conversion` | a value that does not convert to the point's `type`, per point |
 | `availability` | an availability payload that is neither `online` nor `offline` |
 | `unmapped` | a message on a topic no point subscribes to |
+| `subscribe_refused` | a point on a topic whose subscription the broker refused, once per connection (once for a refused availability topic) |
 
 Payload values, user names, passwords and broker addresses are never written to the logs at `info` and above.
+Two warnings name more than the input: a refused subscription names its topic, and the duplicate client id
+warning names the client id.
 
 **Declared limits.**
 
 - The sample time of a message is the agent's clock unless a payload timestamp is configured; retained and
   replayed messages are stamped with the time they arrive (see "Timestamp").
-- A broker that refuses a subscription is retried at every reconnection and reported only through the
-  `connection` kind (above); the logs carry the details at `debug`.
-- `connected` turns true when the broker accepts the connection, a little before the subscriptions are
-  acknowledged.
+- A refused subscription is tried again only at the next connection (a reconnection, a reload or a restart),
+  never on a timer.
+- Two agents using one client id on one broker are seen only through the warning of connections that keep
+  dropping (see "Client id uniqueness"); the document check covers the inputs of one agent only.
 - A broker that does not keep the session (a restarted broker with no persistence, or one that drops sessions
   by policy) loses the messages published while the agent was down: the agent subscribes again but cannot
   recover them. Retained messages still arrive.
@@ -1114,6 +1140,15 @@ Outcomes, as reported to Laraplate:
 | output types other than `laraplate-http` and `plugin:<id>` | the MQTT output plan (`laraplate-mqtt`) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references, `outputs[].config` and `processors[].config` included | a later plan with the OS keystore |
+
+Besides, `config validate` and every apply refuse these `mqtt` connections, each with its own message:
+
+- two `mqtt` inputs with the same broker (scheme, host and port after the default port is filled in) and the
+  same effective client id: `inputs.<j>.connection.client_id: input "<b>" has the same broker and client id as
+  input "<a>" (inputs.<i>); every mqtt input needs its own client id on a broker` (see "Client id uniqueness");
+- a JSON `null` for `persistent_session` or for a string field such as the `tls` paths:
+  `connection.persistent_session: must be true or false`, `connection.tls.ca_file: must be a string`;
+- a broker URL with a colon and no port, `mqtt://b:`: `connection.broker: empty port`.
 
 ## Buffer
 
