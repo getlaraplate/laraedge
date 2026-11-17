@@ -259,7 +259,7 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - `spResult{Samples []model.Sample; Online, Offline []string /* agent devices */; Kinds []string; Mapped bool /* false: unmapped */; Ignored bool /* NCMD, DCMD, STATE */}`.
   - Constants `KindUnknownAlias = "unknown_alias"`, `KindSequenceGap = "sequence_gap"`, `rebirthInterval = 30 * time.Second`, `metricRebirth = "Node Control/Rebirth"`, `metricBdSeq = "bdSeq"`.
 
-- [ ] **Step 1: Failing tests (pure, fake clock).** One test per decision S3 to S5 and S8 to S11:
+- [x] **Step 1: Failing tests (pure, fake clock).** One test per decision S3 to S5 and S8 to S11:
   - NBIRTH gives samples, Online for the node device and the learnt aliases.
   - NDATA by alias resolves to a sample, and by name too.
   - An unknown alias counts `unknown_alias` with no sample, and the node is due a rebirth only when `rebirth` is true.
@@ -274,8 +274,8 @@ Signed integers are two's complement. Int8, Int16 and Int32 are carried in `int_
   - `NCMD`, `DCMD` and `STATE` are `Ignored`.
   - `is_null` is a bad sample with no kind; a historical metric keeps its own timestamp.
   - Tracker: `Offline` holds a device so `KeepAlive` does not revive it; `Online` releases it. The availability tests of plan 1 stay green unchanged.
-- [ ] **Step 2: Implement.** The session is used from the router's single goroutine under the router's mutex, so it needs no lock of its own; say so in its doc comment.
-- [ ] **Step 3: Run the checks; commit** `feat(mqtt): Sparkplug births, deaths, aliases, seq and bdSeq`.
+- [x] **Step 2: Implement.** The session is used from the router's single goroutine under the router's mutex, so it needs no lock of its own; say so in its doc comment.
+- [x] **Step 3: Run the checks; commit** `feat(mqtt): Sparkplug births, deaths, aliases, seq and bdSeq`.
 
 ### Task 4: The input under `sparkplug_b`: subscriptions, routing, rebirth
 
