@@ -253,3 +253,56 @@ func TestTrackerWithoutAvailability(t *testing.T) {
 		t.Fatalf("Message = (%v, %q), want (false, \"\")", handled, kind)
 	}
 }
+
+// TestTrackerOfflineOnlineSeen covers the Sparkplug calls (decision S3):
+// Offline holds a device dead so KeepAlive and Seen do not revive it; Online
+// releases it; Seen reads a device that is not held.
+func TestTrackerOfflineOnlineSeen(t *testing.T) {
+	clk := clock.NewFake(start)
+	rec := &recorder{}
+	life := input.NewLifecycle(lifecycleInput(), clk, rec.emit)
+	tracker := mqtt.NewTracker(life, nil, []string{"press-07", "oven-02", "saw-01"})
+
+	tracker.Offline("press-07")
+	tracker.KeepAlive()
+	if tracker.Seen("press-07") {
+		t.Fatal("Seen of a held device = true, want false")
+	}
+	if got, want := rec.got(), []string{"death press-07"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events after Offline = %q, want %q", got, want)
+	}
+
+	tracker.Online("press-07")
+	if !tracker.Seen("press-07") {
+		t.Fatal("Seen after Online = false, want true")
+	}
+	tracker.Offline("press-07")
+	tracker.Online("press-07")
+	tracker.KeepAlive()
+
+	want := []string{"death press-07", "birth press-07", "death press-07", "birth press-07"}
+	if got := rec.got(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// TestTrackerSeenRevivesALiveDevice: Seen renews a device that is not held,
+// so it does not die at the tolerance.
+func TestTrackerSeenRevivesALiveDevice(t *testing.T) {
+	clk := clock.NewFake(start)
+	rec := &recorder{}
+	life := input.NewLifecycle(lifecycleInput(), clk, rec.emit)
+	tracker := mqtt.NewTracker(life, nil, []string{"press-07", "oven-02", "saw-01"})
+
+	clk.Advance(20 * time.Second)
+	if !tracker.Seen("press-07") {
+		t.Fatal("Seen = false, want true")
+	}
+	clk.Advance(20 * time.Second)
+	life.Check()
+
+	want := []string{"death oven-02", "death saw-01"}
+	if got := rec.got(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}

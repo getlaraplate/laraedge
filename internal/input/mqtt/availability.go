@@ -76,17 +76,60 @@ func (t *Tracker) Message(topic string, payload []byte) (handled bool, errKind s
 	for _, r := range rules {
 		switch value {
 		case r.offline:
-			t.held[r.device] = true
-			t.life.Die(r.device)
+			t.offline(r.device)
 		case r.online:
-			t.held[r.device] = false
-			t.life.Read(r.device)
+			t.online(r.device)
 		default:
 			errKind = ErrKindAvailability
 		}
 	}
 
 	return true, errKind
+}
+
+// Online releases device and reads it: an online availability payload or a
+// Sparkplug birth (decision S3).
+func (t *Tracker) Online(device string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.online(device)
+}
+
+// Offline holds device dead until Online, Sample or an online availability
+// payload: an offline availability payload or a Sparkplug death (decision
+// S3). KeepAlive and Seen do not revive it.
+func (t *Tracker) Offline(device string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.offline(device)
+}
+
+func (t *Tracker) online(device string) {
+	delete(t.held, device)
+	t.life.Read(device)
+}
+
+func (t *Tracker) offline(device string) {
+	t.held[device] = true
+	t.life.Die(device)
+}
+
+// Seen records a Sparkplug sample of device: it reads the device unless it is
+// held dead, and reports whether it did. Under Sparkplug a death is
+// authoritative until the next birth, so a sample does not revive a device
+// (decision S3); the caller drops the samples of a device Seen refuses.
+func (t *Tracker) Seen(device string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.held[device] {
+		return false
+	}
+	t.life.Read(device)
+
+	return true
 }
 
 // Sample records a sample of device: it is alive, whatever its availability

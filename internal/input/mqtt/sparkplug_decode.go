@@ -45,9 +45,6 @@ const (
 	spFieldString protowire.Number = 15
 )
 
-// spRebirthMetric is the metric name of a rebirth request.
-const spRebirthMetric = "Node Control/Rebirth"
-
 var errSparkplugWire = errors.New("sparkplug payload: malformed protobuf")
 
 // spPayload is a decoded Sparkplug B payload (only the fields the driver uses).
@@ -442,7 +439,7 @@ func metricTime(m spMetric, p spPayload, received time.Time) (time.Time, bool) {
 func encodeRebirth(now time.Time) []byte {
 	var metric []byte
 	metric = protowire.AppendTag(metric, 1, protowire.BytesType)
-	metric = protowire.AppendString(metric, spRebirthMetric)
+	metric = protowire.AppendString(metric, metricRebirth)
 	metric = protowire.AppendTag(metric, 4, protowire.VarintType)
 	metric = protowire.AppendVarint(metric, uint64(spBoolean))
 	metric = protowire.AppendTag(metric, spFieldBool, protowire.VarintType)
