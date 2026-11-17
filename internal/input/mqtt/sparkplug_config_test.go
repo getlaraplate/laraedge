@@ -121,6 +121,8 @@ func TestPlanSparkplugRefusals(t *testing.T) {
 		{"device on two targets", spInput(spDevice("d", "g/n|a", "g/n/d|b")), "devices[0]: points address more than one Sparkplug target"},
 		{"two devices one target", spInput(spDevice("d", "g/n/x|a"), spDevice("e", "g/n/x|b")), "devices[1]: same Sparkplug target as devices[0]"},
 		{"same metric twice", spInput(spDevice("d", "g/n|a", "g/n|a")), "devices[0].points[1]: same metric as devices[0].points[0]"},
+		{"same name two targets", spInput(spDevice("d", "g/n|a"), spDevice("d", "g/n/x|b")), "devices[1]: points address more than one Sparkplug target"},
+		{"same name same metric", spInput(spDevice("d", "g/n|a"), spDevice("d", "g/n|a")), "devices[1].points[0]: same metric as devices[0].points[0]"},
 		{"bad address", spInput(spDevice("d", "g|a")), "devices[0].points[0].address: want <group>/<edge_node>[/<device>]|<metric>"},
 	}
 	for _, tt := range tests {
@@ -146,5 +148,19 @@ func TestNewInputSparkplugBuildsItsPlan(t *testing.T) {
 	cfg.Devices[0].Points[0].Address = "g|a"
 	if _, err := newInput(cfg, nil, Options{}, deps{}); err == nil {
 		t.Error("a bad Sparkplug address must be refused")
+	}
+}
+
+func TestPlanSparkplugSameNameEntriesMerge(t *testing.T) {
+	plan, err := PlanSparkplug(spInput(spDevice("d", "g/n|a"), spDevice("d", "g/n|b")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := SparkplugTarget{Group: "g", Node: "n"}
+	if len(plan.ByDevice) != 1 || len(plan.Targets) != 1 {
+		t.Fatalf("ByDevice %v Targets %v", plan.ByDevice, plan.Targets)
+	}
+	if tp := plan.Targets[node]; tp == nil || tp.Device != "d" || len(tp.Points) != 2 {
+		t.Errorf("merged plan = %+v", tp)
 	}
 }

@@ -74,7 +74,8 @@ func (t SparkplugTarget) Key() string {
 type SparkplugPlan struct {
 	// Targets holds the plan of every target points address.
 	Targets map[SparkplugTarget]*TargetPlan
-	// ByDevice maps an agent device to its target.
+	// ByDevice maps an agent device to its target. A device with no points
+	// has no entry.
 	ByDevice map[string]SparkplugTarget
 	// Filters are the subscriptions, sorted and without duplicates: the node
 	// of every target, devices included (decision S1b), and each device target.
@@ -90,19 +91,22 @@ type TargetPlan struct {
 	Points map[string]PlannedPoint
 }
 
-// PlanSparkplug groups the points of cfg by target (decision S2). The errors
-// are fixed texts naming positions, never an address.
+// PlanSparkplug groups the points of cfg by target (decision S2). Entries of
+// one device name are one agent device: all their points together address one
+// target and no metric twice. The errors are fixed texts naming positions,
+// never an address.
 func PlanSparkplug(cfg config.Input) (*SparkplugPlan, error) {
+	type metricPos struct{ entry, point int }
+
 	plan := &SparkplugPlan{
 		Targets:  make(map[SparkplugTarget]*TargetPlan),
 		ByDevice: make(map[string]SparkplugTarget),
 	}
 	owner := make(map[SparkplugTarget]int)
+	metrics := make(map[string]map[string]metricPos)
 	filters := make(map[string]bool)
 	for di, dev := range cfg.Devices {
 		dname := "devices[" + strconv.Itoa(di) + "]"
-		var tp *TargetPlan
-		first := make(map[string]int)
 		for pi, p := range dev.Points {
 			pname := dname + ".points[" + strconv.Itoa(pi) + "]"
 			addr, err := ParseSparkplugAddress(p.Address)
@@ -110,21 +114,24 @@ func PlanSparkplug(cfg config.Input) (*SparkplugPlan, error) {
 				return nil, errors.New(pname + "." + err.Error())
 			}
 			target := SparkplugTarget{Group: addr.Group, Node: addr.Node, Device: addr.Device}
-			if tp == nil {
-				if other, taken := owner[target]; taken && dev.Device != cfg.Devices[other].Device {
+			tp := plan.Targets[target]
+			switch have, known := plan.ByDevice[dev.Device]; {
+			case !known:
+				if other, taken := owner[target]; taken {
 					return nil, errors.New(dname + ": same Sparkplug target as devices[" + strconv.Itoa(other) + "]")
 				}
 				tp = &TargetPlan{Target: target, Device: dev.Device, Points: make(map[string]PlannedPoint)}
 				plan.Targets[target] = tp
 				plan.ByDevice[dev.Device] = target
 				owner[target] = di
-			} else if tp.Target != target {
+				metrics[dev.Device] = make(map[string]metricPos)
+			case have != target:
 				return nil, errors.New(dname + ": points address more than one Sparkplug target")
 			}
-			if prev, dup := first[addr.Metric]; dup {
-				return nil, errors.New(pname + ": same metric as " + dname + ".points[" + strconv.Itoa(prev) + "]")
+			if prev, dup := metrics[dev.Device][addr.Metric]; dup {
+				return nil, errors.New(pname + ": same metric as devices[" + strconv.Itoa(prev.entry) + "].points[" + strconv.Itoa(prev.point) + "]")
 			}
-			first[addr.Metric] = pi
+			metrics[dev.Device][addr.Metric] = metricPos{di, pi}
 			tp.Points[addr.Metric] = PlannedPoint{Device: dev.Device, Signal: p.Signal, Point: p}
 
 			prefix := SparkplugNamespace + "/" + addr.Group + "/+/" + addr.Node
