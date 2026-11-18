@@ -112,24 +112,32 @@ func decodeText(data []byte, encoding string) (string, error) {
 
 // readCSV splits the text into the header and the data rows.
 func readCSV(text string, conn Connection) (*csvFile, error) {
+	headerRow := max(conn.CSV.HeaderRow, 1)
+	// header_row counts physical lines: the lines before it are dropped as
+	// text, so a blank or malformed preamble line cannot shift or swallow the
+	// header.
+	for range headerRow - 1 {
+		i := strings.IndexByte(text, '\n')
+		if i < 0 {
+			return nil, refuse("no header row")
+		}
+		text = text[i+1:]
+	}
 	r := csv.NewReader(strings.NewReader(text))
 	r.Comma = conn.CSV.Delimiter
 	r.FieldsPerRecord = -1
 	r.ReuseRecord = true
 	f := &csvFile{index: make(map[string][]int)}
-	headerRow := max(conn.CSV.HeaderRow, 1)
 	for n := 1; ; n++ {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
-			if n <= headerRow {
+			if n == 1 {
 				return nil, refuse("no header row")
 			}
 			break
 		}
 		switch {
-		case n < headerRow:
-			continue
-		case n == headerRow:
+		case n == 1:
 			if err != nil {
 				return nil, refuse("unreadable header row")
 			}
@@ -173,9 +181,11 @@ type columns struct {
 func mappedColumns(p *plan, f *csvFile) (columns, error) {
 	c := columns{ts: -1, ctx: [4]int{-1, -1, -1, -1}}
 	if spec := p.conn.Timestamp; spec != nil {
-		if i, ok := f.column(strings.TrimSpace(spec.Column)); ok {
-			c.ts = i
+		i, ok := f.column(strings.TrimSpace(spec.Column))
+		if !ok {
+			return c, refuse("the timestamp column is not in the header")
 		}
+		c.ts = i
 	}
 	names := [4]string{p.conn.Context.Serial, p.conn.Context.OrderRef, p.conn.Context.OperationRef, p.conn.Context.Lot}
 	for k, name := range names {
@@ -240,7 +250,7 @@ func (p *plan) sampleOf(pp PlannedPoint, ts time.Time, text string, bad bool, ct
 		c := *ctx
 		s.Context = &c
 	}
-	if !bad {
+	if !bad && !p.thousandsDot(pp.Point.Type, text) {
 		if v, ok := driverkit.ConvertText(pp.Point.Type, p.decimalText(pp.Point.Type, text)); ok {
 			s.Value, s.Quality = v, model.Good
 			return s, ""
@@ -252,6 +262,12 @@ func (p *plan) sampleOf(pp PlannedPoint, ts time.Time, text string, bad bool, ct
 	}
 
 	return s, KindConversion
+}
+
+// thousandsDot reports a numeric text with a dot under decimal comma: a
+// European thousands separator, which is not accepted.
+func (p *plan) thousandsDot(typ, text string) bool {
+	return p.conn.CSV.Decimal == ',' && typ != "string" && typ != "bool" && strings.Contains(text, ".")
 }
 
 // decimalText applies the decimal separator to the text of a numeric point.

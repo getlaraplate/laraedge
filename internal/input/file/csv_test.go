@@ -149,15 +149,6 @@ func TestWideOutcomes(t *testing.T) {
 			},
 		},
 		{
-			name: "timestamp column missing is bad per row", data: "Bore\n1\n2\n", spec: isoSpec("Time"),
-			wantKinds: []string{KindBadTimestamp, KindBadTimestamp},
-			check: func(t *testing.T, s []model.Sample) {
-				if len(s) != 2 || s[0].Quality != model.Bad || s[1].Quality != model.Bad {
-					t.Fatalf("samples = %+v", s)
-				}
-			},
-		},
-		{
 			name: "short row is bad", data: "Time,Bore\n2026-11-18T10:00:00Z,1\n2026-11-18T10:01:00Z\n2026-11-18T10:02:00Z,3,9\n", spec: isoSpec("Time"),
 			wantKinds: []string{KindMalformedRow, KindMalformedRow},
 			check: func(t *testing.T, s []model.Sample) {
@@ -332,6 +323,8 @@ func TestRefusedFiles(t *testing.T) {
 		{"repeated key in long", long, []byte("Name,Value\nBore,1\nBore,2\n")},
 		{"key column missing in long", long, []byte("Other,Value\nBore,1\n")},
 		{"value column missing in long", long, []byte("Name,Other\nBore,1\n")},
+		{"timestamp column missing", tsConn(csvConn()), []byte("Bore\n1\n")},
+		{"timestamp column missing in long", tsConn(long), []byte("Name,Value\nBore,1\n")},
 		{"wide two rows no timestamp", csvConn(), []byte("Bore\n1\n2\n")},
 	}
 	for _, tc := range tests {
@@ -470,5 +463,42 @@ func TestSamplesAreUTC(t *testing.T) {
 	}
 	if samples[0].TS.Location() != time.UTC || !samples[0].TS.Equal(time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("ts = %v", samples[0].TS)
+	}
+}
+
+func tsConn(c Connection) Connection {
+	c.Timestamp = isoSpec("Time")
+	return c
+}
+
+func TestHeaderRowCountsLines(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"blank line lf", "Report\n\nBore\n1\n"},
+		{"blank line crlf", "Report\r\n\r\nBore\r\n1\r\n"},
+		{"unbalanced quote", "say \"hi\nx\nBore\n1\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := csvConn()
+			conn.CSV.HeaderRow = 3
+			p := csvPlan(conn, pt("bore", "Bore", "float64", model.Critical))
+			samples, kinds, err := parseCSV(p, []byte(tc.data), csvModTime)
+			if err != nil || len(kinds) != 0 || len(samples) != 1 || samples[0].Quality != model.Good {
+				t.Fatalf("%+v %v %v", samples, kinds, err)
+			}
+		})
+	}
+}
+
+func TestThousandsDotUnderDecimalComma(t *testing.T) {
+	conn := csvConn()
+	conn.CSV.Decimal = ','
+	p := csvPlan(conn, pt("f", "F", "float64", model.Critical))
+	samples, kinds, err := parseCSV(p, []byte("F\n1.234\n"), csvModTime)
+	if err != nil || len(samples) != 1 || samples[0].Quality != model.Bad || !reflect.DeepEqual(kinds, []string{KindConversion}) {
+		t.Fatalf("%+v %v %v", samples, kinds, err)
 	}
 }
