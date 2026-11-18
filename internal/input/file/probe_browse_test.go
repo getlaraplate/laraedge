@@ -511,3 +511,26 @@ func TestProbeAndBrowseQDASWriteNothing(t *testing.T) {
 		t.Errorf("changed:\n%s\n---\n%s", before, after)
 	}
 }
+
+// TestBrowseReadsEachReportOnce: a pair whose two files are both shown is
+// read once, also when its addresses cannot be read, and the newest readable
+// report is still found after it.
+func TestBrowseReadsEachReportOnce(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.write("a.dfq", qdasBrowseReport, fileTime)
+	h.write("p.dfd", qdasLines("K0100 three"), fileTime.Add(time.Minute))
+	h.write("p.dfx", qdasValues, fileTime.Add(time.Minute))
+
+	b, err := h.in.Browse(DefaultBrowseLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Source != "a.dfq" || len(b.Files) != 3 {
+		t.Fatalf("browse = %+v", b)
+	}
+	got := h.readLog()
+	slices.Sort(got)
+	if want := []string{"a.dfq", "p.dfd", "p.dfx"}; !slices.Equal(got, want) {
+		t.Errorf("reads = %v, want each file once", got)
+	}
+}

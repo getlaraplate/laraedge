@@ -95,10 +95,12 @@ func (in *Input) Browse(limit int) (Browse, error) {
 		isIncomplete[f.Name] = true
 	}
 
+	// A report is read once, also when both files of a pair are shown: only
+	// its key is kept, and its addresses are taken at once while none were
+	// found yet, so no report's bytes outlive its turn.
 	type read struct {
-		data []byte
-		key  ledgerKey
-		ok   bool
+		key ledgerKey
+		ok  bool
 	}
 	cache := map[string]read{}
 	load := func(r fileReport) read {
@@ -106,8 +108,13 @@ func (in *Input) Browse(limit int) (Browse, error) {
 			return c
 		}
 		data, key, tooLarge, err := readReport(in.deps, in.conn.Directory, r, in.conn.MaxFileSize)
-		c := read{data: data, key: key, ok: err == nil && !tooLarge}
+		c := read{key: key, ok: err == nil && !tooLarge}
 		cache[r.Name()] = c
+		if c.ok && out.Source == "" {
+			if addrs, ctx, ok := in.addressesOf(data); ok {
+				out.Source, out.Addresses, out.Context = reportSource(r), addrs, ctx
+			}
+		}
 
 		return c
 	}
@@ -122,21 +129,12 @@ func (in *Input) Browse(limit int) (Browse, error) {
 			bf.State = StateIncomplete
 		}
 
-		r, inReport := reportOf[f.Name]
-		var c read
-		if inReport {
-			c = load(r)
-			if c.ok && led.Has(c.key) {
+		if r, inReport := reportOf[f.Name]; inReport {
+			if c := load(r); c.ok && led.Has(c.key) {
 				bf.State = StateSeen
 			}
 		}
 		out.Files = append(out.Files, bf)
-
-		if out.Source == "" && c.ok {
-			if addrs, ctx, ok := in.addressesOf(c.data); ok {
-				out.Source, out.Addresses, out.Context = reportSource(r), addrs, ctx
-			}
-		}
 	}
 
 	return out, nil
