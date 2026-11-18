@@ -66,6 +66,8 @@ func newWatcher(conn Connection) *watcher {
 // skipped reports whether a name is never read: hidden files and the
 // temporary names exporters write before a rename.
 func skipped(name string) bool {
+	name = strings.ToLower(name)
+
 	return strings.HasPrefix(name, ".") ||
 		strings.HasSuffix(name, ".tmp") ||
 		strings.HasSuffix(name, ".part") ||

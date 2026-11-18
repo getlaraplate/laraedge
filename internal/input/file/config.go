@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"path"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/getlaraplate/laraedge/internal/config"
@@ -240,10 +242,60 @@ func parsePattern(fields map[string]json.RawMessage, conn *Connection) error {
 	if err := stringField(fields, "connection.pattern", "pattern", &conn.Pattern); err != nil {
 		return err
 	}
-	if _, err := path.Match(conn.Pattern, ""); conn.Pattern == "" || err != nil {
+	// The watcher matches the lowercased pattern, so that is what is validated
+	// too: a range valid as written can be inverted once lowercased.
+	lower := strings.ToLower(conn.Pattern)
+	_, err := path.Match(conn.Pattern, "")
+	_, errLower := path.Match(lower, "")
+	if conn.Pattern == "" || err != nil || errLower != nil || invertedRange(conn.Pattern) || invertedRange(lower) {
 		return errors.New("connection.pattern: not a valid glob")
 	}
 	return nil
+}
+
+// invertedRange reports whether a character class of the glob holds a range
+// whose first character is above its last, which path.Match accepts and
+// never matches. Escapes are honoured; the pattern is already known to be
+// well formed.
+func invertedRange(pattern string) bool {
+	runes := []rune(pattern)
+	inClass := false
+	for i := 0; i < len(runes); i++ {
+		switch r := runes[i]; {
+		case r == '\\':
+			i++
+			if inClass && i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] != ']' {
+				if runes[i] > runes[i+2] {
+					return true
+				}
+				i += 2
+			}
+		case !inClass && r == '[':
+			inClass = true
+			if i+1 < len(runes) && runes[i+1] == '^' {
+				i++
+			}
+			// A first ] is a member, not the end of the class.
+			if i+1 < len(runes) && runes[i+1] == ']' {
+				i++
+			}
+		case inClass && r == ']':
+			inClass = false
+		case inClass && i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] != ']':
+			hi := runes[i+2]
+			step := 2
+			if hi == '\\' && i+3 < len(runes) {
+				hi = runes[i+3]
+				step = 3
+			}
+			if r > hi {
+				return true
+			}
+			i += step
+		}
+	}
+
+	return false
 }
 
 func parseTiming(fields map[string]json.RawMessage, conn *Connection) error {
@@ -429,6 +481,9 @@ func parseCSVSettings(fields map[string]json.RawMessage, conn *Connection) error
 		if text == "" || size != len(text) || r == utf8.RuneError || r == '"' || r == '\r' || r == '\n' || r == 0 {
 			return errors.New(delimiterShape)
 		}
+		if unicode.IsDigit(r) {
+			return errors.New("connection.csv.delimiter: must not be a digit")
+		}
 		c.Delimiter = r
 	}
 	if _, ok := sub["decimal"]; ok {
@@ -441,8 +496,8 @@ func parseCSVSettings(fields map[string]json.RawMessage, conn *Connection) error
 		}
 		c.Decimal = text[0]
 	}
-	if c.Decimal == ',' && c.Delimiter == ',' {
-		return errors.New("connection.csv.decimal: must not be , when the delimiter is ,")
+	if rune(c.Decimal) == c.Delimiter {
+		return fmt.Errorf("connection.csv.decimal: must not be %c when the delimiter is %c", c.Decimal, c.Delimiter)
 	}
 	if v, ok := sub["header_row"]; ok {
 		n, ok := intOf(v)

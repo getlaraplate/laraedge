@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,6 +152,7 @@ func TestParseConnectionRefused(t *testing.T) {
 			return json.RawMessage(`{"directory":` + string(d) + `,"format":"xml"}`)
 		}, "connection.format: want csv"},
 		{"bad pattern", func(t *testing.T) json.RawMessage { return conn(t, `"pattern":"["`) }, "connection.pattern: not a valid glob"},
+		{"pattern bad only once lowercased", func(t *testing.T) json.RawMessage { return conn(t, `"pattern":"[Z-a]"`) }, "connection.pattern: not a valid glob"},
 		{"interval too small", func(t *testing.T) json.RawMessage { return conn(t, `"interval":"400ms"`) }, "connection.interval: want a duration of at least 500ms, such as 2s"},
 		{"interval not duration", func(t *testing.T) json.RawMessage { return conn(t, `"interval":"soon"`) }, "connection.interval: want a duration of at least 500ms, such as 2s"},
 		{"stable below interval", func(t *testing.T) json.RawMessage { return conn(t, `"interval":"3s","stable_for":"2s"`) }, "connection.stable_for: want a duration of at least interval, such as 5s"},
@@ -171,6 +173,8 @@ func TestParseConnectionRefused(t *testing.T) {
 		{"delimiter quote", func(t *testing.T) json.RawMessage { return conn(t, `"csv":{"delimiter":"\""}`) }, "connection.csv.delimiter: want one character that is not a quote or a line break"},
 		{"delimiter newline", func(t *testing.T) json.RawMessage { return conn(t, `"csv":{"delimiter":"\n"}`) }, "connection.csv.delimiter: want one character that is not a quote or a line break"},
 		{"delimiter empty", func(t *testing.T) json.RawMessage { return conn(t, `"csv":{"delimiter":""}`) }, "connection.csv.delimiter: want one character that is not a quote or a line break"},
+		{"delimiter digit", func(t *testing.T) json.RawMessage { return conn(t, `"csv":{"delimiter":"5"}`) }, "connection.csv.delimiter: must not be a digit"},
+		{"delimiter is the default decimal", func(t *testing.T) json.RawMessage { return conn(t, `"csv":{"delimiter":"."}`) }, "connection.csv.decimal: must not be . when the delimiter is ."},
 		{"decimal bad", func(t *testing.T) json.RawMessage { return conn(t, `"csv":{"decimal":";"}`) }, "connection.csv.decimal: want . or ,"},
 		{"decimal comma with comma delimiter", func(t *testing.T) json.RawMessage {
 			return conn(t, `"csv":{"decimal":","}`)
@@ -301,5 +305,23 @@ func TestCheckPoint(t *testing.T) {
 				t.Fatalf("got %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestInvertedRange(t *testing.T) {
+	for pattern, want := range map[string]bool{
+		"*":              false,
+		"r[a-c].csv":     false,
+		"[^a-c]*":        false,
+		"[a-cx-z]*":      false,
+		"[c-a]*":         true,
+		"[Z-a]*":         true,
+		"x[\\a-c]*":      false,
+		"[a-c\\-]*":      false,
+		"a-z[a-c]-[c-a]": true,
+	} {
+		if got := invertedRange(strings.ToLower(pattern)); got != want {
+			t.Errorf("invertedRange(%q) = %v, want %v", pattern, got, want)
+		}
 	}
 }

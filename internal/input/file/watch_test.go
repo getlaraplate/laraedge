@@ -87,6 +87,8 @@ func TestWatcherSkipAndPattern(t *testing.T) {
 		{"a.tmp", "*", false},
 		{"a.part", "*", false},
 		{"a.csv~", "*", false},
+		{"A.TMP", "*", false},
+		{"b.Part", "*", false},
 		{"a.txt", "*.csv", false},
 		{"REPORT.CSV", "*.csv", true},
 		{"a.csv", "*.CSV", true},
