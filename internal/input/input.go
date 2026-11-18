@@ -39,6 +39,13 @@ type Input interface {
 	Probe(ctx context.Context) ([]model.Sample, error)
 }
 
+// PointRef names a point of an input: its device and signal. The drivers that
+// say why a point has no good sample key their answer by it.
+type PointRef struct {
+	Device string
+	Signal string
+}
+
 // Read error kinds, the values of Health.ReadErrors keys.
 const (
 	// ReadErrorTimeout is a request the device did not answer in time.

@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protowire"
 
+	"github.com/getlaraplate/laraedge/internal/input/driverkit"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
@@ -387,7 +388,7 @@ func metricValue(m spMetric, datatype uint32, pointType string) (model.Value, st
 	default:
 		return model.Value{}, KindConversion
 	}
-	v, ok := convertNumber(pointType, text)
+	v, ok := driverkit.ConvertNumber(pointType, text)
 	if !ok {
 		return model.Value{}, KindConversion
 	}

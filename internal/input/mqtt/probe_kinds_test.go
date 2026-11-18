@@ -104,11 +104,11 @@ func TestProbePointsReportsWhyAPointHasNoGoodSample(t *testing.T) {
 	}
 
 	want := map[PointRef]string{
-		{"press", "count"}: KindConversion,
-		{"press", "gone"}:  NoValueAtPath,
-		{"press", "mode"}:  KindMalformedJSON,
-		{"press", "big"}:   KindPayloadTooLarge,
-		{"press", "open"}:  KindSubscribeRefused,
+		{Device: "press", Signal: "count"}: KindConversion,
+		{Device: "press", Signal: "gone"}:  NoValueAtPath,
+		{Device: "press", Signal: "mode"}:  KindMalformedJSON,
+		{Device: "press", Signal: "big"}:   KindPayloadTooLarge,
+		{Device: "press", Signal: "open"}:  KindSubscribeRefused,
 	}
 	if !maps.Equal(r.kinds, want) {
 		t.Errorf("kinds = %v, want %v", r.kinds, want)
@@ -138,7 +138,7 @@ func TestProbeEndsWhenEveryReachablePointHasASample(t *testing.T) {
 
 	ctx := testContext(t)
 	samples, kinds, err := in.ProbePoints(ctx)
-	if err != nil || len(samples) != 1 || kinds[PointRef{"press", "open"}] != KindSubscribeRefused {
+	if err != nil || len(samples) != 1 || kinds[PointRef{Device: "press", Signal: "open"}] != KindSubscribeRefused {
 		t.Fatalf("ProbePoints = %v, %v, %v", samples, kinds, err)
 	}
 	if ctx.Err() != nil {

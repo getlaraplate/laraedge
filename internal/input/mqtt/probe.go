@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	edgeinput "github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
@@ -56,10 +57,7 @@ func (in *Input) commandClient(ctx context.Context, suffix string, filters []str
 }
 
 // PointRef names a point of an input: its device and signal.
-type PointRef struct {
-	Device string
-	Signal string
-}
+type PointRef = edgeinput.PointRef
 
 // Probe subscribes to the topics of the points with the client id
 // <client_id>-probe (clean session, QoS 0), decodes the messages like the
@@ -85,7 +83,7 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 	keys := make(map[PointRef]struct{})
 	for _, dev := range in.cfg.Devices {
 		for _, p := range dev.Points {
-			keys[PointRef{dev.Device, p.Signal}] = struct{}{}
+			keys[PointRef{Device: dev.Device, Signal: p.Signal}] = struct{}{}
 		}
 	}
 
@@ -124,7 +122,7 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 		}
 		reason := func(kind string) {
 			for _, pp := range points {
-				if key := (PointRef{pp.Device, pp.Signal}); !hasSample(got, key) {
+				if key := (PointRef{Device: pp.Device, Signal: pp.Signal}); !hasSample(got, key) {
 					why[key] = kind
 				}
 			}
@@ -147,7 +145,7 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 			reason(KindUnknownAlias)
 		}
 		for _, s := range res.Samples {
-			if key := (PointRef{s.Device, s.Signal}); !hasSample(got, key) {
+			if key := (PointRef{Device: s.Device, Signal: s.Signal}); !hasSample(got, key) {
 				got[key] = s
 				delete(why, key)
 			}
@@ -177,7 +175,7 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 
 		if len(payload) > in.conn.MaxPayload {
 			for _, pp := range plan.Points {
-				if key := (PointRef{pp.Device, pp.Signal}); !hasSample(got, key) {
+				if key := (PointRef{Device: pp.Device, Signal: pp.Signal}); !hasSample(got, key) {
 					why[key] = KindPayloadTooLarge
 				}
 			}
@@ -187,7 +185,7 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 
 		decoded, _, pointKinds := decode(plan, payload, in.clk.Now())
 		for i, pp := range plan.Points {
-			key := PointRef{pp.Device, pp.Signal}
+			key := PointRef{Device: pp.Device, Signal: pp.Signal}
 			if hasSample(got, key) {
 				continue
 			}
@@ -221,7 +219,7 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 	mu.Lock()
 	for _, topic := range refused {
 		for _, pp := range in.refusedPoints(topic) {
-			key := PointRef{pp.Device, pp.Signal}
+			key := PointRef{Device: pp.Device, Signal: pp.Signal}
 			why[key] = KindSubscribeRefused
 			need--
 		}
@@ -257,7 +255,7 @@ func (in *Input) ProbePoints(ctx context.Context) (samples []model.Sample, kinds
 
 	for _, dev := range in.cfg.Devices {
 		for _, p := range dev.Points {
-			if s, ok := got[PointRef{dev.Device, p.Signal}]; ok {
+			if s, ok := got[PointRef{Device: dev.Device, Signal: p.Signal}]; ok {
 				samples = append(samples, s)
 			}
 		}

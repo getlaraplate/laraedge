@@ -21,7 +21,6 @@ import (
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
-	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/plugin"
@@ -95,13 +94,13 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 	var out bytes.Buffer
 	for _, s := range samples {
 		fmt.Fprintf(&out, "%s\t%s\t%s\t%s\t%s", s.Device, s.Signal, formatValue(s.Value), kindName(s.Value.Kind), s.Quality)
-		if kind := kinds[mqtt.PointRef{Device: s.Device, Signal: s.Signal}]; kind != "" {
+		if kind := kinds[input.PointRef{Device: s.Device, Signal: s.Signal}]; kind != "" {
 			fmt.Fprintf(&out, "\t%s", kind)
 		}
 		out.WriteByte('\n')
 	}
 	for _, p := range pointsWithoutSample(doc, positional[0], samples) {
-		fmt.Fprintf(&out, "%s\t%s\t%s\n", p[0], p[1], cmp.Or(kinds[mqtt.PointRef{Device: p[0], Signal: p[1]}], probeNoMessage))
+		fmt.Fprintf(&out, "%s\t%s\t%s\n", p[0], p[1], cmp.Or(kinds[input.PointRef{Device: p[0], Signal: p[1]}], probeNoMessage))
 	}
 	fmt.Fprintf(&out, "response time: %s\n", elapsed.Round(time.Microsecond))
 	if _, err := stdout.Write(out.Bytes()); err != nil {
@@ -123,7 +122,7 @@ const probeNoMessage = "no message"
 // pointKindProber is an input that says why a point has no good sample: the
 // mqtt input.
 type pointKindProber interface {
-	ProbePoints(ctx context.Context) ([]model.Sample, map[mqtt.PointRef]string, error)
+	ProbePoints(ctx context.Context) ([]model.Sample, map[input.PointRef]string, error)
 }
 
 // pointsWithoutSample returns the device and signal of the points of input id
@@ -206,7 +205,7 @@ func probeBootstrap(doc config.Document, boot bootstrap.File, id, configFile, bo
 // that can (pointKindProber), why a point has no good sample. Passwords
 // resolve from the environment and files of this process; log receives the
 // drivers' warnings.
-func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) (samples []model.Sample, kinds map[mqtt.PointRef]string, elapsed time.Duration, err error) {
+func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) (samples []model.Sample, kinds map[input.PointRef]string, elapsed time.Duration, err error) {
 	var cfg *config.Input
 	for i := range doc.Inputs {
 		if doc.Inputs[i].ID == id {
