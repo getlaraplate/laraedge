@@ -76,7 +76,8 @@ func isQDASName(name string) bool {
 // case, the stem exactly), and waits while that .dfd is listed but not ready
 // yet; a .dfx whose .dfd is not listed, or does not match the pattern, is
 // incomplete (decision Q9). A .dfd is never a report alone. When two .dfd
-// names differ only in the case of their extension, the lower name is taken.
+// names differ only in the case of their extension, the name first in byte
+// order is taken.
 func reportsOf(conn Connection, ready []fileInfo, listed []fileInfo) (reports []fileReport, incomplete []fileInfo) {
 	if conn.Format != FormatQDAS {
 		for _, f := range ready {
@@ -210,8 +211,9 @@ func freeName(dir, name string) (string, error) {
 // freeNames returns the paths in dir under which the names can be stored
 // without replacing a file, all with one suffix: the names themselves, else
 // each with -1, -2, ... before its extension, the first suffix free for
-// every name. os.Rename onto an existing name replaces it on Unix and fails
-// on Windows, so the collision is resolved before the rename.
+// every name. os.Rename onto an existing name replaces it, on Windows too,
+// so this check is what keeps a file in the target directory from being
+// replaced.
 func freeNames(dir string, names []string) ([]string, error) {
 	for n := 0; n <= maxSuffix; n++ {
 		paths := make([]string, 0, len(names))
