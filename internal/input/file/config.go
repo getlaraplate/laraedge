@@ -24,7 +24,7 @@ import (
 const (
 	// FormatCSV is delimited text.
 	FormatCSV = "csv"
-	// FormatQDAS is Q-DAS, not in this build.
+	// FormatQDAS is Q-DAS ASCII transfer text (.dfq, .dfd and .dfx).
 	FormatQDAS = "qdas"
 )
 
@@ -91,7 +91,7 @@ type Connection struct {
 	Directory string
 	// Pattern is a path.Match glob on the file name, matched case-insensitively.
 	Pattern string
-	// Format is FormatCSV.
+	// Format is FormatCSV or FormatQDAS.
 	Format string
 	// AfterRead is AfterReadMove or AfterReadKeep.
 	AfterRead string
@@ -111,7 +111,7 @@ type Connection struct {
 	Location *time.Location
 	// Timestamp says where the sample time is; nil: the modification time.
 	Timestamp *TimestampSpec
-	// Context maps the context keys to columns.
+	// Context maps the context keys to columns, or to K-field keys with FormatQDAS.
 	Context ContextMap
 	// CSV holds the CSV settings.
 	CSV CSVSettings
@@ -168,6 +168,7 @@ const (
 	timestampFmtShape  = "connection.timestamp.format: want rfc3339, unix_s, unix_ms or a layout of YYYY, MM, DD, hh, mm, ss"
 	delimiterShape     = "connection.csv.delimiter: want one character that is not a quote or a line break"
 	headerRowShape     = "connection.csv.header_row: want a whole number from 1"
+	qdasContextShape   = ": want a K-field key from K0005 to K0099, such as K0014"
 	absoluteDirMessage = "connection.directory: must be an absolute path"
 )
 
@@ -229,9 +230,10 @@ func parseFormat(fields map[string]json.RawMessage, conn *Connection) error {
 		conn.Format = FormatCSV
 		return nil
 	case FormatQDAS:
-		return errors.New("connection.format: not available in this build")
+		conn.Format = FormatQDAS
+		return nil
 	default:
-		return errors.New("connection.format: want csv")
+		return errors.New("connection.format: want csv or qdas")
 	}
 }
 
@@ -389,6 +391,9 @@ func parseTimestampField(fields map[string]json.RawMessage, conn *Connection) er
 	if !ok {
 		return nil
 	}
+	if conn.Format == FormatQDAS {
+		return errors.New("connection.timestamp: not allowed with format qdas, the time is K0004")
+	}
 	sub, err := objectFields(raw, "connection.timestamp")
 	if err != nil {
 		return err
@@ -453,14 +458,40 @@ func parseContext(fields map[string]json.RawMessage, conn *Connection) error {
 		if *f.dst == "" {
 			return errors.New(name + ": required")
 		}
+		if conn.Format == FormatQDAS && !isContextKField(*f.dst) {
+			return errors.New(name + qdasContextShape)
+		}
 	}
 	return nil
+}
+
+// IsKField reports whether s is a Q-DAS field key: an upper case K and four
+// digits.
+func IsKField(s string) bool {
+	if len(s) != 5 || s[0] != 'K' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isContextKField reports whether s is a K-field key a context value may name,
+// K0005 to K0099: the lower numbers are the value, the attribute and the time.
+func isContextKField(s string) bool {
+	return IsKField(s) && s >= "K0005" && s <= "K0099"
 }
 
 func parseCSVSettings(fields map[string]json.RawMessage, conn *Connection) error {
 	raw, ok := fields["csv"]
 	if !ok {
 		return nil
+	}
+	if conn.Format == FormatQDAS {
+		return errors.New("connection.csv: not allowed with format qdas")
 	}
 	sub, err := objectFields(raw, "connection.csv")
 	if err != nil {

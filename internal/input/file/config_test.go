@@ -143,14 +143,10 @@ func TestParseConnectionRefused(t *testing.T) {
 			d, _ := json.Marshal(t.TempDir())
 			return json.RawMessage(`{"directory":` + string(d) + `}`)
 		}, "connection.format: required"},
-		{"qdas", func(t *testing.T) json.RawMessage {
-			d, _ := json.Marshal(t.TempDir())
-			return json.RawMessage(`{"directory":` + string(d) + `,"format":"qdas"}`)
-		}, "connection.format: not available in this build"},
 		{"other format", func(t *testing.T) json.RawMessage {
 			d, _ := json.Marshal(t.TempDir())
 			return json.RawMessage(`{"directory":` + string(d) + `,"format":"xml"}`)
-		}, "connection.format: want csv"},
+		}, "connection.format: want csv or qdas"},
 		{"bad pattern", func(t *testing.T) json.RawMessage { return conn(t, `"pattern":"["`) }, "connection.pattern: not a valid glob"},
 		{"pattern bad only once lowercased", func(t *testing.T) json.RawMessage { return conn(t, `"pattern":"[Z-a]"`) }, "connection.pattern: not a valid glob"},
 		{"interval too small", func(t *testing.T) json.RawMessage { return conn(t, `"interval":"400ms"`) }, "connection.interval: want a duration of at least 500ms, such as 2s"},
@@ -221,6 +217,94 @@ func TestParseConnectionRefused(t *testing.T) {
 
 // TestParseConnectionNeverEchoesValues checks the fixed messages: a secret-like
 // value placed in a refused field does not reach the error text.
+// qdasConn builds a qdas connection document with the given extra members.
+func qdasConn(t *testing.T, extra string) json.RawMessage {
+	t.Helper()
+	dir, err := json.Marshal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := `{"directory":` + string(dir) + `,"format":"qdas"`
+	if extra != "" {
+		doc += "," + extra
+	}
+	return json.RawMessage(doc + "}")
+}
+
+func TestParseConnectionQDASDefaults(t *testing.T) {
+	raw := qdasConn(t, "")
+	var doc struct{ Directory string }
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseConnection(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Connection{
+		Directory: doc.Directory, Pattern: "*", Format: FormatQDAS, AfterRead: AfterReadMove, Encoding: "utf-8",
+		Interval: 2 * time.Second, StableFor: 5 * time.Second, SeenRetention: 720 * time.Hour,
+		MaxFileSize: 16 << 20, MaxFilesPerScan: 100, Location: time.Local,
+		CSV: CSVSettings{Delimiter: ',', Decimal: '.', HeaderRow: 1, Layout: LayoutWide},
+	}
+	if got != want {
+		t.Fatalf("defaults:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestParseConnectionQDASContext(t *testing.T) {
+	c, err := ParseConnection(qdasConn(t, `"context":{"serial":"K0014","order_ref":"K0053","lot":"K0006"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Context.Serial != "K0014" || c.Context.OrderRef != "K0053" || c.Context.Lot != "K0006" || c.Context.OperationRef != "" {
+		t.Fatalf("context = %+v", c.Context)
+	}
+
+	c, err = ParseConnection(conn(t, `"context":{"serial":"K0014"}`))
+	if err != nil || c.Context.Serial != "K0014" {
+		t.Fatalf("csv keeps K0014 as a column name: %+v, %v", c.Context, err)
+	}
+}
+
+func TestParseConnectionQDASRefused(t *testing.T) {
+	const keyShape = ": want a K-field key from K0005 to K0099, such as K0014"
+	tests := []struct {
+		name, extra, want string
+	}{
+		{"csv block", `"csv":{}`, "connection.csv: not allowed with format qdas"},
+		{"csv block with content", `"csv":{"delimiter":";"}`, "connection.csv: not allowed with format qdas"},
+		{"timestamp", `"timestamp":{"column":"T","format":"rfc3339"}`, "connection.timestamp: not allowed with format qdas, the time is K0004"},
+		{"column name", `"context":{"serial":"Serial No"}`, "connection.context.serial" + keyShape},
+		{"lower case", `"context":{"serial":"k0014"}`, "connection.context.serial" + keyShape},
+		{"short", `"context":{"order_ref":"K14"}`, "connection.context.order_ref" + keyShape},
+		{"K0001", `"context":{"lot":"K0001"}`, "connection.context.lot" + keyShape},
+		{"K0002", `"context":{"serial":"K0002"}`, "connection.context.serial" + keyShape},
+		{"K0004", `"context":{"serial":"K0004"}`, "connection.context.serial" + keyShape},
+		{"K0100", `"context":{"operation_ref":"K0100"}`, "connection.context.operation_ref" + keyShape},
+		{"K1001", `"context":{"serial":"K1001"}`, "connection.context.serial" + keyShape},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseConnection(qdasConn(t, tc.extra))
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsKField(t *testing.T) {
+	for s, want := range map[string]bool{
+		"K0014": true, "K0000": true, "K9999": true,
+		"": false, "K": false, "K14": false, "k0014": false, "K00140": false, "K00a4": false, "K0014 ": false, "X0014": false, "K+014": false,
+	} {
+		if got := IsKField(s); got != want {
+			t.Errorf("IsKField(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
 func TestParseConnectionNeverEchoesValues(t *testing.T) {
 	const marker = "s3cr3t-marker"
 	docs := []string{
