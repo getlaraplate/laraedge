@@ -3,6 +3,7 @@ package file
 import (
 	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,8 @@ func TestReadQDAS(t *testing.T) {
 					{Number: "1.1", Description: "Diameter", Nominal: "12.5", Lower: "12.4", Upper: "12.6", Unit: "mm"},
 					{Attributive: true},
 				}
-				if f.Count != 2 || !reflect.DeepEqual(f.Characteristics, want) || len(f.Records) != 0 {
+				got := []qdasCharacteristic{f.Characteristic(1), f.Characteristic(2)}
+				if f.Count != 2 || !reflect.DeepEqual(got, want) || len(f.Records) != 0 {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -59,7 +61,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "K0100 sets the count",
 			text: qdasLines("K0100 3", "K2001/2 B"),
 			check: func(t *testing.T, f *qdasFile) {
-				if f.Count != 3 || len(f.Characteristics) != 3 || f.Characteristics[1].Number != "B" {
+				if f.Count != 3 || len(f.Characteristics) != 1 || f.Characteristic(2).Number != "B" || f.Characteristic(3) != (qdasCharacteristic{}) {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -68,7 +70,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "without K0100 the highest K2 index is the count",
 			text: qdasLines("K2001/1 A", "K2002/4 D"),
 			check: func(t *testing.T, f *qdasFile) {
-				if f.Count != 4 || len(f.Characteristics) != 4 {
+				if f.Count != 4 || len(f.Characteristics) != 2 || f.Characteristic(4).Description != "D" {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -85,11 +87,13 @@ func TestReadQDAS(t *testing.T) {
 					"K0001": "12.51", "K0002": "0", "K0004": "18.11.2026/14:05:09", "K0005": "E1", "K0006": "B7",
 					"K0007": "2", "K0008": "Ins", "K0010": "M1", "K0011": "P9", "K0012": "G3",
 				}
-				if !reflect.DeepEqual(f.Records[0].Fields[0], want) {
-					t.Fatalf("fields 1 = %v", f.Records[0].Fields[0])
+				for key, value := range want {
+					if got := f.Field(0, 1, key); got != value {
+						t.Fatalf("field 1 %s = %q", key, got)
+					}
 				}
-				if f.Records[0].Fields[1]["K0001"] != "3" || f.Records[0].Fields[1]["K0004"] != "" {
-					t.Fatalf("fields 2 = %v", f.Records[0].Fields[1])
+				if f.Field(0, 1, "K0013") != "" || f.Field(0, 2, "K0001") != "3" || f.Field(0, 2, "K0004") != "" || f.Field(0, 3, "K0001") != "" {
+					t.Fatalf("records = %+v", f.Records)
 				}
 			},
 		},
@@ -97,8 +101,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "coded fields after a value line",
 			text: qdasLines("K0100 2", "1"+qs+"2", "K0014/0 SN1", "K0053/2 A7"),
 			check: func(t *testing.T, f *qdasFile) {
-				r := f.Records[0]
-				if len(f.Records) != 1 || r.Shared["K0014"] != "SN1" || r.Fields[1]["K0053"] != "A7" || r.Fields[0]["K0053"] != "" {
+				if len(f.Records) != 1 || f.Field(0, 0, "K0014") != "SN1" || f.Field(0, 2, "K0053") != "A7" || f.Field(0, 1, "K0053") != "" {
 					t.Fatalf("records = %+v", f.Records)
 				}
 			},
@@ -110,12 +113,11 @@ func TestReadQDAS(t *testing.T) {
 				if len(f.Records) != 2 {
 					t.Fatalf("records = %+v", f.Records)
 				}
-				first, second := f.Records[0], f.Records[1]
-				if first.Fields[0]["K0001"] != "12.5" || first.Fields[0]["K0004"] == "" || first.Fields[1]["K0001"] != "3" {
-					t.Fatalf("first = %+v", first)
+				if f.Field(0, 1, "K0001") != "12.5" || f.Field(0, 1, "K0004") == "" || f.Field(0, 2, "K0001") != "3" {
+					t.Fatalf("first = %+v", f.Records[0])
 				}
-				if second.Fields[0]["K0001"] != "12.6" || second.Fields[1]["K0001"] != "" || first.Malformed || second.Malformed {
-					t.Fatalf("second = %+v", second)
+				if f.Field(1, 1, "K0001") != "12.6" || f.Field(1, 2, "K0001") != "" || f.Records[0].Malformed || f.Records[1].Malformed {
+					t.Fatalf("second = %+v", f.Records[1])
 				}
 			},
 		},
@@ -123,7 +125,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "a coded value after a value line starts a record",
 			text: qdasLines("K0100 2", "1", "K0001/2 5"),
 			check: func(t *testing.T, f *qdasFile) {
-				if len(f.Records) != 2 || !f.Records[0].Malformed || f.Records[1].Malformed || f.Records[1].Fields[1]["K0001"] != "5" {
+				if len(f.Records) != 2 || !f.Records[0].Malformed || f.Records[1].Malformed || f.Field(1, 2, "K0001") != "5" {
 					t.Fatalf("records = %+v", f.Records)
 				}
 			},
@@ -132,7 +134,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "a key without index is index 1",
 			text: qdasLines("K2001 A", "K0001 7"),
 			check: func(t *testing.T, f *qdasFile) {
-				if f.Count != 1 || f.Characteristics[0].Number != "A" || f.Records[0].Fields[0]["K0001"] != "7" {
+				if f.Count != 1 || f.Characteristic(1).Number != "A" || f.Field(0, 1, "K0001") != "7" {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -141,8 +143,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "fields before any record are ignored",
 			text: qdasLines("K0100 1", "K0014/0 SN0", "K0053/1 A0", "5"),
 			check: func(t *testing.T, f *qdasFile) {
-				r := f.Records[0]
-				if len(f.Records) != 1 || r.Shared["K0014"] != "" || r.Fields[0]["K0053"] != "" {
+				if len(f.Records) != 1 || f.Field(0, 0, "K0014") != "" || f.Field(0, 1, "K0053") != "" {
 					t.Fatalf("records = %+v", f.Records)
 				}
 			},
@@ -151,7 +152,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "a value line with too few blocks is malformed",
 			text: qdasLines("K0100 3", "1"+qs+"2"),
 			check: func(t *testing.T, f *qdasFile) {
-				if len(f.Records) != 1 || !f.Records[0].Malformed || len(f.Records[0].Fields) != 3 {
+				if len(f.Records) != 1 || !f.Records[0].Malformed || f.Field(0, 2, "K0001") != "2" || f.Field(0, 3, "K0001") != "" {
 					t.Fatalf("records = %+v", f.Records)
 				}
 			},
@@ -160,7 +161,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "a value line with too many blocks is malformed",
 			text: qdasLines("K0100 1", "1"+qs+"2"),
 			check: func(t *testing.T, f *qdasFile) {
-				if len(f.Records) != 1 || !f.Records[0].Malformed || len(f.Records[0].Fields) != 1 {
+				if len(f.Records) != 1 || !f.Records[0].Malformed || f.Field(0, 1, "K0001") != "1" || f.Field(0, 2, "K0001") != "" {
 					t.Fatalf("records = %+v", f.Records)
 				}
 			},
@@ -169,7 +170,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "blank lines and CRLF are skipped",
 			text: "K0100 1\r\n\r\nK2001/1 A \r\n   \n5\r\n\r\n",
 			check: func(t *testing.T, f *qdasFile) {
-				if f.Count != 1 || f.Characteristics[0].Number != "A" || len(f.Records) != 1 || f.Records[0].Fields[0]["K0001"] != "5" {
+				if f.Count != 1 || f.Characteristic(1).Number != "A" || len(f.Records) != 1 || f.Field(0, 1, "K0001") != "5" {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -178,7 +179,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "a key with no value",
 			text: qdasLines("K2001/1", "K2002/1 "),
 			check: func(t *testing.T, f *qdasFile) {
-				if f.Count != 1 || f.Characteristics[0] != (qdasCharacteristic{}) {
+				if f.Count != 1 || f.Characteristic(1) != (qdasCharacteristic{}) {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -187,7 +188,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "K2142/0 before an own value",
 			text: qdasLines("K0100 3", "K2142/0 mm", "K2142/2 in"),
 			check: func(t *testing.T, f *qdasFile) {
-				if f.Characteristics[0].Unit != "mm" || f.Characteristics[1].Unit != "in" || f.Characteristics[2].Unit != "mm" {
+				if f.Characteristic(1).Unit != "mm" || f.Characteristic(2).Unit != "in" || f.Characteristic(3).Unit != "mm" {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -196,7 +197,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "K2142/0 after an own value",
 			text: qdasLines("K0100 2", "K2142/2 in", "K2142/0 mm"),
 			check: func(t *testing.T, f *qdasFile) {
-				if f.Characteristics[0].Unit != "mm" || f.Characteristics[1].Unit != "in" {
+				if f.Characteristic(1).Unit != "mm" || f.Characteristic(2).Unit != "in" {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -205,8 +206,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "K2004/0 makes every characteristic attributive unless its own says 0",
 			text: qdasLines("K0100 3", "K2004/2 0", "K2004/0 1", "K2001/3 C"),
 			check: func(t *testing.T, f *qdasFile) {
-				c := f.Characteristics
-				if !c[0].Attributive || c[1].Attributive || !c[2].Attributive || c[2].Number != "C" {
+				if !f.Characteristic(1).Attributive || f.Characteristic(2).Attributive || !f.Characteristic(3).Attributive || f.Characteristic(3).Number != "C" {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -215,7 +215,7 @@ func TestReadQDAS(t *testing.T) {
 			name: "K2xxx/0 does not raise the count",
 			text: qdasLines("K2001/2 B", "K2002/0 D"),
 			check: func(t *testing.T, f *qdasFile) {
-				if f.Count != 2 || f.Characteristics[0].Description != "D" || f.Characteristics[1].Description != "D" {
+				if f.Count != 2 || f.Characteristic(1).Description != "D" || f.Characteristic(2).Description != "D" {
 					t.Fatalf("file = %+v", f)
 				}
 			},
@@ -262,6 +262,7 @@ func TestReadQDASRefused(t *testing.T) {
 		{"negative K0100", qdasLines("K0100 -1")},
 		{"value line before any characteristic", qdasLines("5", "K2001/1 A")},
 		{"coded value before any characteristic", qdasLines("K0001/1 5", "K2001/1 A")},
+		{"field index above K0100 before any record", qdasLines("K0100 1", "K0014/2 x", "5")},
 		{"coded value on index 0", qdasLines("K2001/1 A", "K0001/0 5")},
 	}
 	for _, tc := range tests {
@@ -605,7 +606,7 @@ func TestQDASGermanCMMReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	f, err := readQDAS(decoded)
-	if err != nil || f.Characteristics[0].Description != "Ø Bohrung" || f.Characteristics[1].Description != "Länge" {
+	if err != nil || f.Characteristic(1).Description != "Ø Bohrung" || f.Characteristic(2).Description != "Länge" {
 		t.Fatalf("file = %+v %v", f, err)
 	}
 }
@@ -659,4 +660,37 @@ func FuzzParseQDAS(f *testing.F) {
 			t.Fatalf("refusal with output: %v", err)
 		}
 	})
+}
+
+// TestQDASMemoryGrowsWithTheInput bounds the bytes allocated to read a file by
+// a small multiple of its size: a large K0100 or a value line with many
+// blocks must not multiply the memory.
+func TestQDASMemoryGrowsWithTheInput(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"large K0100 and many coded records", "K0100 100000\n" + strings.Repeat("K0001 1\nK0004 18.11.2026/14:05:09\n", 2000)},
+		{"many blocks past the count", "K0100 1\n1" + strings.Repeat(qs, 20000) + "\n"},
+		{"large K0100 and one value line", "K0100 100000\n" + strings.Repeat("1"+qs, 99999) + "1\n"},
+		{"description lines on high indices", "K0100 100000\n" + strings.Repeat("K2001/99999 A\nK2002/0 D\n", 500) + "K0001/99999 1\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := qdasPlan(qdasConnection(), pt("a", "#1", "float64", model.Bulk), pt("b", "A", "string", model.Bulk))
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			_, _, err := parseQDAS(p, []byte(tc.data), qdasModTime)
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			got, limit := after.TotalAlloc-before.TotalAlloc, uint64(64*len(tc.data))
+			t.Logf("allocated %d bytes for %d bytes of input", got, len(tc.data))
+			if got > limit {
+				t.Fatalf("allocated %d bytes for %d bytes of input, limit %d", got, len(tc.data), limit)
+			}
+		})
+	}
 }
