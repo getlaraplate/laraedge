@@ -538,12 +538,13 @@ plant/line-2  3 msg  -  1 malformed
 ## Report files
 
 The `file` driver ([CONFIGURATION.md](CONFIGURATION.md#the-file-driver)) reads the reports a measuring machine
-writes into a directory, and its points are column names (`wide`) or keys (`long`) for CSV, and characteristic numbers (`K2001`) or `#<n>` for Q-DAS. Two commands help, `probe`
-and `browse`; each takes the input id and the usual two ways to find the document (`--config <file>`, or
-`--bootstrap <path>` for the last valid document of its `data_dir`). Give `--bootstrap` with `--config`, or
-`--bootstrap` alone: the ledger of read files is under the `data_dir` of the bootstrap, and with `--config`
-alone `probe` and `browse` do not know it and treat every file as unread. Neither command moves, creates or
-changes anything: not a file, not a modification time, not the ledger. They are safe beside a running agent.
+writes into a directory, and its points are column names (`wide`) or keys (`long`) for CSV, and characteristic
+numbers (`K2001`) or `#<n>` for Q-DAS. Two commands help, `probe` and `browse`; each takes the input id and the
+usual two ways to find the document (`--config <file>`, or `--bootstrap <path>` for the last valid document of its
+`data_dir`). Give `--bootstrap` with `--config`, or `--bootstrap` alone: the ledger of read files is under the
+`data_dir` of the bootstrap, and with `--config` alone `probe` and `browse` do not know it and treat every file as
+unread. Neither command moves, creates or changes anything: not a file, not a modification time, not the ledger.
+They are safe beside a running agent.
 
 ### Reading the points once: `probe`
 
@@ -607,15 +608,15 @@ addresses of part-4472.csv:
   `value_column` in that row. Names and previews are escaped or quoted, so a file cannot disturb the terminal.
 - `no file to read` when no file can be read as a CSV with the layout of the connection, or as a Q-DAS report.
 
-**Q-DAS.** With `format: qdas` only `.dfq`, `.dfd` and `.dfx` names are listed. A `.dfd` shows the state of its
-pair; a lone `.dfd` shows `waiting` or `ready` by its age. A `.dfx` whose `.dfd` is not in the directory shows
-the new state `incomplete`: the agent waits for the `.dfd` and reads nothing until it comes (and is stable).
-`seen` is the state of a pair whose ledger entry exists. The addresses are the characteristics in index order,
-one line each: the address (the `K2001` value, or `#<n>` when it has none), the preview of the value in the first
-record, then the description, `nominal <n>`, `limits <lower>..<upper>` (an absent side is left empty, as in
-`limits 12.4..`) and the unit, whichever are present, and `attributive, not read` for an attributive
-characteristic. After an empty line, `context fields:` lists the K-fields of the first record that can be used in
-`context`, with a preview of each:
+**Q-DAS.** With `format: qdas` only `.dfq`, `.dfd` and `.dfx` names are listed. A `.dfd` shows `waiting` or
+`ready` by its own age, and `seen` when the pair it belongs to has a ledger entry; it takes nothing else from its
+`.dfx`. A `.dfx` whose `.dfd` is not in the directory shows the new state `incomplete`: the agent waits for the
+`.dfd` and reads nothing until it comes (and is stable). `seen` is the state of a pair whose ledger entry exists.
+The addresses are the characteristics in index order, one line each: the address (the `K2001` value, or `#<n>`
+when it has none), the preview of the value in the first record, then the description, `nominal <n>`,
+`limits <lower>..<upper>` (an absent side is left empty, as in `limits 12.4..`) and the unit, whichever are present, and
+`attributive, not read` for an attributive characteristic. After an empty line, `context fields:` lists the
+K-fields of the first record that can be used in `context`, with a preview of each:
 
 ```
 bore.dfx  640 B  95s  incomplete
@@ -922,9 +923,9 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `read_errors` `missing_field` growing, a point of a `file` input has no samples | the file has no such column (`wide`) or no row with that key (`long`): the header name differs in spelling or case, or the characteristic is not in this report | take the address from `browse`, exactly as written. An empty cell gives no sample and no error: a characteristic not measured on a part. |
 | `read_errors` `file_too_large` growing, a file in `error/` | the file is above `max_file_size` (16 MiB at most) and is not read. Under `keep` it is refused again after every restart, since it is never hashed. | raise `max_file_size`, or ask the export to write smaller reports; a file that large is probably not a report. |
 | a `file` input `connected` false, `read_errors` `listing` growing, devices reported dead after `death_tolerance` | the directory cannot be listed (`probe` and `browse` then exit 1): it does not exist, the network share is not mounted or the permission was lost. Silence never kills a device: only this does. Nothing is read, moved or recorded while it lasts. | mount the share, check the path (it must be absolute) and that the agent's user can read it. The devices are born again at the first successful listing, and the files present are read normally. |
-| a `.dfx` is never read, `browse` shows it `incomplete` | its `.dfd` is not in the directory, is named differently (the stems must match exactly, only the extension case is free), or `pattern` does not match both names (`*.dfx` leaves the `.dfd` out). A `.dfd` shared by `.dfx` files of other names is not supported. | write the `.dfd` with the name of the `.dfx`, or widen `pattern` to `*.df*`. An orphan `.dfd` is never moved or read. |
+| a `.dfx` is never read, `browse` shows it `incomplete` | its `.dfd` is not in the directory, is named differently (the stems must match exactly, only the extension case is free: `PART.dfd` and `part.dfx` do not pair, even on Windows), or `pattern` does not match both names (`*.dfx` leaves the `.dfd` out). A `.dfd` shared by `.dfx` files of other names is not supported. | write the `.dfd` with the name of the `.dfx`, or widen `pattern` to `*.df*`. An orphan `.dfd` is never moved or read. |
 | a point of a Q-DAS input never has a sample, `read_errors` `missing_field` or nothing | the address is not a `K2001` value of the file (`browse` shows them as written), `#<n>` is used on a characteristic that has a `K2001`, the characteristic is attributive (`K2004` 1, not read), its value is empty, or its attribute (`K0002`) is `255` or `256`, excluded | take the address from `browse`; use `#<n>` only for a characteristic without `K2001`. An excluded or empty value gives no sample and no error by design. |
-| `read_errors` `malformed_file` on a Q-DAS input, files in `error/`, `probe` shows `malformed_file` | a `K1xxx` index above 1 (several part types in one file, not supported), several records of which one has no `K0004`, a `K0xxx` index above `K0100`, a coded line of a wrong shape, a value before any characteristic is defined, a repeated addressed `K2001`, or text not valid in the `encoding` | fix the export so that it writes one part type per file and a `K0004` per part, and set `encoding: windows-1252` for Windows exporters. The log names the file and the kind, never its content. |
+| `read_errors` `malformed_file` on a Q-DAS input, files in `error/`, `probe` shows `malformed_file` | a `K1xxx` index above 1 (several part types in one file, not supported), several records of which one has no `K0004`, a `K0xxx` index above the number of characteristics (`K0100`, or else the highest `K2xxx` index), a `K0100` that is not a number or is negative, a coded line of a wrong shape, a value before any characteristic is defined, a repeated addressed `K2001`, or text not valid in the `encoding` | fix the export so that it writes one part type per file and a `K0004` per part, and set `encoding: windows-1252` for Windows exporters. The log names the file and the kind, never its content. |
 | `read_errors` `conversion` on a Q-DAS input | a value written with a decimal comma: only `.` is read | set the exporter to write a decimal point |
 | `read_errors` `availability` growing | a message on the availability topic is neither the `online` nor the `offline` string of the entry; the comparison is exact, case and spaces included | fix the two strings to what the device publishes (`browse` shows it) |
 | an `mqtt` device dead while the broker is connected, then born again at its first message | its availability topic holds `offline`: the device (or its Last Will, which a broker may retain) said so. The device stays dead until `online` or a sample arrives, however long it is silent | check what the device publishes on the topic; publish `online`, or clear a stale retained `offline` on the broker |

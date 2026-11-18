@@ -1043,8 +1043,9 @@ the value. A key without an index is index 1. A line starting with `K` of anothe
 driver does not use are ignored. Any other line is a value line.
 
 **Characteristics.** Their number is `K0100` when present, else the highest index of the `K2xxx` lines. The
-number and every index are capped at 100000, and a `K0xxx` index above `K0100` refuses the file, also before any
-record. The values of a characteristic are described by the `K2xxx` lines with its index: `K2001` its number,
+number and every index are capped at 100000. A `K0100` that is not a number or is negative refuses the file, and
+so does a `K0xxx` index above the number of characteristics (`K0100`, or else the highest `K2xxx` index), also
+before any record. The values of a characteristic are described by the `K2xxx` lines with its index: `K2001` its number,
 `K2002` its description, `K2004` its type (`1` is attributive), `K2101` the nominal, `K2110` and `K2111` the
 limits, `K2142` the unit. `K2xxx/0` sets a field for every characteristic that has no value of its own: an own
 `/i` wins. `K1xxx` describes the part: a `K1xxx` index above 1 refuses the file (one part type per file). A value
@@ -1094,7 +1095,7 @@ followed by its own `K0014/0` and `K0053/0` lines, and each part's samples carry
 | A value that does not convert (a `,` decimal included) | `bad` sample; read error `conversion` |
 | A `K0004` that does not read | `bad` samples for that record; read error `bad_timestamp`, once per record |
 | A value line with another number of blocks than characteristics | its samples are `bad`, without context; read error `malformed_row`, once per line |
-| Text not valid in the `encoding`, a coded line of a wrong shape, a value or coded value before any characteristic, an index above 100000 or above `K0100`, `K0001/0`, `K1xxx` of an index above 1, an addressed `K2001` carried twice, several records and one without `K0004` | no samples; the file is refused, read error `malformed_file`; with `move` the report goes to `error/` |
+| Text not valid in the `encoding`, a coded line of a wrong shape, a value or coded value before any characteristic, an index above 100000, a `K0xxx` index above the number of characteristics (`K0100`, or else the highest `K2xxx` index), a `K0100` that is not a number or is negative, `K0001/0`, `K1xxx` of an index above 1, an addressed `K2001` carried twice, several records and one without `K0004` | no samples; the file is refused, read error `malformed_file`; with `move` the report goes to `error/` |
 | A file above `max_file_size` (either file of a pair) | not read; read error `file_too_large` |
 
 **Cost.** Memory and work grow with the size of the input, not with `K0100`: a file cannot make the driver
@@ -1108,8 +1109,11 @@ allocate more than a bounded multiple of its own size.
   settle it. `browse` marks them `attributive, not read`.
 - A `.dfd` shared by many `.dfx` files of other names (the counter layout of Q-DAS monitoring folders) is not
   supported: a `.dfx` is paired with the `.dfd` of its own name only.
-- Two `.dfx` names that differ only in the case of the extension (`a.dfx`, `a.DFX`) share one `.dfd` and may be read
-  twice in one scan.
+- Two `.dfx` names that differ only in the case of the extension (`a.dfx`, `a.DFX`) share one `.dfd`, and only one
+  of the two pairs is read: the older `.dfx`, or the name first in byte order. The other `.dfx` is not read: with
+  `move` it is left `incomplete` once the `.dfd` is moved, with `keep` it waits while the first pair is kept.
+- A `.dfx` whose `.dfd` was moved but whose own move keeps failing is, after a restart, left alone as `incomplete`:
+  its ledger entry stays, it is never read again and never moved. Only the first `move_failed` warning names it.
 - At most 100000 characteristics, and an index above it refuses the file.
 - The format description comes from public sources, not from the AQDEF manual, which is not freely downloadable.
   Try a new exporter with `probe` and `browse` before relying on it.

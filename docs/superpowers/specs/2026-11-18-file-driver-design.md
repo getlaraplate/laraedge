@@ -239,8 +239,8 @@ What follows fixes the behaviour; the plan fixes the details.
 - **Address:** the characteristic number (K2001) as written, trimmed; `#<n>` addresses the n-th characteristic when
   K2001 is missing.
 - Each value line is one part: one sample per point, with that line's date and time (K0004) as timestamp, read in
-  `timezone`; `K0004` may omit the seconds (Q10). A file with more than one value line, one of them without date and time, is `malformed_file`, for the
-  reason given for `wide` CSV in section 6.
+  `timezone`; `K0004` may omit the seconds (Q10). A file with more than one value line, one of them without date
+  and time, is `malformed_file`, for the reason given for `wide` CSV in section 6.
 - **Context:** each key names a K-field of the value line (e.g. `serial: K0014`, `order_ref: K0053`); without a
   `context` mapping the driver sets none.
 - A value marked as excluded by its attribute (K0002) gives no sample; the attribute values follow AQDEF.
@@ -254,8 +254,9 @@ What follows fixes the behaviour; the plan fixes the details.
   together under one suffix and `max_files_per_scan` counts reports. **Q9:** a `.dfx` without its `.dfd` waits.
   **Q10:** `K0004` without seconds is accepted. `#<n>` addresses only a characteristic without `K2001`; a file that
   holds only a description is read with zero samples and no read error; `K2xxx/0` sets the field for every
-  characteristic without its own value; `K0001/0` and a `K0xxx` index above `K0100` refuse the file; `K0100` and
-  every index are capped at 100000; memory and work grow with the input size, not with `K0100`.
+  characteristic without its own value; `K0001/0`, a `K0100` that is not a number or is negative, and a `K0xxx`
+  index above the number of characteristics (`K0100`, or else the highest `K2xxx` index) refuse the file; `K0100`
+  and every index are capped at 100000; memory and work grow with the input size, not with `K0100`.
 - The descriptive fields (nominal, limits, unit) are shown by `browse` to help the technician, and never sent: the
   limits of record are the quality plan's in Laraplate.
 
@@ -266,7 +267,7 @@ without emitting, moving or recording it, and shows each point's value, type, qu
 none (`no file`, `missing_field`, the read error kind), then a `source: <file>` line. It never touches the directory or the ledger. (Amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`, P10: it does not list the pending files, since `browse` does, with their states. The read error kind is attributed per file, not per point.)
 
 **`browse <input> [--limit 20]`:** lists the newest files of the directory with size, age and state (`waiting`,
-`ready`, `seen`; `incomplete` for a `.dfx` whose `.dfd` is missing, under `qdas`; a `.dfd` takes the state of its pair), then, for the newest readable one, the addresses it offers in the form to copy into the document:
+`ready`, `seen`; `incomplete` for a `.dfx` whose `.dfd` is missing, under `qdas`; a `.dfd` shows its own age, and `seen` when its pair is in the ledger), then, for the newest readable one, the addresses it offers in the form to copy into the document:
 `wide` column names or `long` keys with a value preview; under `qdas` the characteristics with K2001, K2002 and the
 nominal and limits, and the K-fields of the first value line usable as context.
 
@@ -320,8 +321,10 @@ Each plan closes with its documentation in `docs/CONFIGURATION.md` and `docs/USA
 
 **Known limits of plan 2** (amended 2026-11-18 by `../plans/2026-11-18-file-qdas.md`): one part type per file (Q3);
 attributive characteristics are not read (Q7); a `.dfd` shared by `.dfx` files of other names, the counter layout of
-Q-DAS monitoring folders, is not supported (Q9); at most 100000 characteristics; two `.dfx` names that differ only in
-the case of the extension share one `.dfd`.
+Q-DAS monitoring folders, is not supported (Q9); at most 100000 characteristics; of two `.dfx` names that differ
+only in the case of the extension, sharing one `.dfd`, only one pair is read; a `.dfx` whose `.dfd` was moved but
+whose own move keeps failing is, after a restart, left alone as `incomplete` (in the ledger, never read again,
+never moved), and only the first warning names it.
 
 **Out of scope:** growing files and tailing; recursion into subdirectories; file system events (section 2); the
 `context` field in the plugin SDK; Excel and other binary formats; the descriptive Q-DAS fields sent as signals;
