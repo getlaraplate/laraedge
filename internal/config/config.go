@@ -37,6 +37,8 @@ const (
 	DriverOPCUA = "opcua"
 	// DriverMQTT is the MQTT input driver.
 	DriverMQTT = "mqtt"
+	// DriverFile is the file input driver.
+	DriverFile = "file"
 	// OutputLaraplateHTTP is the HTTP output to the Laraplate ingest route.
 	OutputLaraplateHTTP = "laraplate-http"
 )

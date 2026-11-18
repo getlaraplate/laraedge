@@ -46,6 +46,15 @@ type wireSample struct {
 	TS      string `json:"ts"`
 	Value   any    `json:"value"`
 	Quality string `json:"quality"`
+
+	Context *wireContext `json:"context,omitempty"`
+}
+
+type wireContext struct {
+	Serial       string `json:"serial,omitempty"`
+	OrderRef     string `json:"order_ref,omitempty"`
+	OperationRef string `json:"operation_ref,omitempty"`
+	Lot          string `json:"lot,omitempty"`
 }
 
 type wireSignal struct {
@@ -146,6 +155,7 @@ func groupDevices(records []model.Record) ([]wireDevice, error) {
 				TS:      formatTime(s.TS),
 				Value:   wireValue(s.Value),
 				Quality: s.Quality.String(),
+				Context: wireContextOf(s.Context),
 			})
 
 			continue
@@ -178,6 +188,16 @@ func wireValue(v model.Value) any {
 	default:
 		return v.Str
 	}
+}
+
+// wireContextOf returns nil for a nil or all-empty context, so that no
+// context key is written for it.
+func wireContextOf(c *model.Context) *wireContext {
+	if c.IsEmpty() {
+		return nil
+	}
+
+	return &wireContext{Serial: c.Serial, OrderRef: c.OrderRef, OperationRef: c.OperationRef, Lot: c.Lot}
 }
 
 func formatTime(t time.Time) string {

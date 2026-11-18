@@ -160,6 +160,16 @@ func TestBuildValidatesAgainstBackendSchema(t *testing.T) {
 			},
 		},
 		{
+			name: "samples with a full context and with none",
+			records: []model.Record{
+				model.SampleRecord(model.Sample{
+					Device: "cmm-01", Signal: "dim", TS: t0, Value: model.IntValue(3), Quality: model.Good, Priority: model.Critical,
+					Context: &model.Context{Serial: "S1", OrderRef: "O1", OperationRef: "10", Lot: "L1"},
+				}),
+				sample("cmm-01", "dim", t0, model.IntValue(4), model.Good, model.Critical),
+			},
+		},
+		{
 			name: "strings needing JSON escapes",
 			records: []model.Record{
 				sample("press-07", "note", t0, model.StringValue("a \"quoted\" <tag> & \n newline é"), model.Good, model.Critical),
@@ -534,6 +544,45 @@ func TestBuildRejectsInvalidInput(t *testing.T) {
 
 			if body != nil {
 				t.Fatalf("Build returned a body together with an error: %s", body)
+			}
+		})
+	}
+}
+
+func TestBuildWritesSampleContext(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  *model.Context
+		want string
+	}{
+		{"all four", &model.Context{Serial: "S1", OrderRef: "O1", OperationRef: "10", Lot: "L1"}, `"context":{"serial":"S1","order_ref":"O1","operation_ref":"10","lot":"L1"}`},
+		{"serial only", &model.Context{Serial: "S1"}, `"context":{"serial":"S1"}`},
+		{"nil", nil, ""},
+		{"all empty", &model.Context{}, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := model.SampleRecord(model.Sample{
+				Device: "cmm-01", Signal: "dim", TS: t0, Value: model.IntValue(3),
+				Quality: model.Good, Priority: model.Critical, Context: tc.ctx,
+			})
+
+			body, err := envelope.Build("m1", 1, sentAt, []model.Record{rec}, nil)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+
+			if tc.want == "" {
+				if strings.Contains(string(body), "context") {
+					t.Fatalf("body has a context: %s", body)
+				}
+
+				return
+			}
+
+			if !strings.Contains(string(body), tc.want) {
+				t.Fatalf("body lacks %s: %s", tc.want, body)
 			}
 		})
 	}

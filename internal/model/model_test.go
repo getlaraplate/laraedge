@@ -260,3 +260,26 @@ func TestSignalDataTypeValid(t *testing.T) {
 		}
 	}
 }
+
+func TestContextIsEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  *model.Context
+		want bool
+	}{
+		{"nil", nil, true},
+		{"zero", &model.Context{}, true},
+		{"serial", &model.Context{Serial: "S1"}, false},
+		{"order", &model.Context{OrderRef: "O1"}, false},
+		{"operation", &model.Context{OperationRef: "10"}, false},
+		{"lot", &model.Context{Lot: "L1"}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.ctx.IsEmpty(); got != tc.want {
+				t.Errorf("IsEmpty() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

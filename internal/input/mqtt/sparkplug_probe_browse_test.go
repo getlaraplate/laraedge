@@ -115,10 +115,10 @@ func TestProbeSparkplugSaysUnknownAliasForANodeThatPublishesAliasesOnly(t *testi
 	if len(r.samples) != 0 {
 		t.Fatalf("samples = %+v, want none", r.samples)
 	}
-	if got := r.kinds[PointRef{"press", "temp"}]; got != KindUnknownAlias {
+	if got := r.kinds[PointRef{Device: "press", Signal: "temp"}]; got != KindUnknownAlias {
 		t.Errorf("kind of press/temp = %q, want %q", got, KindUnknownAlias)
 	}
-	if got, ok := r.kinds[PointRef{"oven", "speed"}]; ok {
+	if got, ok := r.kinds[PointRef{Device: "oven", Signal: "speed"}]; ok {
 		t.Errorf("kind of oven/speed = %q, want none: nothing arrived for it", got)
 	}
 }
@@ -144,9 +144,9 @@ func TestProbeSparkplugSaysMalformedTooLargeAndRefused(t *testing.T) {
 
 	kinds := (<-done).check(t).kinds
 	want := map[PointRef]string{
-		{"a", "v"}: KindMalformedPayload,
-		{"b", "v"}: KindPayloadTooLarge,
-		{"c", "v"}: KindSubscribeRefused,
+		{Device: "a", Signal: "v"}: KindMalformedPayload,
+		{Device: "b", Signal: "v"}: KindPayloadTooLarge,
+		{Device: "c", Signal: "v"}: KindSubscribeRefused,
 	}
 	for k, w := range want {
 		if kinds[k] != w {
@@ -210,7 +210,7 @@ func TestProbeSparkplugRebirthSkipsARefusedNode(t *testing.T) {
 
 	b.Publish("spBv1.0/g/NBIRTH/n2", payload(ptr(uint64(0)), mqtttest.BdSeq(1), temp(1, 2.5)), false, 1)
 	r := (<-done).check(t)
-	if len(r.samples) != 1 || r.kinds[PointRef{"press", "temp"}] != KindSubscribeRefused {
+	if len(r.samples) != 1 || r.kinds[PointRef{Device: "press", Signal: "temp"}] != KindSubscribeRefused {
 		t.Fatalf("probe = %+v, want saw's sample and press refused", r)
 	}
 	if got := b.Published(id); len(got) != 1 {

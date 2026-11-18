@@ -55,9 +55,13 @@ commands:
                              a plugin:<id> input starts its plugin for the
                              probe; an mqtt input waits up to 30 s for a
                              message on every topic and prints "no message"
-                             for a point whose topic stayed silent
+                             for a point whose topic stayed silent; a file
+                             input reads the newest file that is stable and
+                             not yet read, prints "source: <name>" and, for
+                             a point it has no sample for, why, or "no file"
+                             (nothing is moved or recorded)
   browse <input> (--config <file> | --bootstrap <path>) [--node <nodeid>] [--depth <n>]
-         [--filter <topic filter>] [--duration <1s-5m>]
+         [--filter <topic filter>] [--duration <1s-5m>] [--limit <n>]
                              list the nodes of an OPC UA server, or of a
                              plugin:<id> input whose plugin.json declares
                              browse, indented by depth, from the Objects
@@ -72,6 +76,11 @@ commands:
                              payload, or one "  <topic>|<path>  <value>" line
                              per JSON leaf; previews are 40 characters at
                              most; stops after 1000 topics
+                             a file input takes --limit (default 20, 1 to
+                             1000) instead: it lists the newest files as
+                             "<name>  <size> B  <age>s  <waiting|ready|seen>"
+                             then the addresses of the newest readable one,
+                             header names or keys, with the first value
   opcua trust <input> (--config <file> | --bootstrap <path>) [--thumbprint <hex>]
                              show the certificate an OPC UA server presents and
                              trust it after a yes on stdin, or without asking

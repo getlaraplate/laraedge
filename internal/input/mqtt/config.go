@@ -22,6 +22,7 @@ import (
 
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/docrules"
+	"github.com/getlaraplate/laraedge/internal/input/driverkit"
 )
 
 // Schemes of the broker URL and their default ports (spec section 3).
@@ -454,38 +455,12 @@ func parseSession(fields map[string]json.RawMessage, conn *Connection) error {
 // parseSize decodes max_payload: an integer number of bytes or a string with
 // the suffix KiB or MiB, from 1 byte to MaxPayloadLimit (decision Q5).
 func parseSize(raw json.RawMessage) (int, error) {
-	trimmed := bytes.TrimSpace(raw)
-	var n uint64
-	if len(trimmed) > 0 && trimmed[0] == '"' {
-		var text string
-		if err := json.Unmarshal(trimmed, &text); err != nil {
-			return 0, errors.New(maxPayloadShape)
-		}
-		unit := uint64(0)
-		switch {
-		case strings.HasSuffix(text, "KiB"):
-			unit, text = 1<<10, strings.TrimSuffix(text, "KiB")
-		case strings.HasSuffix(text, "MiB"):
-			unit, text = 1<<20, strings.TrimSuffix(text, "MiB")
-		default:
-			return 0, errors.New(maxPayloadShape)
-		}
-		count, ok := digits(text, MaxPayloadLimit)
-		if !ok {
-			return 0, errors.New(maxPayloadShape)
-		}
-		n = count * unit
-	} else {
-		count, err := strconv.ParseUint(string(trimmed), 10, 64)
-		if err != nil {
-			return 0, errors.New(maxPayloadShape)
-		}
-		n = count
-	}
-	if n < 1 || n > MaxPayloadLimit {
+	n, err := driverkit.ParseSize(raw, MaxPayloadLimit)
+	if err != nil {
 		return 0, errors.New(maxPayloadShape)
 	}
-	return int(n), nil
+
+	return n, nil
 }
 
 // parseTimestamp decodes a {path, format} object; name is the path the errors

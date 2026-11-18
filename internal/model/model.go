@@ -157,7 +157,25 @@ func (v Value) Validate() error {
 	return nil
 }
 
-// Sample is one reading of one signal of one device.
+// Context says which piece of work a sample belongs to: the serial number, the
+// order and operation references and the lot, as the protocol's context
+// object. Every field is optional; an empty one is not written.
+type Context struct {
+	Serial       string `json:",omitempty"`
+	OrderRef     string `json:",omitempty"`
+	OperationRef string `json:",omitempty"`
+	Lot          string `json:",omitempty"`
+}
+
+// IsEmpty reports whether c carries nothing: it is nil or every field is empty.
+func (c *Context) IsEmpty() bool {
+	return c == nil || *c == Context{}
+}
+
+// Sample is one reading of one signal of one device. A nil Context means the
+// sample has none; the field is omitted from the buffer record then, so a
+// record without context is byte for byte what it was before the field
+// existed, and older records decode unchanged.
 type Sample struct {
 	Device   string
 	Signal   string
@@ -165,6 +183,7 @@ type Sample struct {
 	Value    Value
 	Quality  Quality
 	Priority Priority
+	Context  *Context `json:",omitempty"`
 }
 
 // Validate reports whether the sample can be put on the wire.

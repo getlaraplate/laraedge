@@ -43,7 +43,7 @@ laraplate-edge config validate config.yaml
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | input id |
-| `driver` | yes | | `simulated`, `modbus`, `opcua`, `mqtt` or `plugin:<id>` in this build. The schema also knows `serial` and `file`. |
+| `driver` | yes | | `simulated`, `modbus`, `opcua`, `mqtt`, `file` or `plugin:<id>` in this build. The schema also knows `serial`. |
 | `connection` | no | `{}` | driver settings, an object the schema does not interpret (see the secret rule below) |
 | `death_tolerance` | no | `30s` | how long without a successful read before the input reports its devices dead; `birth` follows at the next successful read |
 | `devices` | yes | | at least one device |
@@ -837,6 +837,188 @@ warning names the client id.
 - Only MQTT 3.1.1 over TCP and TLS: no MQTT 5, no WebSockets. The automated tests run the agent against an
   in-process broker only; try a new broker with `probe` before relying on it.
 
+### The `file` driver
+
+Watches a directory, local or a mounted network share, for the reports a measuring machine writes (a coordinate
+measuring machine writes one per inspected part), reads each finished report once and turns it into typed
+samples, with the serial and the order of the part as their context. The driver reads files only: the one
+thing it writes is the move of a read file into `done/` or `error/` under the watched directory (or nothing at
+all with `after_read: keep`), besides its own ledger under `data_dir`. This build reads CSV; Q-DAS is refused
+(see "What this build refuses"). `examples/file` is a complete document; [USAGE.md](USAGE.md#report-files)
+describes the `probe` and `browse` commands that go with it.
+
+The directory is polled every `interval`: size and modification time of each file are compared with the last
+listing. File system events are not used, since SMB and NFS mounts do not deliver them for changes made by
+another host. A file is not an event stream: growing files, such as a log a machine appends to, are not
+supported.
+
+**Connection.** An unknown field in `connection`, `timestamp`, `context` or `csv` is an error, named with its
+path (`connection.<key>: unknown field`). Every error of the driver names the field and never repeats the
+value, so a path or a column name does not reach a log.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `directory` | | required: an absolute path. Only its top level is read; subdirectories are never entered. |
+| `format` | | required: `csv`. `qdas` is refused (`connection.format: not available in this build`). |
+| `pattern` | `*` | a glob on the file name (Go `path.Match`), such as `*.csv`, matched case-insensitively. A name that starts with `.` and one that ends in `.tmp`, `.part` or `~` (in any letter case) is never read, whatever the pattern. A range inverted once lowercased, such as `[Z-a]`, is refused. |
+| `interval` | `2s` | the polling period, at least `500ms` |
+| `stable_for` | the larger of `5s` and `interval` | how long a file's size and modification time must stay unchanged before it is read; at least `interval` |
+| `max_file_size` | `16MiB` | a number of bytes, or a size written `<n>KiB` or `<n>MiB`, from 1 byte to 16 MiB. A larger file is not read (read error `file_too_large`) |
+| `max_files_per_scan` | `100` | files read in one scan, oldest modification time first, from 1 to 10000; the rest wait for the next scan |
+| `after_read` | `move` | `move` or `keep` (see "What happens to a file") |
+| `seen_retention` | `30d` | how long the ledger keeps the hash of a read file: a Go duration or a number of days (`30d`), at least `1h`, at most `36500d` |
+| `encoding` | `utf-8` | `utf-8`, `windows-1252` or `iso-8859-1`; a UTF-8 byte order mark is skipped |
+| `timezone` | the agent's local zone | an IANA name (`Europe/Rome`) used for timestamps written without an offset. The names resolve on every platform, Windows and minimal images included. |
+| `timestamp` | the file's modification time | `{column, format}`: where the sample time is in the file (see "Timestamp") |
+| `context` | none | `{serial, order_ref, operation_ref, lot}`, each naming the column that holds the value (see "Context") |
+| `csv` | | the CSV settings below |
+
+`Start` checks nothing in the directory and returns at once; scanning runs in the background. A directory
+that does not exist or cannot be listed is never a failing start (a network share may be mounted after the
+agent starts): after `death_tolerance` without a successful listing the devices of the input are reported
+dead (see "Death and birth").
+
+**CSV settings** (`connection.csv`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `delimiter` | `,` | one character, not a quote, a digit or a line break; must differ from `decimal`; `;` is common in European exports, a tab is written `"\t"` |
+| `decimal` | `.` | the decimal separator of numbers, `.` or `,`. The delimiter may not be the same character (so with `,` it may not be `,`). |
+| `header_row` | `1` | the 1-based line that holds the column names. The lines before it are skipped, blank ones counted: it counts physical lines. |
+| `layout` | `wide` | `wide` or `long` |
+| `key_column` | | with `long` only, then required: the column that names the characteristic |
+| `value_column` | | with `long` only, then required: the column that holds the measured value |
+
+`read` is `event` only (`subscribe` and `poll` are refused, as `byte_order` is). `type` is required.
+
+**Layouts.**
+
+- `wide`: one row per part, one column per characteristic (a logger, a table export). Each data row gives one
+  sample per point, with that row's timestamp and context. A `wide` file with more than one data row and no
+  `timestamp` is refused (`malformed_file`): the parts would share one timestamp, and the backend keeps only
+  the first measurement of a signal and a timestamp. A file with one data row and no `timestamp` takes the
+  modification time.
+- `long`: one row per characteristic, the whole file is one part (a per-part report). Each row whose
+  `key_column` is the address of a point gives that point's sample. The timestamp and the context are read
+  from the first data row that has them.
+
+**Address.** `wide`: the column name as it is written in the header, trimmed of spaces. `long`: the value of
+`key_column`, trimmed. A column or key that no point addresses is ignored without a count, since reports carry
+many more fields than are wanted. Two header columns with an addressed name in `wide`, or an addressed key
+repeated in `long`, refuse the file (`malformed_file`): the driver cannot tell which value is meant. Several
+points may share one address.
+
+**Timestamp.** Without `timestamp` every sample of a file takes the file's modification time (a rename or a
+move keeps it), never the time of reading. With `timestamp: {column, format}`, `format` is `rfc3339`, `unix_s`,
+`unix_ms`, or a layout written with the tokens `YYYY`, `MM`, `DD`, `hh`, `mm` and `ss` and literal
+separators, such as `DD.MM.YYYY hh:mm:ss`. A layout needs `YYYY`, `MM` and `DD`, each token at most once, and
+its literal text holds no letter or digit. A value without an offset (a layout always, `rfc3339` when it has
+none) is read in `timezone`, which is how most measuring software writes its times. A timestamp column that
+is not in the header refuses the file (`malformed_file`), as a missing context column does. A timestamp that
+does not read, or that is before 1970 or after year 9999, makes the samples of that row `bad` and counts
+`bad_timestamp`.
+
+**Context.** Each key of `context` names a column: `context: {serial: "Serial No", order_ref: "Order"}`. A
+sample of a row carries the values of that row, an empty cell giving no key; a row with no context value has
+no context at all. In `long` the context is the one of the first rows that have each value. A context column
+that is not in the header refuses the file (`malformed_file`), since the mapping is wrong for every row. The
+backend uses the context to attach the measurement to the quality check of the operation that made the part.
+Context values are never written to a log.
+
+**Conversion** to the point's `type` is lossless or the sample is `bad`, with the rules of the `mqtt` plain
+payloads (see "Conversion to the point's `type`" under the `mqtt` driver): booleans are `true`/`false`,
+`1`/`0` and `on`/`off`, numbers a plain decimal number. With `decimal: ","` the comma is turned into a point
+before the conversion, so `12,5` is 12.5, and a numeric value that contains a `.` is a conversion error:
+thousands separators are not accepted (`1.234,5` is `bad`). A `string` point keeps its text as it is. A `bad`
+sample carries the zero of the point's kind.
+
+**Outcomes** of reading a file:
+
+| Case | Result |
+|---|---|
+| A point's column is not in the header, or its key is absent in `long` | no sample for that point; read error `missing_field`, once per file |
+| An empty cell | no sample for that point: a characteristic not measured on this part |
+| A value that does not convert | `bad` sample; read error `conversion` |
+| A timestamp that does not read | `bad` samples for that row; read error `bad_timestamp`, once per row |
+| A row with another number of fields than the header, or a quote that does not close | its samples are `bad`, without context; read error `malformed_row`, once per row |
+| Text that is not valid in the `encoding`, no header row, a context or timestamp column missing from the header, a duplicate addressed name, several `wide` rows without `timestamp` | no samples; the file is refused, read error `malformed_file` |
+| A file above `max_file_size` | not read; read error `file_too_large` |
+
+The read error kinds, with `listing` and `move_failed` below, are those of `/status` and of
+`laraplate_edge_input_read_errors_total{input,kind}`. `listing` counts a directory that cannot be listed.
+
+**What happens to a file.**
+
+1. **Stability.** A file is read only when its size and modification time have not changed for `stable_for`;
+   a change restarts the wait. A file that cannot be opened (a writer holds it, as on Windows) is tried again
+   at the next scan. An exporter that writes `report.tmp` and renames it to `report.csv` works as it is: the
+   `.tmp` is never read.
+2. **Read.** A ready file is read whole and its SHA-256 computed. Files are taken oldest modification time
+   first, so a backlog arrives in measuring order, at most `max_files_per_scan` at a time. The directory is
+   listed before anything else is done in a scan: nothing is committed, moved or written while it cannot be
+   listed.
+3. **The ledger.** The pair of hash and modification time of every read file is kept in
+   `data_dir/file/seen/<input id>.json`, written atomically, outside the state directory the agent removes on a
+   rollback. A file whose pair is in the ledger is never read again, whatever its name: a copy dropped twice
+   gives no sample. The modification time is part of the pair because it is the timestamp of a report that has
+   none, so two identical reports written at different times are two parts, while a rename or a move is the
+   same report. Entries older than `seen_retention` are dropped, counted from the scan that no longer finds the
+   file, so an entry whose file is still there never expires. A file is the same file only with the same name and the same modification time: an exporter that rewrites `result.csv` every time does not keep the entries of its older reports alive. A ledger that does not parse is renamed
+   `<input id>.json.corrupt-<unix seconds>`, a warning is logged, and the input starts with an empty one: the
+   reports still present are read again, and the backend drops their repeated samples (see below).
+4. **Deferred commit.** The samples are emitted, the file is then held pending in memory. At a scan at least
+   `max(interval, 1s)` after the emit, it is committed: first the ledger, then, with `move`, the file goes
+   into `done/` under the watched directory, or into `error/` when the whole file was refused (`malformed_file`,
+   `file_too_large`). Both directories are created on first use, and a name already taken there gets `-1`, `-2`,
+   ... before the extension. The wait gives the samples time to reach the disk buffer: a power cut or a reload
+   in that window would otherwise lose a report. The price is that a file still pending when the agent stops or
+   crashes is read again at the next start. That is harmless: its samples carry the same timestamps (from the
+   file, or from the modification time that a rename preserves) and the same context, and the backend drops a
+   measurement whose signal and timestamp are already stored. A duplicate is logged and moved to `done/`
+   without samples.
+5. **`keep`.** With `after_read: keep` nothing is moved: the ledger alone stops a second read, which is what a
+   read-only share needs. The driver remembers name, size and modification time of the files it committed and
+   does not read or hash them again while those are unchanged. Such files do not count towards
+   `max_files_per_scan`, so a directory full of old reports never starves a new one.
+6. **A file that cannot be moved** (a read-only share, no permission) with `move`: read error `move_failed`,
+   once per file, and a warning; the file is not read again and the input keeps running. Use `keep` on a share
+   the agent may not write to. A file above `max_file_size` under `keep` is not hashed, so it is not in the
+   ledger and is refused again after each restart.
+
+Each file is logged at `info` with its name, the number of samples and its outcome: `read`, `duplicate` or
+`refused` (with the read error kind). There is no per-file metric.
+
+**Devices.** Each file is offered to every point of every device of the input. The usual layout is one input
+per directory and one device per measuring machine.
+
+**Death and birth.** A scan whose listing succeeds renews every device of the input, so silence never kills
+one: a measuring machine may write nothing for hours. A listing that fails (a share unmounted, a permission
+lost) is counted as `listing`, and the input is `connected` false until the next one succeeds. After
+`death_tolerance` without a successful listing every device of the input is reported dead, and the next
+successful listing is their birth. Nothing is read, moved or recorded in the ledger while the directory is
+unreachable.
+
+**Configuration changes.** The ledger is kept per input id and survives reloads and restarts, so changing the
+points of an input does not read the old files again.
+
+**Sample context in the agent.** The context of a sample (the four keys `serial`, `order_ref`, `operation_ref`
+and `lot`) travels through the buffer and into the envelope, where it is the `context` of the sample. The
+transforms keep the context of the sample they transform. A transform that drops samples (`deadband`,
+`min_interval`, `debounce`) drops their context with them, so a measurement point should not use one. A signal
+derived by a plugin processor has no context. A plugin input cannot set a context and a plugin output
+receives samples without it: the plugin SDK has no field for it in this build.
+
+**Declared limits.**
+
+- Files are read whole, once. Growing files, subdirectories, Excel and other binary formats, and file system
+  events are not supported. Symbolic links and other non-regular files in the directory are not read.
+- Rows whose fields are all blank, such as the `;;;` rows Excel appends after the data, are ignored.
+- `probe` attributes a read error to the points of a file as a whole (`malformed_file`, `file_too_large`) or to
+  the points that have a bad sample, per file and not per point.
+- A file above `max_file_size` under `keep` is refused again after each restart, since it is never hashed.
+- The automated tests use files written to temporary directories, never a real measuring machine or share: try
+  a new export with `probe` and `browse` before relying on it.
+
 ## Transforms
 
 A point's `transforms` is a chain of steps applied, in order, to every sample the driver reads, before
@@ -943,6 +1125,10 @@ announced `boolean`; a `string` point mapped to integers, or with `regex_extract
 All the state of a chain lives in memory, per device, signal and step, and starts clean when the agent
 or the input restarts; only the `edge_counter` counts persist. Deadlines are computed from the samples'
 timestamps and served on the agent's clock, so a device clock far from the agent's shifts them.
+
+A transform that drops samples (`deadband`, `min_interval`, `debounce`) drops their sample context with them (see
+"Sample context in the agent" under the `file` driver), so a measurement point, whose samples carry the serial
+and the order of a part, should not use one.
 
 - **`deadband`.** The threshold is absolute, or a percentage of the magnitude of the last sent value; with
   a last sent value of 0 any change passes. A change of exactly the threshold passes (the comparison has
@@ -1294,7 +1480,8 @@ Outcomes, as reported to Laraplate:
 
 | Part | Comes with |
 |---|---|
-| drivers other than `simulated`, `modbus`, `opcua` and `mqtt` | the driver plans, in the design's order: `serial` and `file` |
+| drivers other than `simulated`, `modbus`, `opcua`, `mqtt` and `file` | the driver plan of `serial` |
+| `format: qdas` of a `file` input (`connection.format: not available in this build`) | the Q-DAS plan of the `file` driver |
 | output types other than `laraplate-http` and `plugin:<id>` | the MQTT output plan (`laraplate-mqtt`) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references, `outputs[].config` and `processors[].config` included | a later plan with the OS keystore |

@@ -593,6 +593,7 @@ func TestCheckBuild(t *testing.T) {
 		{"modbus", edit(t, base, "driver: simulated", "driver: modbus"), nil},
 		{"opcua", edit(t, base, "driver: simulated", "driver: opcua"), nil},
 		{"mqtt", edit(t, base, "driver: simulated", "driver: mqtt"), nil},
+		{"file", edit(t, base, "driver: simulated", "driver: file"), nil},
 		{"plugin driver", edit(t, base, "driver: simulated", "driver: 'plugin:fanuc'"), nil},
 		{"mqtt output", edit(t, base, "type: laraplate-http", "type: laraplate-mqtt"), []string{"outputs.0.type: not available in this build"}},
 		{"plugin output", edit(t, base, "type: laraplate-http\n    url: https://erp.example.com\n    token: secret://env/TOKEN", "type: 'plugin:kafka'"), nil},

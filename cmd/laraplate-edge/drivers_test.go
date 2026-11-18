@@ -267,3 +267,60 @@ func TestRouteLibraryLogsSendsTheStandardLogToDebug(t *testing.T) {
 		t.Fatalf("previous output = %q, flags = %d; want the line there and the flags back", before.String(), log.Flags())
 	}
 }
+
+func TestInputDriversRegisterFile(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	boot := bootstrap.File{AgentID: "plant-a-edge-01", DataDir: dataDir, Config: bootstrap.Config{Provider: bootstrap.ProviderLaraplate}}
+
+	factory := inputDrivers(boot, secrets.NewResolver(), slog.New(slog.DiscardHandler), nil)[config.DriverFile]
+	if factory == nil {
+		t.Fatal("file is not registered")
+	}
+
+	connection, err := json.Marshal(map[string]any{"directory": filepath.Join(t.TempDir(), "reports"), "format": "csv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Input{
+		ID:         "cmm",
+		Driver:     config.DriverFile,
+		Connection: connection,
+		Devices: []config.Device{{Device: "cmm-01", Points: []config.Point{
+			{Signal: "bore", Address: "Bore", Type: "float64", Read: config.Read{Mode: config.ReadEvent}},
+		}}},
+	}
+	in, err := factory(cfg, clock.NewFake(time.Date(2026, 11, 18, 8, 0, 0, 0, time.UTC)))
+	if err != nil {
+		t.Fatalf("file factory: %v", err)
+	}
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the factory touched data_dir: %v", err)
+	}
+}
+
+// TestConfigValidateShowsTheFileFactoryMessage: a file input with format
+// qdas is refused by the factory with the field path, never the value.
+func TestConfigValidateShowsTheFileFactoryMessage(t *testing.T) {
+	dir := t.TempDir()
+	doc := filepath.Join(dir, "config.yaml")
+	writeFile(t, doc, `schema: laraplate-edge-config/1
+inputs:
+  - id: cmm
+    driver: file
+    connection: {directory: '`+filepath.ToSlash(filepath.Join(dir, "reports"))+`', format: qdas}
+    devices:
+      - device: cmm-01
+        points:
+          - {signal: bore, address: Bore, type: float64, read: event}
+outputs:
+  - {id: main, type: laraplate-http, url: 'http://127.0.0.1:8000', token: secret://env/TOKEN}
+`)
+
+	r := runCLI(t, "", "config", "validate", doc)
+	if r.code != exitFailure || !strings.Contains(r.stderr, "connection.format: not available in this build") {
+		t.Fatalf("config validate = %+v, want the factory's message", r)
+	}
+}
