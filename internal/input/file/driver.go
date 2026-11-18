@@ -2,7 +2,6 @@ package file
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,9 +22,6 @@ type Options struct {
 	// Logger receives the messages of the driver; nil discards.
 	Logger *slog.Logger
 }
-
-// errProbe is the answer of Probe until the probe of the file driver exists.
-var errProbe = errors.New("file: probe is not available yet")
 
 // Factory returns the factory of file inputs. It validates the connection
 // and every point and never touches the disk (decision P1, core R47).
@@ -64,6 +60,8 @@ type Input struct {
 	started bool
 	closed  bool
 	cancel  context.CancelFunc
+	// probeSource is the file the last probe read.
+	probeSource string
 
 	wg sync.WaitGroup
 }
@@ -188,11 +186,6 @@ func (in *Input) Close() error {
 	in.wg.Wait()
 
 	return nil
-}
-
-// Probe is not available yet.
-func (in *Input) Probe(context.Context) ([]model.Sample, error) {
-	return nil, errProbe
 }
 
 // Health returns whether the last listing worked and the read errors of the

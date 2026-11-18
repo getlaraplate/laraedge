@@ -83,8 +83,8 @@ func loadLedger(dataDir, inputID string, log *slog.Logger) (*ledger, error) {
 		return nil, err
 	}
 
-	var doc ledgerFile
-	if err := json.Unmarshal(data, &doc); err != nil || doc.Version != ledgerVersion || !validEntries(doc.Entries) {
+	entries, ok := parseLedger(data)
+	if !ok {
 		moved := fmt.Sprintf("%s.corrupt-%d", file, time.Now().Unix())
 		if err := os.Rename(file, moved); err != nil {
 			return nil, err
@@ -94,9 +94,40 @@ func loadLedger(dataDir, inputID string, log *slog.Logger) (*ledger, error) {
 
 		return l, nil
 	}
-	l.entries = doc.Entries
+	l.entries = entries
 
 	return l, nil
+}
+
+// parseLedger decodes a stored ledger; ok is false for a document that does
+// not parse, has another version or holds a malformed hash.
+func parseLedger(data []byte) (entries []ledgerEntry, ok bool) {
+	var doc ledgerFile
+	if err := json.Unmarshal(data, &doc); err != nil || doc.Version != ledgerVersion || !validEntries(doc.Entries) {
+		return nil, false
+	}
+
+	return doc.Entries, true
+}
+
+// peekLedger reads the ledger of the input without touching the disk beyond
+// the read, for probe and browse: a missing, unreadable or corrupt ledger, or
+// an unknown data_dir, gives an empty one, and nothing is renamed or written.
+func peekLedger(dataDir, inputID string) *ledger {
+	dir, name := ledgerPath(dataDir, inputID)
+	l := &ledger{dir: dir, name: name}
+	if dataDir == "" {
+		return l
+	}
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return l
+	}
+	if entries, ok := parseLedger(data); ok {
+		l.entries = entries
+	}
+
+	return l
 }
 
 // validEntries reports whether every stored hash is a SHA-256 in hex.

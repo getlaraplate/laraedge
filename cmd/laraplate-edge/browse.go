@@ -17,6 +17,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/bootstrap"
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/input/file"
 	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/input/opcua"
 	"github.com/getlaraplate/laraedge/internal/logging"
@@ -51,6 +52,7 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 	nodeFlag := fs.String("node", "", "NodeId to start from (default: the Objects folder, i=85)")
 	depth := fs.Int("depth", opcua.DefaultBrowseDepth, fmt.Sprintf("levels to print below the start node, 1 to %d", opcua.MaxBrowseDepth))
 	filter := fs.String("filter", mqtt.DefaultBrowseFilter, "mqtt topic filter to subscribe to (default "+mqtt.DefaultSparkplugBrowseFilter+" for an input with format sparkplug_b)")
+	limit := fs.Int("limit", file.DefaultBrowseLimit, fmt.Sprintf("file: how many files to list, newest first, 1 to %d", file.MaxBrowseLimit))
 	duration := fs.Duration("duration", mqtt.DefaultBrowseDuration, "mqtt: how long to collect messages, 1s to 5m")
 
 	positional, code, ok := parseArgs(fs, args)
@@ -66,6 +68,22 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
 	doc, boot, cfg, found := loadedInput(*configFile, *bootstrapPath, positional[0])
+	if found && cfg.Driver == config.DriverFile {
+		if given["node"] || given["depth"] || given["filter"] || given["duration"] {
+			fmt.Fprintf(stderr, "%s%s\n", prefix, errFileBrowseFlags)
+			return exitUsage
+		}
+		if *limit < 1 || *limit > file.MaxBrowseLimit {
+			fmt.Fprintf(stderr, "%s--limit: want a number from 1 to %d\n", prefix, file.MaxBrowseLimit)
+			return exitUsage
+		}
+
+		return browseFile(doc, boot, cfg, *configFile, *bootstrapPath, *limit, stdout, stderr)
+	}
+	if given["limit"] {
+		fmt.Fprintf(stderr, "%s%s\n", prefix, errNotFileBrowseLimit)
+		return exitUsage
+	}
 	if found && cfg.Driver == config.DriverMQTT {
 		if given["node"] || given["depth"] {
 			fmt.Fprintf(stderr, "%s%s\n", prefix, errMQTTBrowseFlags)
@@ -169,8 +187,10 @@ const errPluginNoBrowse = "the plugin of this input does not support browse"
 // errMQTTBrowseFlags and errOtherBrowseFlags are the usage errors of a flag
 // given to a driver it does not belong to.
 const (
-	errMQTTBrowseFlags  = "--node and --depth are for OPC UA and plugin inputs, not for an mqtt input"
-	errOtherBrowseFlags = "--filter and --duration are for mqtt inputs only"
+	errMQTTBrowseFlags    = "--node and --depth are for OPC UA and plugin inputs, not for an mqtt input"
+	errOtherBrowseFlags   = "--filter and --duration are for mqtt inputs only"
+	errFileBrowseFlags    = "--node, --depth, --filter and --duration do not apply to a file input; it takes --limit"
+	errNotFileBrowseLimit = "--limit is for file inputs only"
 )
 
 // loadedInput returns the document and the input id when the document loads
@@ -346,6 +366,58 @@ func sparkplugBrowseLines(entries []mqtt.SparkplugEntry) []string {
 
 	return lines
 }
+
+// browseFile lists the limit newest files of the watched directory of a file
+// input, one line "<name>  <size> B  <age in whole seconds>s  <state>" each
+// (state waiting, ready or seen), then an empty line, "addresses of <name>:"
+// and one "  <address>  <preview>" line per header name (wide) or key (long)
+// of the newest file that can be read, the address being usable as the
+// address of a point. Without a readable file it prints "no file to read".
+// It reads files and writes nothing, the ledger of read files included.
+func browseFile(doc config.Document, boot bootstrap.File, cfg config.Input, configFile, bootstrapPath string, limit int, stdout, stderr io.Writer) int {
+	const prefix = "laraplate-edge browse: "
+
+	boot, err := probeBootstrap(doc, boot, cfg.ID, configFile, bootstrapPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+		return exitFailure
+	}
+
+	in, err := file.New(cfg, clock.Real(), file.Options{DataDir: boot.DataDir, Logger: logging.New(stderr, slog.LevelWarn)})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+		return exitFailure
+	}
+	defer func() { _ = in.Close() }()
+
+	b, err := in.Browse(limit)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+		return exitFailure
+	}
+
+	for _, f := range b.Files {
+		fmt.Fprintf(stdout, "%s  %d B  %ds  %s\n", mqtt.Escape(f.Name), f.Size, int64(f.Age/time.Second), f.State)
+	}
+	if b.Source == "" {
+		if len(b.Files) > 0 {
+			fmt.Fprintln(stdout)
+		}
+		fmt.Fprintln(stdout, browseNoFile)
+
+		return exitOK
+	}
+
+	fmt.Fprintf(stdout, "\naddresses of %s:\n", mqtt.Escape(b.Source))
+	for _, a := range b.Addresses {
+		fmt.Fprintf(stdout, "  %s  %s\n", mqtt.Escape(a.Address), a.Preview)
+	}
+
+	return exitOK
+}
+
+// browseNoFile is what a file browse prints when no file can be read.
+const browseNoFile = "no file to read"
 
 // browsePlugin lists the nodes a plugin input offers below node: one line per
 // node, "<address>  <name>  <type>  <access>", the address being usable as the

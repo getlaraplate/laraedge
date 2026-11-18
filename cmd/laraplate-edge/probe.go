@@ -21,6 +21,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	"github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/model"
 	"github.com/getlaraplate/laraedge/internal/plugin"
@@ -78,7 +79,7 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 	log := logging.New(stderr, slog.LevelWarn)
 	defer routeLibraryLogs(log)()
 
-	samples, kinds, elapsed, err := probeInput(doc, boot, positional[0], log)
+	samples, kinds, source, elapsed, err := probeInput(doc, boot, positional[0], log)
 	if err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge probe: %v\n", err)
 		return exitFailure
@@ -102,6 +103,9 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 	for _, p := range pointsWithoutSample(doc, positional[0], samples) {
 		fmt.Fprintf(&out, "%s\t%s\t%s\n", p[0], p[1], cmp.Or(kinds[input.PointRef{Device: p[0], Signal: p[1]}], probeNoMessage))
 	}
+	if source != "" {
+		fmt.Fprintf(&out, "source: %s\n", mqtt.Escape(source))
+	}
 	fmt.Fprintf(&out, "response time: %s\n", elapsed.Round(time.Microsecond))
 	if _, err := stdout.Write(out.Bytes()); err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge probe: write the samples: %v\n", err)
@@ -123,6 +127,12 @@ const probeNoMessage = "no message"
 // mqtt input.
 type pointKindProber interface {
 	ProbePoints(ctx context.Context) ([]model.Sample, map[input.PointRef]string, error)
+}
+
+// probeSourcer is an input that names the file its samples were read from:
+// the file input.
+type probeSourcer interface {
+	ProbeSource() string
 }
 
 // pointsWithoutSample returns the device and signal of the points of input id
@@ -178,7 +188,8 @@ func probeDocument(configFile, bootstrapPath string) (doc config.Document, boot 
 // probeBootstrap completes boot when the document comes from --config and a
 // --bootstrap is given too: an opcua input takes data_dir (its certificate)
 // and agent_id (its application URI) from the bootstrap (ruling R9), an mqtt
-// input its agent_id (the default client id). For the other drivers the
+// input its agent_id (the default client id), a file input its data_dir (the
+// ledger of read files). For the other drivers the
 // bootstrap is not read, as --config wins over it.
 func probeBootstrap(doc config.Document, boot bootstrap.File, id, configFile, bootstrapPath string) (bootstrap.File, error) {
 	if configFile == "" || bootstrapPath == "" {
@@ -186,7 +197,7 @@ func probeBootstrap(doc config.Document, boot bootstrap.File, id, configFile, bo
 	}
 
 	i := slices.IndexFunc(doc.Inputs, func(in config.Input) bool { return in.ID == id })
-	if i < 0 || (doc.Inputs[i].Driver != config.DriverOPCUA && doc.Inputs[i].Driver != config.DriverMQTT) {
+	if i < 0 || (doc.Inputs[i].Driver != config.DriverOPCUA && doc.Inputs[i].Driver != config.DriverMQTT && doc.Inputs[i].Driver != config.DriverFile) {
 		return boot, nil
 	}
 
@@ -202,10 +213,11 @@ func probeBootstrap(doc config.Document, boot bootstrap.File, id, configFile, bo
 
 // probeInput builds the input id of doc and reads every point once. The
 // elapsed time is the response time of that read; kinds says, for an input
-// that can (pointKindProber), why a point has no good sample. Passwords
+// that can (pointKindProber), why a point has no good sample, and source, for
+// one that can (probeSourcer), the file the samples come from. Passwords
 // resolve from the environment and files of this process; log receives the
 // drivers' warnings.
-func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) (samples []model.Sample, kinds map[input.PointRef]string, elapsed time.Duration, err error) {
+func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) (samples []model.Sample, kinds map[input.PointRef]string, source string, elapsed time.Duration, err error) {
 	var cfg *config.Input
 	for i := range doc.Inputs {
 		if doc.Inputs[i].ID == id {
@@ -215,25 +227,25 @@ func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.L
 		}
 	}
 	if cfg == nil {
-		return nil, nil, 0, fmt.Errorf("the configuration has no input %q (inputs: %s)", id, inputIDs(doc))
+		return nil, nil, "", 0, fmt.Errorf("the configuration has no input %q (inputs: %s)", id, inputIDs(doc))
 	}
 
 	if strings.HasPrefix(cfg.Driver, plugin.DriverPrefix) {
 		samples, elapsed, err := probePlugin(doc, boot, *cfg, log)
 
-		return samples, nil, elapsed, err
+		return samples, nil, "", elapsed, err
 	}
 
 	factory := inputDrivers(boot, secrets.NewResolver(), log, nil)[cfg.Driver]
 	if factory == nil {
-		return nil, nil, 0, fmt.Errorf("input %q: driver %s is not available in this build", id, cfg.Driver)
+		return nil, nil, "", 0, fmt.Errorf("input %q: driver %s is not available in this build", id, cfg.Driver)
 	}
 
 	clk := clock.Real()
 
 	in, err := factory(*cfg, clk)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("input %q: %w", id, err)
+		return nil, nil, "", 0, fmt.Errorf("input %q: %w", id, err)
 	}
 	defer func() { _ = in.Close() }()
 
@@ -248,10 +260,14 @@ func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.L
 		samples, err = in.Probe(ctx)
 	}
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("input %q: %w", id, err)
+		return nil, nil, "", 0, fmt.Errorf("input %q: %w", id, err)
 	}
 
-	return samples, kinds, clk.Now().Sub(start), nil
+	if sourcer, ok := in.(probeSourcer); ok {
+		source = sourcer.ProbeSource()
+	}
+
+	return samples, kinds, source, clk.Now().Sub(start), nil
 }
 
 // pluginStopTimeout bounds the stop of the plugin process, which has its own
