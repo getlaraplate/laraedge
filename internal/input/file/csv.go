@@ -148,12 +148,27 @@ func readCSV(text string, conn Connection) (*csvFile, error) {
 				f.index[name] = append(f.index[name], i)
 			}
 		default:
+			if err == nil && blankRow(rec) {
+				continue
+			}
 			fields := append([]string(nil), rec...)
 			f.rows = append(f.rows, row{fields: fields, bad: err != nil || len(fields) != len(f.header)})
 		}
 	}
 
 	return f, nil
+}
+
+// blankRow reports whether every field is empty after trimming: Excel writes
+// such rows (";;;") after the data, and they carry nothing to read.
+func blankRow(fields []string) bool {
+	for _, field := range fields {
+		if strings.TrimSpace(field) != "" {
+			return false
+		}
+	}
+
+	return true
 }
 
 // column returns the first position of name in the header.

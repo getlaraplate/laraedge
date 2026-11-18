@@ -399,6 +399,7 @@ func TestExcelExportEveryValueGood(t *testing.T) {
 	data := "Zeit;\xd8 Bohrung;Anzahl\r\n" +
 		"18.11.2026 10:00:00;\"12,5\";3\r\n" +
 		"18.11.2026 10:01:00;\"12,6\";4\r\n" +
+		";;\r\n" +
 		"\r\n"
 	samples, kinds, err := parseCSV(p, []byte(data), csvModTime)
 	if err != nil || len(kinds) != 0 {
@@ -501,4 +502,48 @@ func TestThousandsDotUnderDecimalComma(t *testing.T) {
 	if err != nil || len(samples) != 1 || samples[0].Quality != model.Bad || !reflect.DeepEqual(kinds, []string{KindConversion}) {
 		t.Fatalf("%+v %v %v", samples, kinds, err)
 	}
+}
+
+// TestBlankRowsAreDropped: Excel writes rows of empty fields after the data;
+// they are neither malformed rows nor bad timestamps, in both layouts.
+func TestBlankRowsAreDropped(t *testing.T) {
+	wide := csvConn()
+	wide.CSV.Delimiter = ';'
+	long := wide
+	long.CSV.Layout = "long"
+	long.CSV.KeyColumn = "K"
+	long.CSV.ValueColumn = "V"
+
+	cases := []struct {
+		name string
+		conn Connection
+		data string
+		want int
+	}{
+		{"wide without timestamp", wide, "Bore;Count\n12.5;3\n;;\n ; \n", 2},
+		{"wide with timestamp", withTimestamp(wide), "TS;Bore;Count\n2026-11-18T10:00:00Z;12.5;3\n;;\n", 2},
+		{"long without timestamp", long, "K;V\nbore;12.5\n;\n", 1},
+		{"long with timestamp", withTimestamp(long), "TS;K;V\n2026-11-18T10:00:00Z;bore;12.5\n;;\n", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := csvPlan(tc.conn, pt("bore", "Bore", "float64", model.Critical), pt("count", "Count", "int32", model.Critical))
+			if tc.conn.CSV.Layout == "long" {
+				p = csvPlan(tc.conn, pt("bore", "bore", "float64", model.Critical))
+			}
+			samples, kinds, err := parseCSV(p, []byte(tc.data), csvModTime)
+			if err != nil || len(kinds) != 0 {
+				t.Fatalf("err=%v kinds=%v", err, kinds)
+			}
+			if len(samples) != tc.want {
+				t.Fatalf("samples = %d, want %d: %+v", len(samples), tc.want, samples)
+			}
+		})
+	}
+}
+
+func withTimestamp(c Connection) Connection {
+	c.Timestamp = isoSpec("TS")
+
+	return c
 }
