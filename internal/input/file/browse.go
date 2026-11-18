@@ -166,18 +166,22 @@ func (in *Input) qdasAddressesOf(data []byte) (addrs, context []BrowseAddress, o
 		return nil, nil, false
 	}
 
+	var v qdasView
+	if len(f.Records) > 0 {
+		v = f.view(0)
+	}
 	addrs = make([]BrowseAddress, 0, f.Count)
 	for i := 1; i <= f.Count; i++ {
 		c := f.Characteristic(i)
 		a := BrowseAddress{Address: c.Address(i), Detail: qdasDetail(c)}
 		if len(f.Records) > 0 {
-			a.Preview = preview(f.Field(0, i, "K0001"))
+			a.Preview = preview(v.field(i, "K0001"))
 		}
 		addrs = append(addrs, a)
 	}
 	if len(f.Records) > 0 {
-		for _, key := range f.ContextKeys(0) {
-			context = append(context, BrowseAddress{Address: key, Preview: preview(f.ContextValue(0, key))})
+		for _, key := range v.contextKeys() {
+			context = append(context, BrowseAddress{Address: key, Preview: preview(v.value(key))})
 		}
 	}
 

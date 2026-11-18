@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -712,4 +713,44 @@ func TestQDASContextKeys(t *testing.T) {
 	if v := f.ContextValue(0, "K0006"); v != "B1" {
 		t.Errorf("K0006 = %q, want the lowest characteristic's", v)
 	}
+}
+
+// TestQDASBrowseAndContextWorkStaysLinear: a report with many characteristics
+// and as many coded fields must not rebuild a per-record index for every
+// characteristic. The bound is on allocated bytes, proportional to the input.
+func TestQDASBrowseAndContextWorkStaysLinear(t *testing.T) {
+	const n = 20000
+	var b strings.Builder
+	b.WriteString("K0100 20000\n" + strings.Repeat("1"+qs, n-1) + "1\n")
+	for i := 1; i <= n; i++ {
+		b.WriteString("K0008/" + strconv.Itoa(i) + " x\n")
+	}
+	data := b.String()
+	limit := uint64(256 * len(data))
+
+	measure := func(name string, run func()) {
+		t.Helper()
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		run()
+		runtime.ReadMemStats(&after)
+		if got := after.TotalAlloc - before.TotalAlloc; got > limit {
+			t.Errorf("%s allocated %d bytes for %d bytes of input, limit %d", name, got, len(data), limit)
+		}
+	}
+
+	in := &Input{conn: qdasConnection()}
+	measure("browse addresses", func() {
+		addrs, ctx, ok := in.qdasAddressesOf([]byte(data))
+		if !ok || len(addrs) != n || len(ctx) != 1 || ctx[0].Address != "K0008" {
+			t.Errorf("ok = %v, addresses = %d, context = %+v", ok, len(addrs), ctx)
+		}
+	})
+	p := qdasPlan(qdasConnection(), pt("a", "#1", "float64", model.Bulk), pt("b", "#20000", "float64", model.Bulk))
+	measure("parseQDAS", func() {
+		if _, _, err := parseQDAS(p, []byte(data), qdasModTime); err != nil {
+			t.Errorf("err = %v", err)
+		}
+	})
 }

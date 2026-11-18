@@ -227,15 +227,23 @@ func (f *qdasFile) Field(n, index int, key string) string {
 // those of the characteristics in index order (a key once, at its first
 // place). Empty values are left out.
 func (f *qdasFile) ContextKeys(n int) []string {
-	v := f.view(n)
+	return f.view(n).contextKeys()
+}
+
+// contextKeys is ContextKeys on a view built once by the caller. A key is
+// looked up once, whether or not it has a value.
+func (v qdasView) contextKeys() []string {
+	f := v.f
 	seen := map[string]bool{}
 	var keys []string
 	add := func(key string) {
-		if seen[key] || !qdasContextKey(key) || v.value(key) == "" {
+		if seen[key] || !qdasContextKey(key) {
 			return
 		}
 		seen[key] = true
-		keys = append(keys, key)
+		if v.value(key) != "" {
+			keys = append(keys, key)
+		}
 	}
 
 	var shared []string
