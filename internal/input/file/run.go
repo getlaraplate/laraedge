@@ -2,14 +2,11 @@ package file
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	edgeinput "github.com/getlaraplate/laraedge/internal/input"
@@ -34,24 +31,28 @@ const (
 	outcomeRefused   = "refused"
 )
 
-// pendingFile is a file emitted and not yet committed.
-type pendingFile struct {
-	info fileInfo
-	key  ledgerKey
-	// keyed is false for a file refused before it was read: it has no hash
-	// and is not written to the ledger.
+// pendingReport is a report emitted and not yet committed.
+type pendingReport struct {
+	report fileReport
+	key    ledgerKey
+	// keyed is false for a report refused before it was read: it has no
+	// hash and is not written to the ledger.
 	keyed bool
-	// refused files go to error/ instead of done/.
+	// refused reports go to error/ instead of done/.
 	refused bool
 	emitted time.Time
 }
 
-// rememberedFile is a committed file still in the watched directory: with
-// keep, or because its move failed. sub is the directory it still has to be
-// moved into, empty with keep.
-type rememberedFile struct {
-	info fileInfo
-	sub  string
+// rememberedReport is a committed report still in the watched directory:
+// with keep, or because a move failed. files are its files still listed,
+// with the size and modification time they were read with. sub is the
+// directory they still have to be moved into, empty with keep. targets are
+// the paths in sub chosen for files, set only once another file of the
+// report was moved, so that a pair keeps one suffix.
+type rememberedReport struct {
+	files   []fileInfo
+	sub     string
+	targets []string
 }
 
 // scanner is the state of the scanning goroutine; only that goroutine uses
@@ -63,12 +64,14 @@ type scanner struct {
 	watch  *watcher
 	ledger *ledger
 
-	// pending holds the files emitted and not yet committed, by name.
-	pending map[string]pendingFile
-	// remembered holds the committed files still listed, by name: they are
-	// not read again while their size and modification time are unchanged.
-	remembered map[string]rememberedFile
-	// moveFailed holds the names whose failed move was counted and logged.
+	// pending holds the reports emitted and not yet committed, by name.
+	pending map[string]pendingReport
+	// remembered holds the committed reports still listed, by name: they
+	// are not read again while the size and modification time of each of
+	// their files are unchanged.
+	remembered map[string]rememberedReport
+	// moveFailed holds the report names whose failed move was counted and
+	// logged.
 	moveFailed map[string]bool
 }
 
@@ -79,8 +82,8 @@ func newScanner(in *Input, emit func(model.Record), life *edgeinput.Lifecycle, l
 		life:       life,
 		watch:      newWatcher(in.conn),
 		ledger:     led,
-		pending:    map[string]pendingFile{},
-		remembered: map[string]rememberedFile{},
+		pending:    map[string]pendingReport{},
+		remembered: map[string]rememberedReport{},
 		moveFailed: map[string]bool{},
 	}
 }
@@ -101,15 +104,15 @@ func (in *Input) run(ctx context.Context, s *scanner) {
 	}
 }
 
-// commitDelay is how long a file stays pending after its emit.
+// commitDelay is how long a report stays pending after its emit.
 func (s *scanner) commitDelay() time.Duration {
 	return max(s.in.conn.Interval, minCommitDelay)
 }
 
 // scan is one scan (spec section 5): list the directory, or count the
-// failure and stop there; renew the devices; commit the files emitted long
-// enough ago; retry the moves that failed; prune the ledger; read the files
-// that became stable.
+// failure and stop there; renew the devices; commit the reports emitted long
+// enough ago; retry the moves that failed; prune the ledger; read the
+// reports whose files became stable.
 func (s *scanner) scan(ctx context.Context) {
 	in := s.in
 	now := in.clk.Now()
@@ -141,36 +144,67 @@ func (s *scanner) scan(ctx context.Context) {
 	}
 	s.prune(now, present)
 
-	var candidates []fileInfo
-	for _, f := range s.watch.Ready(now, listed) {
-		if _, ok := s.pending[f.Name]; ok {
+	held := s.held()
+	reports, _ := reportsOf(in.conn, s.watch.Ready(now, listed), listed)
+	var candidates []fileReport
+	for _, r := range reports {
+		if slices.ContainsFunc(r.files(), func(f fileInfo) bool { return held[f.Name] }) {
 			continue
 		}
-		if _, ok := s.remembered[f.Name]; ok {
-			continue
-		}
-		candidates = append(candidates, f)
+		candidates = append(candidates, r)
 		if len(candidates) == in.conn.MaxFilesPerScan {
 			break
 		}
 	}
 
-	for _, f := range candidates {
+	for _, r := range candidates {
 		if ctx.Err() != nil {
 			return
 		}
-		s.handle(f)
+		s.handle(r)
 	}
 }
 
-// commit writes the pending files emitted at least commitDelay ago to the
+// held returns the names of the files of the pending and remembered
+// reports: a report holding one of them is not a candidate, so a .dfd is
+// never read with another .dfx while its own pair is pending or remembered.
+func (s *scanner) held() map[string]bool {
+	held := map[string]bool{}
+	for _, p := range s.pending {
+		for _, f := range p.report.files() {
+			held[f.Name] = true
+		}
+	}
+	for _, r := range s.remembered {
+		for _, f := range r.files {
+			held[f.Name] = true
+		}
+	}
+
+	return held
+}
+
+// unchanged reports whether every file is listed with its size and
+// modification time.
+func unchanged(listed map[string]fileInfo, files []fileInfo) bool {
+	for _, f := range files {
+		l, ok := listed[f.Name]
+		if !ok || l.Size != f.Size || !l.ModTime.Equal(f.ModTime) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// commit writes the pending reports emitted at least commitDelay ago to the
 // ledger, then moves them into done/ or error/ (move) or remembers them
-// (keep). A file no longer listed, or listed with another size or
-// modification time, is only recorded: it is gone, or it changed after it
-// was read and is a new candidate. It returns the names moved out of the
-// directory.
+// (keep). A report with a file no longer listed, or listed with another size
+// or modification time, is only recorded: it is gone, or it changed after it
+// was read and is a new candidate. It returns the names of the files moved
+// out of the directory.
 func (s *scanner) commit(now time.Time, files []fileInfo) map[string]bool {
-	var due []pendingFile
+	var due []pendingReport
 	for _, name := range slices.Sorted(maps.Keys(s.pending)) {
 		p := s.pending[name]
 		if now.Sub(p.emitted) >= s.commitDelay() {
@@ -185,7 +219,7 @@ func (s *scanner) commit(now time.Time, files []fileInfo) map[string]bool {
 	keyed := false
 	for _, p := range due {
 		if p.keyed {
-			s.ledger.Add(p.key, p.info.Name)
+			s.ledger.Add(p.key, p.report.Name())
 			keyed = true
 		}
 	}
@@ -198,64 +232,77 @@ func (s *scanner) commit(now time.Time, files []fileInfo) map[string]bool {
 		listed[f.Name] = f
 	}
 	for _, p := range due {
-		delete(s.pending, p.info.Name)
-		if f, ok := listed[p.info.Name]; !ok || f.Size != p.info.Size || !f.ModTime.Equal(p.info.ModTime) {
+		delete(s.pending, p.report.Name())
+		if !unchanged(listed, p.report.files()) {
 			continue
 		}
 		sub := doneDir
 		if p.refused {
 			sub = errorDir
 		}
-		if s.settle(p.info, sub) {
-			moved[p.info.Name] = true
+		for _, name := range s.settle(p.report, sub) {
+			moved[name] = true
 		}
 	}
 
 	return moved
 }
 
-// settle disposes of a committed file: with move it is moved into sub, and
-// remembered for a later try when the move fails; with keep it is
-// remembered. It reports whether the file left the directory.
-func (s *scanner) settle(info fileInfo, sub string) bool {
+// settle disposes of a committed report: with move its files are moved into
+// sub, and the ones whose move failed are remembered for a later try; with
+// keep it is remembered. It returns the names of the files that left the
+// directory.
+func (s *scanner) settle(r fileReport, sub string) []string {
 	if s.in.conn.AfterRead == AfterReadKeep {
-		s.remembered[info.Name] = rememberedFile{info: info}
+		s.remembered[r.Name()] = rememberedReport{files: r.files()}
 
-		return false
+		return nil
 	}
-	if s.move(info.Name, sub) {
-		return true
+	left, targets, moved := s.move(r.Name(), r.files(), nil, sub)
+	if len(left) > 0 {
+		s.remembered[r.Name()] = rememberedReport{files: left, sub: sub, targets: targets}
 	}
-	s.remembered[info.Name] = rememberedFile{info: info, sub: sub}
 
-	return false
+	return moved
 }
 
-// revisit forgets the remembered files no longer listed or changed since
-// (a changed file is a new candidate) and tries again the moves that failed.
-// The names it moves are added to moved.
+// revisit forgets the remembered reports with a file no longer listed or
+// changed since (a changed report is a new candidate) and tries again the
+// moves that failed. The names it moves are added to moved.
 func (s *scanner) revisit(files []fileInfo, moved map[string]bool) {
 	listed := make(map[string]fileInfo, len(files))
 	for _, f := range files {
 		listed[f.Name] = f
 	}
-	for name := range s.moveFailed {
-		if _, ok := listed[name]; !ok {
-			delete(s.moveFailed, name)
-		}
-	}
 
 	for _, name := range slices.Sorted(maps.Keys(s.remembered)) {
 		r := s.remembered[name]
-		f, ok := listed[name]
-		if !ok || f.Size != r.info.Size || !f.ModTime.Equal(r.info.ModTime) {
+		if !unchanged(listed, r.files) {
 			delete(s.remembered, name)
 
 			continue
 		}
-		if r.sub != "" && s.move(name, r.sub) {
+		if r.sub == "" {
+			continue
+		}
+		left, targets, done := s.move(name, r.files, r.targets, r.sub)
+		for _, n := range done {
+			moved[n] = true
+		}
+		if len(left) == 0 {
 			delete(s.remembered, name)
-			moved[name] = true
+
+			continue
+		}
+		r.files, r.targets = left, targets
+		s.remembered[name] = r
+	}
+
+	for name := range s.moveFailed {
+		_, isListed := listed[name]
+		_, isRemembered := s.remembered[name]
+		if !isListed && !isRemembered {
+			delete(s.moveFailed, name)
 		}
 	}
 }
@@ -287,41 +334,34 @@ func (s *scanner) save() {
 	}
 }
 
-// handle reads one ready file: refused when too large, skipped on a read
-// error (it is tried again at the next scan), a duplicate when its hash and
-// modification time are in the ledger, otherwise parsed and emitted. Read
-// and refused files become pending.
-func (s *scanner) handle(f fileInfo) {
+// handle reads one report whose files are ready: refused when a file is too
+// large, skipped on a read error (it is tried again at the next scan), a
+// duplicate when its hash and modification time are in the ledger, otherwise
+// parsed and emitted. Read and refused reports become pending.
+func (s *scanner) handle(r fileReport) {
 	in := s.in
-	if f.Size > int64(in.conn.MaxFileSize) {
-		s.refuse(f, KindFileTooLarge, nil)
+	data, key, tooLarge, err := readReport(in.deps, in.conn.Directory, r, in.conn.MaxFileSize)
+	if tooLarge {
+		s.refuse(r, KindFileTooLarge, nil)
 
 		return
 	}
-
-	data, err := in.deps.readFile(filepath.Join(in.conn.Directory, f.Name))
 	if err != nil {
-		in.log.Debug("file: the file cannot be read, trying again at the next scan", "input", in.cfg.ID, "file", f.Name, "error", err.Error())
-
-		return
-	}
-	if len(data) > in.conn.MaxFileSize {
-		s.refuse(f, KindFileTooLarge, nil)
+		in.log.Debug("file: the file cannot be read, trying again at the next scan", "input", in.cfg.ID, "file", r.Name(), "error", err.Error())
 
 		return
 	}
 
-	key := ledgerKey{Hash: sha256.Sum256(data), ModTime: f.ModTime}
 	if s.ledger.Has(key) {
-		s.logFile(f.Name, 0, outcomeDuplicate)
-		s.settle(f, doneDir)
+		s.logFile(r.Name(), 0, outcomeDuplicate)
+		s.settle(r, doneDir)
 
 		return
 	}
 
-	samples, kinds, err := parseCSV(in.plan, data, f.ModTime)
+	samples, kinds, err := parseReport(in.plan, in.conn.Format, data, r.Primary.ModTime)
 	if err != nil {
-		s.refuse(f, KindMalformedFile, &key)
+		s.refuse(r, KindMalformedFile, &key)
 
 		return
 	}
@@ -331,84 +371,114 @@ func (s *scanner) handle(f fileInfo) {
 	for _, kind := range kinds {
 		in.health.CountError(kind)
 	}
-	s.logFile(f.Name, len(samples), outcomeRead)
-	s.pending[f.Name] = pendingFile{info: f, key: key, keyed: true, emitted: in.clk.Now()}
+	s.logFile(r.Name(), len(samples), outcomeRead)
+	s.pending[r.Name()] = pendingReport{report: r, key: key, keyed: true, emitted: in.clk.Now()}
 }
 
-// refuse counts a file refused as a whole and holds it pending, so it is
-// committed like a read one (decision P8). key is nil for a file not read.
-func (s *scanner) refuse(f fileInfo, kind string, key *ledgerKey) {
+// refuse counts a report refused as a whole and holds it pending, so it is
+// committed like a read one (decision P8). key is nil for a report not read.
+func (s *scanner) refuse(r fileReport, kind string, key *ledgerKey) {
 	s.in.health.CountError(kind)
-	s.in.log.Info("file read", "input", s.in.cfg.ID, "file", f.Name, "samples", 0, "outcome", outcomeRefused, "kind", kind)
+	s.in.log.Info("file read", "input", s.in.cfg.ID, "file", r.Name(), "samples", 0, "outcome", outcomeRefused, "kind", kind)
 
-	p := pendingFile{info: f, refused: true, emitted: s.in.clk.Now()}
+	p := pendingReport{report: r, refused: true, emitted: s.in.clk.Now()}
 	if key != nil {
 		p.key, p.keyed = *key, true
 	}
-	s.pending[f.Name] = p
+	s.pending[r.Name()] = p
 }
 
-// logFile logs the outcome of a file at info, never its contents.
+// logFile logs the outcome of a report at info, never its contents.
 func (s *scanner) logFile(name string, samples int, outcome string) {
 	s.in.log.Info("file read", "input", s.in.cfg.ID, "file", name, "samples", samples, "outcome", outcome)
 }
 
-// move renames the file name of the watched directory into its subdirectory
-// sub, created on first use, under a free name. A failure is counted and
-// logged once per file name.
-func (s *scanner) move(name, sub string) bool {
+// move renames the files of the report name from the watched directory into
+// its subdirectory sub, created on first use. targets are the paths chosen
+// for files by an earlier try that moved another file of the report, nil
+// otherwise: then one suffix free for every file is chosen, so a pair keeps
+// matching names (decision Q8). A chosen path taken since gets a free name of
+// its own rather than being replaced. It returns the files left in the
+// directory with their targets, and the names it moved. A failure is counted
+// and logged once per report name.
+func (s *scanner) move(name string, files []fileInfo, targets []string, sub string) (left []fileInfo, leftTargets []string, moved []string) {
 	in := s.in
 	dir := filepath.Join(in.conn.Directory, sub)
+	previous := targets != nil
 
 	err := os.MkdirAll(dir, 0o755)
-	var target string
-	if err == nil {
-		target, err = freeName(dir, name)
-	}
-	if err == nil {
-		err = in.deps.rename(filepath.Join(in.conn.Directory, name), target)
+	if err == nil && !previous {
+		names := make([]string, len(files))
+		for i, f := range files {
+			names[i] = f.Name
+		}
+		targets, err = freeNames(dir, names)
 	}
 	if err != nil {
-		if !s.moveFailed[name] {
-			s.moveFailed[name] = true
-			in.health.CountError(KindMoveFailed)
-			in.log.Warn("file: the file cannot be moved after reading; it will not be read again", "input", in.cfg.ID, "file", name, "into", sub, "error", err.Error())
+		s.moveFailure(name, files[0].Name, sub, err)
+		if !previous {
+			targets = nil
 		}
 
-		return false
+		return files, targets, nil
 	}
-	delete(s.moveFailed, name)
 
-	return true
-}
-
-// maxSuffix bounds the search for a free name.
-const maxSuffix = 100000
-
-// errNoFreeName is a directory holding every suffixed name up to maxSuffix.
-var errNoFreeName = errors.New("file: no free name in the target directory")
-
-// freeName returns the path in dir under which name can be stored without
-// replacing a file: name itself, else name with -1, -2, ... before the
-// extension. os.Rename onto an existing name replaces it on Unix and fails
-// on Windows, so the collision is resolved before the rename.
-func freeName(dir, name string) (string, error) {
-	ext := filepath.Ext(name)
-	stem := strings.TrimSuffix(name, ext)
-	for n := 0; n <= maxSuffix; n++ {
-		candidate := name
-		if n > 0 {
-			candidate = fmt.Sprintf("%s-%d%s", stem, n, ext)
-		}
-		path := filepath.Join(dir, candidate)
-		_, err := os.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			return path, nil
+	var failed error
+	failedName := ""
+	for i, f := range files {
+		target, err := retarget(dir, f.Name, targets[i], previous)
+		if err == nil {
+			err = in.deps.rename(filepath.Join(in.conn.Directory, f.Name), target)
 		}
 		if err != nil {
-			return "", err
+			left = append(left, f)
+			leftTargets = append(leftTargets, target)
+			if failed == nil {
+				failed, failedName = err, f.Name
+			}
+
+			continue
 		}
+		moved = append(moved, f.Name)
+	}
+	if failed == nil {
+		delete(s.moveFailed, name)
+
+		return nil, nil, moved
+	}
+	s.moveFailure(name, failedName, sub, failed)
+	if !previous && len(moved) == 0 {
+		leftTargets = nil
 	}
 
-	return "", errNoFreeName
+	return left, leftTargets, moved
+}
+
+// retarget returns the path a file is moved to: target, or, when target was
+// chosen by an earlier try (previous) and is taken since, a free name of its
+// own.
+func retarget(dir, name, target string, previous bool) (string, error) {
+	if !previous {
+		return target, nil
+	}
+	_, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return target, nil
+	}
+	if err != nil {
+		return target, err
+	}
+
+	return freeName(dir, name)
+}
+
+// moveFailure counts and logs a failed move of the report name once, naming
+// the file that could not be moved.
+func (s *scanner) moveFailure(name, file, sub string, err error) {
+	if s.moveFailed[name] {
+		return
+	}
+	s.moveFailed[name] = true
+	s.in.health.CountError(KindMoveFailed)
+	s.in.log.Warn("file: the file cannot be moved after reading; it will not be read again", "input", s.in.cfg.ID, "file", file, "into", sub, "error", err.Error())
 }

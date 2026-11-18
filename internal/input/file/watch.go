@@ -50,6 +50,7 @@ type observation struct {
 // time must stay unchanged for StableFor (spec section 3, F4).
 type watcher struct {
 	pattern   string
+	format    string
 	stableFor time.Duration
 	seen      map[string]observation
 }
@@ -58,6 +59,7 @@ type watcher struct {
 func newWatcher(conn Connection) *watcher {
 	return &watcher{
 		pattern:   strings.ToLower(conn.Pattern),
+		format:    conn.Format,
 		stableFor: conn.StableFor,
 		seen:      map[string]observation{},
 	}
@@ -81,6 +83,23 @@ func (w *watcher) matches(name string) bool {
 	return err == nil && ok
 }
 
+// considers reports whether the input considers a listed name at all: not a
+// skipped name, the pattern matches, and under qdas the extension is .dfq,
+// .dfd or .dfx in any case (decision Q8). It is the one filter of the
+// scanner, probe and browse.
+func (w *watcher) considers(name string) bool {
+	if skipped(name) || !w.matches(name) {
+		return false
+	}
+
+	return w.format != FormatQDAS || isQDASName(name)
+}
+
+// considered is considers for the connection conn.
+func considered(conn Connection, name string) bool {
+	return newWatcher(conn).considers(name)
+}
+
 // Ready takes the current listing at now and returns the files unchanged for
 // at least StableFor, oldest modification time first then by name. Files no
 // longer listed are forgotten, so one that reappears waits again.
@@ -89,7 +108,7 @@ func (w *watcher) Ready(now time.Time, files []fileInfo) []fileInfo {
 	var ready []fileInfo
 
 	for _, f := range files {
-		if skipped(f.Name) || !w.matches(f.Name) {
+		if !w.considers(f.Name) {
 			continue
 		}
 		listed[f.Name] = true

@@ -52,6 +52,9 @@ type runHarness struct {
 	records   []model.Record
 	reads     []string
 	renameErr error
+	// renameErrs makes the rename of the named files of the watched
+	// directory fail.
+	renameErrs map[string]error
 }
 
 // harnessSetup says how a runHarness is built.
@@ -116,6 +119,9 @@ func newRunHarness(t *testing.T, setup harnessSetup) *runHarness {
 		rename: func(oldPath, newPath string) error {
 			h.mu.Lock()
 			err := h.renameErr
+			if named, ok := h.renameErrs[filepath.Base(oldPath)]; ok {
+				err = named
+			}
 			h.mu.Unlock()
 			if err != nil {
 				return err
@@ -192,6 +198,23 @@ func (h *runHarness) setRenameErr(err error) {
 	defer h.mu.Unlock()
 
 	h.renameErr = err
+}
+
+// setRenameErrFor makes the rename of the file name fail with err; nil
+// restores it.
+func (h *runHarness) setRenameErrFor(name string, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.renameErrs == nil {
+		h.renameErrs = map[string]error{}
+	}
+	if err == nil {
+		delete(h.renameErrs, name)
+
+		return
+	}
+	h.renameErrs[name] = err
 }
 
 // samples returns the samples emitted so far.

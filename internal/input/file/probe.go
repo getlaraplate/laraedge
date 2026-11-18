@@ -15,15 +15,15 @@ import (
 // ProbeNoFile is what probe says of a point when no file qualifies.
 const ProbeNoFile = "no file"
 
-// matching returns the listed files the input would consider: the pattern
-// matches and the name is not one of the temporary ones, newest modification
-// time first, then by name. It is the listing of probe and browse; they take
-// no part in the stability tracking of a running input.
+// matching returns the listed files the input would consider (see
+// watcher.considers), newest modification time first, then by name. It is
+// the listing of probe and browse; they take no part in the stability
+// tracking of a running input.
 func (in *Input) matching(files []fileInfo) []fileInfo {
 	w := newWatcher(in.conn)
 	var out []fileInfo
 	for _, f := range files {
-		if !skipped(f.Name) && w.matches(f.Name) {
+		if w.considers(f.Name) {
 			out = append(out, f)
 		}
 	}
