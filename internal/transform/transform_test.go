@@ -534,3 +534,36 @@ func TestEmptyChainPassesThrough(t *testing.T) {
 		t.Errorf("Fire = %v, %v; want nothing", out, errs)
 	}
 }
+
+func TestChainKeepsContext(t *testing.T) {
+	ctx := &model.Context{Serial: "S1", OrderRef: "O1", OperationRef: "10", Lot: "L1"}
+
+	chain, err := transform.Compile(
+		[]config.Transform{step("scale", "2"), step("round", "1"), step("heartbeat", `"10s"`)},
+		model.KindInt, nil,
+	)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	in := intSample(4)
+	in.Context = ctx
+
+	out, errs := chain.Apply(in)
+	if len(errs) != 0 || len(out) != 1 {
+		t.Fatalf("Apply = %v, %v", out, errs)
+	}
+
+	if out[0].Context != ctx {
+		t.Errorf("Apply dropped the context: %+v", out[0].Context)
+	}
+
+	resent, errs := chain.Fire(t0.Add(10 * time.Second))
+	if len(errs) != 0 || len(resent) != 1 {
+		t.Fatalf("Fire = %v, %v; want one heartbeat resend", resent, errs)
+	}
+
+	if resent[0].Context != ctx {
+		t.Errorf("heartbeat resend dropped the context: %+v", resent[0].Context)
+	}
+}

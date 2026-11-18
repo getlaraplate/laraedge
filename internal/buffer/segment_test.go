@@ -164,3 +164,39 @@ func TestSegmentNames(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordWithContextRoundTrips(t *testing.T) {
+	ts := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
+	rec := model.SampleRecord(model.Sample{
+		Device: "press-07", Signal: "dim", TS: ts, Value: model.IntValue(3),
+		Quality: model.Good, Priority: model.Critical,
+		Context: &model.Context{Serial: "S1", OrderRef: "O1", OperationRef: "10", Lot: "L1"},
+	})
+
+	frame, err := encodeRecord(rec)
+	if err != nil {
+		t.Fatalf("encodeRecord() = %v", err)
+	}
+
+	got, _, err := decodeRecord(frame, 1<<20)
+	if err != nil {
+		t.Fatalf("decodeRecord() = %v", err)
+	}
+
+	if !reflect.DeepEqual(got, rec) {
+		t.Fatalf("decodeRecord() = %+v, want %+v", got.Sample, rec.Sample)
+	}
+}
+
+func TestRecordWithoutContextIsUnchanged(t *testing.T) {
+	for _, rec := range seedRecords() {
+		frame, err := encodeRecord(rec)
+		if err != nil {
+			t.Fatalf("encodeRecord() = %v", err)
+		}
+
+		if bytes.Contains(frame, []byte("Context")) {
+			t.Errorf("record of %s without context mentions Context: %q", rec.Device(), frame[headerSize:])
+		}
+	}
+}
