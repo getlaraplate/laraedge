@@ -293,6 +293,48 @@ func TestQDASKeepReadsAPairOnceAndAChangedDfdAgain(t *testing.T) {
 	}
 }
 
+// TestQDASDfdRewrittenBeforeTheCommitIsNotMoved: with move, a .dfd rewritten
+// between the pair's read and its commit leaves the pair in place with its
+// ledger entry written; the new pair is then read once and moved.
+func TestQDASDfdRewrittenBeforeTheCommitIsNotMoved(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.writePair("a", fileTime)
+	h.start()
+	h.scans(3)
+	if got := h.readLog(); !slices.Equal(got, []string{"a.dfd", "a.dfx"}) {
+		t.Fatalf("reads = %v, want the pair once", got)
+	}
+
+	changed := qdasLines("K0100 2", "K2001/1 Bore", "K2001/2 Serial", "K2002/1 Bore diameter")
+	h.write("a.dfd", changed, fileTime.Add(time.Minute))
+	h.scan()
+	if !h.storedLedger().Has(pairKey(qdasDescription, qdasValues, fileTime)) {
+		t.Fatal("the pair read before the rewrite is not in the ledger")
+	}
+	if !h.exists("a.dfd") || !h.exists("a.dfx") || h.exists("done") {
+		t.Fatal("the pair was moved after its .dfd was rewritten")
+	}
+	if got := h.readErrors(KindMoveFailed); got != 0 {
+		t.Fatalf("move_failed = %d, want 0", got)
+	}
+
+	h.scans(10)
+	if got := h.readLog(); !slices.Equal(got, []string{"a.dfd", "a.dfx", "a.dfd", "a.dfx"}) {
+		t.Fatalf("reads = %v, want the new pair read once", got)
+	}
+	if got := len(h.samples()); got != 4 {
+		t.Fatalf("samples = %d, want 4", got)
+	}
+	for _, name := range []string{"a.dfd", "a.dfx"} {
+		if h.exists(name) || !h.exists("done/"+name) {
+			t.Fatalf("%s of the new pair is not in done/", name)
+		}
+	}
+	if !h.storedLedger().Has(pairKey(changed, qdasValues, fileTime)) {
+		t.Fatal("the new pair is not in the ledger")
+	}
+}
+
 // TestQDASPairMoveFailingForTheDfdOnly: the .dfx is moved, the .dfd counts
 // one move_failed over many scans and is moved, under the .dfx's suffix, once
 // renames work again.

@@ -231,6 +231,15 @@ func TestReadQDAS(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "the index at the limit is accepted",
+			text: qdasLines("K0100 100000", "K2001/100000 Last"),
+			check: func(t *testing.T, f *qdasFile) {
+				if f.Count != qdasMaxCharacteristics || f.Characteristic(qdasMaxCharacteristics).Number != "Last" {
+					t.Fatalf("count = %d", f.Count)
+				}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,7 +263,8 @@ func TestReadQDASRefused(t *testing.T) {
 		{"no space after the key", qdasLines("K2001/1A")},
 		{"tab after the key", qdasLines("K2001\tA")},
 		{"overflowing index", qdasLines("K2001/99999999999999999999 A")},
-		{"index above the limit", qdasLines("K2001/1000001 A")},
+		{"index above the limit", qdasLines("K2001/100001 A")},
+		{"K0100 above the limit", qdasLines("K0100 100001")},
 		{"second part type", qdasLines("K1001/2 P", "K2001 A")},
 		{"K2 index above K0100", qdasLines("K0100 3", "K2001/4 x")},
 		{"K0 index above K0100", qdasLines("K0100 3", "K0001/1 1", "K0006/4 x")},

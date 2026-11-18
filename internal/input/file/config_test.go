@@ -215,8 +215,6 @@ func TestParseConnectionRefused(t *testing.T) {
 	}
 }
 
-// TestParseConnectionNeverEchoesValues checks the fixed messages: a secret-like
-// value placed in a refused field does not reach the error text.
 // qdasConn builds a qdas connection document with the given extra members.
 func qdasConn(t *testing.T, extra string) json.RawMessage {
 	t.Helper()
@@ -305,6 +303,8 @@ func TestIsKField(t *testing.T) {
 	}
 }
 
+// TestParseConnectionNeverEchoesValues checks the fixed messages: a secret-like
+// value placed in a refused field does not reach the error text.
 func TestParseConnectionNeverEchoesValues(t *testing.T) {
 	const marker = "s3cr3t-marker"
 	docs := []string{
