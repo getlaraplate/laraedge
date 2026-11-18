@@ -477,5 +477,6 @@ Each ruling gives what was decided, why, and what it costs if wrong.
 - **R12. Who `browse` asks to rebirth.** Only the nodes the input addresses. If wrong: `browse` on an input without
   points cannot trigger births.
 - **R13. DBIRTH under a dead node.** It revives only the device; the node's next NDATA revives the node. If wrong:
-  the node device stays dead until its next NDATA.
+  the node device stays dead until its next NDATA. *Reversed by the follow-up on branch `fix/sparkplug-minors`
+  (Delivery status): a DBIRTH under a node held dead also revives the node's device, as R11 does for data.*
 - **R14. DDEATH of an unaddressed device.** It marks nothing. If wrong: one uncounted diagnostic.

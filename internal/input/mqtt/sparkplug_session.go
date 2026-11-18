@@ -258,10 +258,10 @@ func (s *sparkplugSession) Reset() {
 }
 
 // RebirthNodes returns the nodes due a rebirth request, sorted by key, and
-// marks them requested at now. now must be the publish time of the
-// requests, read from the session's clock: trigger measures the 30 s
-// interval from it with that same clock (decision S11). It returns none when
-// rebirth is off.
+// marks them requested at now. now must come from the session's clock, the
+// one trigger measures the 30 s interval with (decision S11); the router
+// passes the time it handled the message, which precedes the publish by the
+// queueing delay only. It returns none when rebirth is off.
 func (s *sparkplugSession) RebirthNodes(now time.Time) []SparkplugTarget {
 	if !s.rebirth {
 		return nil

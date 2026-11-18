@@ -762,8 +762,8 @@ datatype, which is the one in the message or else the one learnt from the birth.
 Signed integers are two's complement at the datatype's width. Everything else is a `bad` sample with the read
 error `conversion`: DataSet, Bytes, File, Template, PropertySet, PropertySetList, arrays, an unknown datatype, a
 metric with no datatype, and a value that does not fit the point's type. A metric with `is_null` is a `bad`
-sample and no read error, since it is the device's own report, even when its timestamp is out of range. A `bad` sample carries the zero of the point's
-kind. `is_historical` metrics are ordinary samples.
+sample and no read error, since it is the device's own report, even when its timestamp is out of range. A `bad`
+sample carries the zero of the point's kind. `is_historical` metrics are ordinary samples.
 
 A Float or Double is a typed binary number, so a whole value (`3.0`) is accepted by an integer point type, which
 differs from `json`, where the text `3.0` is refused for an integer type.
