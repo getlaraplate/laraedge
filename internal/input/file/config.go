@@ -192,7 +192,7 @@ func ParseConnection(raw json.RawMessage) (Connection, error) {
 	}
 	steps := []func(map[string]json.RawMessage, *Connection) error{
 		parseDirectory, parseFormat, parsePattern, parseTiming, parseLimits,
-		parseAfterRead, parseEncoding, parseTimezone, parseTimestampField, parseContext, parseCSV,
+		parseAfterRead, parseEncoding, parseTimezone, parseTimestampField, parseContext, parseCSVSettings,
 	}
 	for _, step := range steps {
 		if err := step(fields, &conn); err != nil {
@@ -405,7 +405,7 @@ func parseContext(fields map[string]json.RawMessage, conn *Connection) error {
 	return nil
 }
 
-func parseCSV(fields map[string]json.RawMessage, conn *Connection) error {
+func parseCSVSettings(fields map[string]json.RawMessage, conn *Connection) error {
 	raw, ok := fields["csv"]
 	if !ok {
 		return nil
