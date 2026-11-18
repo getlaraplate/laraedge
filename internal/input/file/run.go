@@ -144,12 +144,17 @@ func (s *scanner) scan(ctx context.Context) {
 	}
 	s.prune(now, present)
 
+	// A candidate holds its files too, so two .dfx sharing one .dfd (a.dfx
+	// and a.DFX) never both read it in one scan.
 	held := s.held()
 	reports, _ := reportsOf(in.conn, s.watch.Ready(now, listed), listed)
 	var candidates []fileReport
 	for _, r := range reports {
 		if slices.ContainsFunc(r.files(), func(f fileInfo) bool { return held[f.Name] }) {
 			continue
+		}
+		for _, f := range r.files() {
+			held[f.Name] = true
 		}
 		candidates = append(candidates, r)
 		if len(candidates) == in.conn.MaxFilesPerScan {

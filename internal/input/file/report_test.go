@@ -345,6 +345,31 @@ func TestQDASMaxFilesPerScanCountsReports(t *testing.T) {
 	}
 }
 
+// TestQDASOneDfdIsReadOnceInAScan: a.dfx and a.DFX both pair with a.dfd; one
+// scan reads only one of the two pairs, so a.dfd is never read twice in it.
+// It needs a file system where the two names coexist.
+func TestQDASOneDfdIsReadOnceInAScan(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.writePair("a", fileTime)
+	h.write("a.DFX", qdasValues, fileTime)
+	entries, err := os.ReadDir(h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Skip("a.dfx and a.DFX cannot coexist on this file system")
+	}
+	h.start()
+	h.scans(3)
+
+	if got := h.readLog(); !slices.Equal(got, []string{"a.dfd", "a.DFX"}) {
+		t.Fatalf("reads = %v, want a.dfd once, with a.DFX, first in byte order", got)
+	}
+	if got := len(h.samples()); got != 2 {
+		t.Fatalf("samples = %d, want 2", got)
+	}
+}
+
 // TestQDASRefusedPairGoesToErrorTogether: a pair above max_file_size or
 // malformed is counted once and both files go to error/.
 func TestQDASRefusedPairGoesToErrorTogether(t *testing.T) {
