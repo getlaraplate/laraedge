@@ -130,8 +130,10 @@ type qdasReader struct {
 	k0100 int
 	// maxChar is the highest K2xxx index, maxCoded the highest K0001 to K0099 one.
 	maxChar, maxCoded int
-	chars             map[int]*qdasCharacteristic
-	records           []*qdasPending
+	// desc holds the K2xxx values by characteristic index, then by key
+	// number; index 0 holds the values written for every characteristic.
+	desc    map[int]map[int]string
+	records []*qdasPending
 }
 
 // count is the number of characteristics known so far.
@@ -146,7 +148,7 @@ func (q *qdasReader) count() int {
 // readQDAS reads Q-DAS transfer text into its characteristics and records.
 // Errors wrap errMalformedFile and carry a fixed reason.
 func readQDAS(text string) (*qdasFile, error) {
-	q := &qdasReader{k0100: -1, chars: make(map[int]*qdasCharacteristic)}
+	q := &qdasReader{k0100: -1, desc: make(map[int]map[int]string)}
 	for line := range strings.Lines(text) {
 		line = strings.TrimRight(line, "\r\n")
 		if strings.TrimSpace(line) == "" {
@@ -259,34 +261,40 @@ func (q *qdasReader) codedField(key string, index int, value string) {
 	q.records[len(q.records)-1].set(index, key, value)
 }
 
+// description records a K2xxx line. With index 0 it applies to every
+// characteristic without its own value for that key, whatever the line order.
 func (q *qdasReader) description(number, index int, value string) error {
-	if index == 0 {
-		return refuse("a characteristic with index 0")
+	if index > 0 {
+		q.maxChar = max(q.maxChar, index)
 	}
-	q.maxChar = max(q.maxChar, index)
-	c := q.chars[index]
-	if c == nil {
-		c = &qdasCharacteristic{}
-		q.chars[index] = c
+	if q.desc[index] == nil {
+		q.desc[index] = make(map[int]string)
 	}
-	switch number {
-	case 2001:
-		c.Number = value
-	case 2002:
-		c.Description = value
-	case 2004:
-		c.Attributive = value == "1"
-	case 2101:
-		c.Nominal = value
-	case 2110:
-		c.Lower = value
-	case 2111:
-		c.Upper = value
-	case 2142:
-		c.Unit = value
-	}
+	q.desc[index][number] = value
 
 	return nil
+}
+
+// characteristic builds characteristic index from its own K2xxx values and,
+// for the keys it lacks, from the index 0 ones.
+func (q *qdasReader) characteristic(index int) qdasCharacteristic {
+	own, all := q.desc[index], q.desc[0]
+	get := func(number int) string {
+		if v, ok := own[number]; ok {
+			return v
+		}
+		return all[number]
+	}
+
+	return qdasCharacteristic{
+		Number:      get(2001),
+		Description: get(2002),
+		Nominal:     get(2101),
+		Lower:       get(2110),
+		Upper:       get(2111),
+		Unit:        get(2142),
+		Attributive: get(2004) == "1",
+	}
 }
 
 // valueLine reads one value line as a record: one block per characteristic,
@@ -327,8 +335,8 @@ func (q *qdasReader) finish() (*qdasFile, error) {
 		return nil, refuse("a K-field index is above the number of characteristics")
 	}
 	f := &qdasFile{Count: count, Characteristics: make([]qdasCharacteristic, count)}
-	for i, c := range q.chars {
-		f.Characteristics[i-1] = *c
+	for i := range f.Characteristics {
+		f.Characteristics[i] = q.characteristic(i + 1)
 	}
 	f.Records = make([]qdasRecord, len(q.records))
 	for n, pending := range q.records {

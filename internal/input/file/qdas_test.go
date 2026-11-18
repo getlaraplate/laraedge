@@ -184,6 +184,43 @@ func TestReadQDAS(t *testing.T) {
 			},
 		},
 		{
+			name: "K2142/0 before an own value",
+			text: qdasLines("K0100 3", "K2142/0 mm", "K2142/2 in"),
+			check: func(t *testing.T, f *qdasFile) {
+				if f.Characteristics[0].Unit != "mm" || f.Characteristics[1].Unit != "in" || f.Characteristics[2].Unit != "mm" {
+					t.Fatalf("file = %+v", f)
+				}
+			},
+		},
+		{
+			name: "K2142/0 after an own value",
+			text: qdasLines("K0100 2", "K2142/2 in", "K2142/0 mm"),
+			check: func(t *testing.T, f *qdasFile) {
+				if f.Characteristics[0].Unit != "mm" || f.Characteristics[1].Unit != "in" {
+					t.Fatalf("file = %+v", f)
+				}
+			},
+		},
+		{
+			name: "K2004/0 makes every characteristic attributive unless its own says 0",
+			text: qdasLines("K0100 3", "K2004/2 0", "K2004/0 1", "K2001/3 C"),
+			check: func(t *testing.T, f *qdasFile) {
+				c := f.Characteristics
+				if !c[0].Attributive || c[1].Attributive || !c[2].Attributive || c[2].Number != "C" {
+					t.Fatalf("file = %+v", f)
+				}
+			},
+		},
+		{
+			name: "K2xxx/0 does not raise the count",
+			text: qdasLines("K2001/2 B", "K2002/0 D"),
+			check: func(t *testing.T, f *qdasFile) {
+				if f.Count != 2 || f.Characteristics[0].Description != "D" || f.Characteristics[1].Description != "D" {
+					t.Fatalf("file = %+v", f)
+				}
+			},
+		},
+		{
 			name: "index 0 on a part key is ignored",
 			text: qdasLines("K1001/0 P", "K1001 P", "K2001 A"),
 			check: func(t *testing.T, f *qdasFile) {
@@ -226,7 +263,6 @@ func TestReadQDASRefused(t *testing.T) {
 		{"value line before any characteristic", qdasLines("5", "K2001/1 A")},
 		{"coded value before any characteristic", qdasLines("K0001/1 5", "K2001/1 A")},
 		{"coded value on index 0", qdasLines("K2001/1 A", "K0001/0 5")},
-		{"characteristic index 0", qdasLines("K2001/0 A")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
