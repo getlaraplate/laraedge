@@ -76,6 +76,9 @@ const (
 	DefaultSeenRetention = 30 * 24 * time.Hour
 	// MinSeenRetention is the shortest seen_retention.
 	MinSeenRetention = time.Hour
+	// MaxSeenRetentionDays is the largest seen_retention in days (100 years),
+	// far below the overflow of a time.Duration.
+	MaxSeenRetentionDays = 36500
 	// DefaultEncoding is the text encoding of the files.
 	DefaultEncoding = "utf-8"
 )
@@ -544,7 +547,7 @@ func retentionOf(raw json.RawMessage) (time.Duration, bool) {
 	}
 	if days, ok := strings.CutSuffix(text, "d"); ok {
 		n, err := strconv.ParseUint(days, 10, 32)
-		if err != nil || days == "" || days[0] == '+' {
+		if err != nil || days == "" || days[0] == '+' || n > MaxSeenRetentionDays {
 			return 0, false
 		}
 		return time.Duration(n) * 24 * time.Hour, true

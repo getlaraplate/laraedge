@@ -54,6 +54,11 @@ func TestParseConnectionAccepted(t *testing.T) {
 				t.Fatal(c.SeenRetention)
 			}
 		}},
+		{"retention days cap", `"seen_retention":"36500d"`, func(t *testing.T, c Connection) {
+			if c.SeenRetention != 36500*24*time.Hour {
+				t.Fatal(c.SeenRetention)
+			}
+		}},
 		{"retention hours", `"seen_retention":"48h"`, func(t *testing.T, c Connection) {
 			if c.SeenRetention != 48*time.Hour {
 				t.Fatal(c.SeenRetention)
@@ -158,6 +163,8 @@ func TestParseConnectionRefused(t *testing.T) {
 		{"retention 30m", func(t *testing.T) json.RawMessage { return conn(t, `"seen_retention":"30m"`) }, "connection.seen_retention: want a duration of at least 1h, or days such as 30d"},
 		{"retention abc", func(t *testing.T) json.RawMessage { return conn(t, `"seen_retention":"abc"`) }, "connection.seen_retention: want a duration of at least 1h, or days such as 30d"},
 		{"retention 0d", func(t *testing.T) json.RawMessage { return conn(t, `"seen_retention":"0d"`) }, "connection.seen_retention: want a duration of at least 1h, or days such as 30d"},
+		{"retention huge days", func(t *testing.T) json.RawMessage { return conn(t, `"seen_retention":"99999999d"`) }, "connection.seen_retention: want a duration of at least 1h, or days such as 30d"},
+		{"retention days above cap", func(t *testing.T) json.RawMessage { return conn(t, `"seen_retention":"36501d"`) }, "connection.seen_retention: want a duration of at least 1h, or days such as 30d"},
 		{"encoding", func(t *testing.T) json.RawMessage { return conn(t, `"encoding":"utf-16"`) }, "connection.encoding: want utf-8, windows-1252 or iso-8859-1"},
 		{"timezone", func(t *testing.T) json.RawMessage { return conn(t, `"timezone":"Mars/Base"`) }, "connection.timezone: not an IANA time zone name"},
 		{"delimiter two chars", func(t *testing.T) json.RawMessage { return conn(t, `"csv":{"delimiter":";;"}`) }, "connection.csv.delimiter: want one character that is not a quote or a line break"},
