@@ -111,19 +111,27 @@ func TestProbeWithoutAQualifyingFileSaysNoFile(t *testing.T) {
 	}
 }
 
-func TestProbeOfAnEmptyOrMissingDirectorySaysNoFile(t *testing.T) {
+func TestProbeOfAnEmptyDirectorySaysNoFile(t *testing.T) {
 	h := newRunHarness(t, harnessSetup{})
 	_, kinds, err := h.in.ProbePoints(t.Context())
-	if err != nil || kinds[edgeinput.PointRef{Device: "cmm", Signal: "bore"}] != ProbeNoFile {
+	if err != nil || len(kinds) != 2 || kinds[edgeinput.PointRef{Device: "cmm", Signal: "bore"}] != ProbeNoFile {
 		t.Fatalf("empty: kinds = %v, err = %v", kinds, err)
 	}
+}
 
+// TestProbeOfAnUnlistableDirectoryFails: a directory that cannot be listed
+// is an error with a fixed text, as for browse, not "no file".
+func TestProbeOfAnUnlistableDirectoryFails(t *testing.T) {
+	h := newRunHarness(t, harnessSetup{})
 	if err := os.RemoveAll(h.dir); err != nil {
 		t.Fatal(err)
 	}
-	_, kinds, err = h.in.ProbePoints(t.Context())
-	if err != nil || len(kinds) != 2 || kinds[edgeinput.PointRef{Device: "gauge", Signal: "serial"}] != ProbeNoFile {
-		t.Fatalf("missing: kinds = %v, err = %v", kinds, err)
+	samples, kinds, err := h.in.ProbePoints(t.Context())
+	if err == nil || err.Error() != "the directory cannot be listed" || samples != nil || kinds != nil {
+		t.Fatalf("samples = %v, kinds = %v, err = %v", samples, kinds, err)
+	}
+	if strings.Contains(err.Error(), h.dir) {
+		t.Error("the error names the directory")
 	}
 	if h.readErrors(KindListing) != 1 {
 		t.Errorf("listing errors = %d", h.readErrors(KindListing))

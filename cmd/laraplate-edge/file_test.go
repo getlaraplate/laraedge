@@ -104,6 +104,18 @@ func TestProbeAFileInputWithoutAFileSaysNoFile(t *testing.T) {
 	}
 }
 
+func TestProbeAFileInputWithAnUnlistableDirectoryFails(t *testing.T) {
+	env := newFileEnv(t)
+	if err := os.Remove(env.dir); err != nil {
+		t.Fatal(err)
+	}
+
+	r := runCLI(t, "", "probe", "cmm-line", "--config", env.config)
+	if r.code != exitFailure || r.stdout != "" || !strings.Contains(r.stderr, "the directory cannot be listed") || strings.Contains(r.stderr, env.dir) {
+		t.Errorf("probe: %+v", r)
+	}
+}
+
 func TestProbeAFileInputWritesNothing(t *testing.T) {
 	env := newFileEnv(t)
 	// A first agent run would have recorded it; here the probe is run twice

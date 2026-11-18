@@ -59,6 +59,10 @@ func (in *Input) ProbeSource() string {
 	return in.probeSource
 }
 
+// errListing is the error of a probe whose directory cannot be listed; the
+// cause stays in the debug log, as it can name a path.
+var errListing = errors.New("the directory cannot be listed")
+
 // Probe reads the newest unread file once and returns its samples (see
 // ProbePoints).
 func (in *Input) Probe(ctx context.Context) ([]model.Sample, error) {
@@ -73,8 +77,9 @@ func (in *Input) Probe(ctx context.Context) ([]model.Sample, error) {
 // why a point has no good sample: the kind of a bad one (conversion,
 // malformed_row or bad_timestamp, the first the file counted), missing_field
 // for a point the file lacks, malformed_file or file_too_large for every point
-// of a refused file, and ProbeNoFile for every point when no file qualifies or
-// the listing fails.
+// of a refused file, and ProbeNoFile for every point when no file qualifies. A
+// directory that cannot be listed is an error with a fixed text, as for
+// Browse.
 func (in *Input) ProbePoints(ctx context.Context) ([]model.Sample, map[edgeinput.PointRef]string, error) {
 	in.setProbeSource("")
 	refs := in.pointRefs()
@@ -101,7 +106,7 @@ func (in *Input) ProbePoints(ctx context.Context) ([]model.Sample, map[edgeinput
 		in.health.CountError(KindListing)
 		in.log.Debug("file: the directory cannot be listed", "input", in.cfg.ID, "error", err.Error())
 
-		return noFile()
+		return nil, nil, errListing
 	}
 
 	led := peekLedger(in.opts.DataDir, in.cfg.ID)
