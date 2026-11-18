@@ -1,0 +1,66 @@
+# Configuration document of the file demo: one file input watching the
+# directory a coordinate measuring machine writes its reports to, sent to a
+# Laraplate running on this machine. The token is read from the environment of
+# the agent: export LARAPLATE_EDGE_TOKEN before running it.
+#
+# The directory must be absolute: change it to yours, or try the demo with
+# the sample report in this folder:
+#   mkdir -p /tmp/cmm-reports && cp report.csv /tmp/cmm-reports/
+# (a file is read once it has been unchanged for stable_for; its modification
+# time is the time of its samples, as the report has no timestamp column).
+#
+# Check the document offline, then see what the driver would read. Give the
+# bootstrap too, so that probe and browse find the ledger of read files (both
+# only read, and write nothing):
+#   laraplate-edge config validate config.yaml
+#   laraplate-edge browse cmm --config config.yaml --bootstrap bootstrap.yaml
+#   laraplate-edge probe cmm --config config.yaml --bootstrap bootstrap.yaml
+# Docs: docs/CONFIGURATION.md, "The file driver"; docs/USAGE.md, "Report files".
+
+schema: laraplate-edge-config/1
+version: 1
+
+inputs:
+  - id: cmm
+    driver: file
+    # The directory unreachable (a share not mounted) for this long is the
+    # death of the devices; a quiet directory never is.
+    death_tolerance: 60s
+    connection:
+      directory: /tmp/cmm-reports
+      format: csv
+      # Skipped always: names starting with a dot, ending in .tmp, .part or ~.
+      pattern: "*.csv"
+      interval: 2s
+      stable_for: 5s
+      # move: a read file goes to done/ (error/ when it cannot be read as a
+      # whole) under the directory. keep: it stays, for a read-only share.
+      after_read: move
+      # One row per characteristic: the whole file is one part. The address of
+      # a point is the value of key_column.
+      csv:
+        layout: long
+        key_column: Characteristic
+        value_column: Value
+        # For a European Excel export: delimiter: ";" and decimal: ","
+      # Where the serial and the order of the part are, so that Laraplate can
+      # fill the quality check of the operation that made it.
+      context:
+        serial: Serial
+        order_ref: Order
+      # For a report with a time column, say where and how it is written; a
+      # value without an offset is read in timezone:
+      # timestamp: {column: Measured, format: "DD.MM.YYYY hh:mm:ss"}
+      # timezone: Europe/Rome
+    devices:
+      - device: cmm-1
+        points:
+          - {signal: bore_diameter, address: bore, type: float64, unit: mm, read: event, priority: critical}
+          - {signal: length, address: length, type: float64, unit: mm, read: event, priority: critical}
+          - {signal: surface_ok, address: surface_ok, type: bool, read: event, priority: critical}
+
+outputs:
+  - id: laraplate
+    type: laraplate-http
+    url: http://127.0.0.1:8000
+    token: secret://env/LARAPLATE_EDGE_TOKEN

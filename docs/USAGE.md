@@ -37,7 +37,7 @@ the `User-Agent` header.
 | `config validate <file> [--plugins-dir <path>]` | checks a configuration document with both validation layers (schema and rules, then what this build provides and the type check of every transform chain), and builds every input through its driver without connecting; with `--plugins-dir` (absolute) every plugin binary must also lie inside that directory, as `plugins_dir` does for the agent; relative paths in a `connection` resolve against the file's directory, as with the `file` provider; applies nothing | 0 and `<file>: valid` on stdout, or 1 and one `<file>: <path>: <problem>` line per problem on stderr |
 | `config test <file> --input <samples.jsonl>` | replays recorded samples through the transform chains of a document and writes the resulting samples to stdout; applies nothing (see "Trying transforms") | 0; 1 when the document is invalid, the sample file is unreadable or has a bad line; 2 on a usage error |
 | `probe <input> (--config <file> \| --bootstrap <path>) [--record <file>]` | reads every point of one input once and prints the raw samples, before transforms; never starts an output; an input served by a plugin is probed by starting its plugin for the duration of the probe (see "Trying transforms" and "Running plugins") | 0; 1 when the document is invalid, the input is unknown or the read fails; 2 on a usage error |
-| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>] [--filter <topic filter>] [--duration <d>]` | lists the nodes of an OPC UA server, or of a plugin input whose manifest declares `browse`, to find the addresses of points (see "OPC UA servers" and "Running plugins"); for an `mqtt` input, lists the topics a broker publishes in a time window, with the `topic\|path` addresses of JSON leaves (`--filter` and `--duration`; see "MQTT brokers") | 0; 1 when the document is invalid, the input is unknown or none of `opcua`, `mqtt` and a plugin that supports browse, or the source cannot be browsed; 2 on a usage error |
+| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>] [--filter <topic filter>] [--duration <d>] [--limit <n>]` | lists the nodes of an OPC UA server, or of a plugin input whose manifest declares `browse`, to find the addresses of points (see "OPC UA servers" and "Running plugins"); for an `mqtt` input, lists the topics a broker publishes in a time window, with the `topic\|path` addresses of JSON leaves (`--filter` and `--duration`; see "MQTT brokers"); for a `file` input, lists the newest files of the watched directory with their state and the addresses of the newest readable one (`--limit`; see "Report files") | 0; 1 when the document is invalid, the input is unknown or none of `opcua`, `mqtt`, `file` and a plugin that supports browse, or the source cannot be browsed; 2 on a usage error |
 | `opcua trust <input> (--config <file> \| --bootstrap <path>) [--thumbprint <hex>]` | shows the certificate an OPC UA server presents and trusts it (see "OPC UA servers") | 0 when trusted or already trusted; 1 when refused, mismatched or on any other failure; 2 on a usage error |
 | `opcua trust --list --bootstrap <path>` | lists the trusted server certificates | 0; 1 when the bootstrap cannot be read, or no certificate could be listed because a file is unreadable; 2 on a usage error |
 | `status [--listen addr]` | prints the `/status` answer of a running agent, indented; `--listen` defaults to `127.0.0.1:9180`; the bearer token, when the endpoint has one, is read from `LARAPLATE_EDGE_STATUS_TOKEN` | 0, or 1 when the agent does not answer |
@@ -229,6 +229,9 @@ response time: 3µs
   the 30 seconds of the command (retained messages answer at once). A point with no message in that time is
   printed as `no message` and is not an error; a point whose message did not decode, or whose topic the broker
   refused, shows why instead. See "MQTT brokers".
+- A `file` input is probed by reading the newest stable file that is not in the ledger, once, without emitting,
+  moving or recording it; a point without a sample shows `no file`, `missing_field` or the kind of the refused
+  file, and a `source: <file>` line names the file read. See "Report files".
 - A plugin input (`driver: plugin:<id>`) is probed by starting its plugin, with the hashes checked as at
   every start, configuring the input, reading each point once and stopping the plugin again. The
   plugin resolves the `secret://` values of its `connection` as the agent does. It runs a plugin
@@ -532,6 +535,96 @@ plant/line-2  3 msg  -  1 malformed
   with the default filter, which shows every node on the broker: a rebirth is a write to someone else's equipment.
 - Neither command writes anything with `rebirth: false`, the default.
 
+## Report files
+
+The `file` driver ([CONFIGURATION.md](CONFIGURATION.md#the-file-driver)) reads the reports a measuring machine
+writes into a directory, and its points are column names (`wide`) or keys (`long`). Two commands help, `probe`
+and `browse`; each takes the input id and the usual two ways to find the document (`--config <file>`, or
+`--bootstrap <path>` for the last valid document of its `data_dir`). Give `--bootstrap` with `--config`, or
+`--bootstrap` alone: the ledger of read files is under the `data_dir` of the bootstrap, and with `--config`
+alone `probe` and `browse` do not know it and treat every file as unread. Neither command moves, creates or
+changes anything: not a file, not a modification time, not the ledger. They are safe beside a running agent.
+
+### Reading the points once: `probe`
+
+```bash
+laraplate-edge probe cmm --config config.yaml --bootstrap bootstrap.yaml
+```
+
+```
+cmm-1	bore	12.5	float	good
+cmm-1	length	100	integer	good
+cmm-1	roundness	missing_field
+source: part-4471.csv
+response time: 3.2ms
+```
+
+- It lists the directory once and takes the newest file that matches `pattern`, has been unchanged for at least
+  `stable_for` and is not in the ledger. It reads that file as the running input would, without emitting,
+  moving or recording it, and prints one line per sample, as for the other drivers: device, signal, value,
+  kind and quality. `source: <file name>` names the file the samples came from. `probe` does not list the files
+  waiting to be read: that is `browse`'s job.
+- A point with no sample shows why instead of the value: `no file` (nothing qualifies, or the directory cannot
+  be listed), `missing_field` (the file has no such column or key), or, for a file refused as a whole,
+  `malformed_file` or `file_too_large`, which `source:` then names. A `bad` sample ends with the read error
+  kind that made it bad: `conversion`, `bad_timestamp` or `malformed_row`. The kinds are attributed per file,
+  not per point: every bad sample of a file gets the first of the three kinds the file counted.
+- The sample time is the one of the file: the `timestamp` column, or the file's modification time. The context
+  is not printed; `--record <file>` writes the samples as for the other drivers.
+- `probe` reads files only. The exit code is 0 when the directory could be read, also with `no file`, and 1
+  for an invalid document.
+
+### Finding the files and the addresses: `browse`
+
+```bash
+laraplate-edge browse cmm --config config.yaml --bootstrap bootstrap.yaml --limit 5
+```
+
+```
+part-4472.csv  311 B  2s  waiting
+part-4471.csv  311 B  95s  ready
+part-4470.csv  309 B  3600s  seen
+
+addresses of part-4472.csv:
+  bore  "12.5"
+  length  "100"
+```
+
+- `--limit` is how many files to list, newest first, `20` by default, from 1 to 1000. `--node`, `--depth`,
+  `--filter` and `--duration` belong to other drivers and are a usage error here, as `--limit` is for any
+  other driver (exit 2).
+- One line per file that matches `pattern`: the name, its size in bytes, its age in whole seconds and its
+  state. `waiting`: changed less than `stable_for` ago, so not read yet. `ready`: stable and not read yet; the
+  running agent reads it at its next scan. `seen`: its hash and modification time are in the ledger, so it
+  has been read. The state `seen` needs the content of the file, so `browse` reads at most `--limit` files.
+- After an empty line, `addresses of <file>:` and one line per address the newest readable file offers, in
+  the form to copy into the `address` of a point, with a preview of its value (quoted, at most 40
+  characters). With `wide` the addresses are the column names of the header and the preview is the cell of the
+  first data row; with `long` they are the values of `key_column` and the preview is the cell of
+  `value_column` in that row. Names and previews are escaped or quoted, so a file cannot disturb the terminal.
+- `no file to read` when no file can be read as a CSV with the layout of the connection.
+
+### Reading a report file
+
+The troubleshooting table has the symptoms of a file that is not read. Some points of how the driver reads:
+
+- **A file is read after it has been quiet.** Nothing is read before `stable_for` (at least `5s` by default)
+  has passed since the last change, and the scan runs every `interval`. A report is in the backend some
+  seconds after the machine finishes it, and in `done/` about a second later.
+- **Times without an offset are local.** Most measuring software writes `14.03.2026 09:15:00` in the local
+  time of the machine. The agent reads such a value in `timezone`, by default the local zone of the agent's own
+  machine, which is not necessarily the one of the measuring PC: set `timezone` to an IANA name when the two
+  differ. A file with no timestamp column takes its modification time, which is an exact instant.
+- **A file read twice is harmless.** If the agent stops or crashes after it sent the samples of a file and
+  before the file was committed, it reads the file again at the next start. The samples have the same
+  timestamps and the same context, and the backend drops a measurement whose signal and timestamp are already
+  stored.
+- **The context of a sample** (`serial`, `order_ref`, `operation_ref`, `lot`) is set from the columns named
+  in `connection.context`, and the backend uses it to attach a measurement to a quality check. A plugin input
+  cannot set a context, and a plugin output receives samples without one. A `deadband`, `min_interval` or
+  `debounce` transform drops the samples it holds back with their context, so do not use one on a
+  measurement point.
+
 ## Running plugins
 
 A plugin is an external process, built on `laraedge-sdk`, that provides an input driver
@@ -788,6 +881,18 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `read_errors` `sequence_gap` growing on a Sparkplug B input | messages of the node, or of one of its devices (also devices no point addresses), were lost or reordered, or the node restarts without an NBIRTH | check the node and the broker's QoS and session settings; `rebirth: true` makes the agent ask for a fresh birth at a gap, at most once every 30 s per node. A gap across a connection loss is not counted. |
 | `read_errors` `malformed_payload` growing on a Sparkplug B input | the payload on a `spBv1.0` topic is not a Sparkplug B protobuf (JSON, a different version, a truncated message) | look at the node with `browse`, which counts the malformed messages per node |
 | the broker keeps queuing messages for the client id of an `mqtt` input that was removed from the document | the persistent session of the removed input stays on the broker, which queues its QoS 1 messages until it expires the session or the session is cleared | before removing an input, apply once a document with `persistent_session: false` for it; afterwards, clear the session of its client id on the broker (or let the broker's session expiry remove it) |
+| a file of a `file` input is never read, nothing in `done/` | it is younger than `stable_for` (5 s at least by default, and its size or modification time must stay unchanged that long: a file a program keeps writing or touching never settles), its name does not match `pattern` (matched case-insensitively against the whole name, so `*.csv` misses `report.csv.gz`), it starts with `.` or ends in `.tmp`, `.part` or `~` (always skipped), it is in a subdirectory (only the top level is read), or it is already in the ledger (same content and modification time as a file read before) | `browse` shows each file as `waiting`, `ready` or `seen`, so a file that is `waiting` is still changing, and one that is `seen` was read already. A writer that holds the file open (Windows) is tried again at each scan. `--log-level debug` logs the files that cannot be opened. |
+| a `file` input reads a report, but the log says outcome `duplicate` and no samples reach the backend | the file has the same content and modification time as one read before: a copy that kept its time, or a report restored after a ledger loss | nothing: that is the ledger doing its job, and the file moves to `done/`. A report that must be read again needs a new modification time (`touch`), or a `seen_retention` that has run out. |
+| a `file` input with `move`: the files stay where they are, `read_errors` `move_failed` +1 per file, `WARN` "the file cannot be moved after reading" | the agent may read the share but not write to it (read-only mount, no permission to create `done/` or to rename) | the file is not read again, so nothing is lost. Give the agent's user write permission, or use `after_read: keep`, which leaves the files in place and relies on the ledger alone. |
+| a report was sent again after the agent crashed or was restarted | the file was read and its samples emitted, but the agent stopped before the commit that comes about a second later, so the file was still unrecorded | nothing: the samples have the same timestamps and context, and the backend drops a measurement whose signal and timestamp are already stored. |
+| `WARN` "ledger of read files is corrupt, starting with an empty one" | `data_dir/file/seen/<input id>.json` did not parse (a disk fault, a hand edit); the agent renamed it `<input id>.json.corrupt-<unix seconds>` and started with an empty ledger | keep the renamed file for the report and check the disk. The reports still in the directory are read again, and the backend drops their repeated samples; with `keep`, every file present is read once more. |
+| the timestamps of a `file` input are hours off | a time written without an offset is read in `timezone`, by default the local zone of the machine the agent runs on, which may not be the one of the measuring PC | set `timezone` to the IANA name of the zone the machine writes in. A file with no `timestamp` column takes its modification time, which is exact. |
+| `read_errors` `malformed_file` growing, files in `error/`, a `wide` file with several rows among them | a `wide` file with more than one data row and no `timestamp`: the parts would share one timestamp and the backend would keep only the first. Other causes: text not valid in the `encoding`, a `timestamp` or `context` column that is not in the header, an addressed column name that appears twice, a header row that is not there (`header_row` too large) | add `timestamp: {column, format}` for a file of many rows, or fix the name or the `encoding` (`windows-1252` for most Windows exports). `probe` shows `malformed_file` for every point, with the file in `source:`; the log names the file and the kind, never its content. |
+| `read_errors` `conversion` or `malformed_row` growing, `file` points `bad` | a value does not convert to the point's `type`, or a row has another number of fields than the header (an unquoted delimiter in a value). With `decimal: ","` a number that contains a `.` is a conversion error: thousands separators are not accepted. | set the `delimiter` and `decimal` the export uses (`;` and `,` for most European Excel files); `browse` shows the addresses and a preview of the first row; `probe` shows the kind of each bad sample. |
+| `read_errors` `missing_field` growing, a point of a `file` input has no samples | the file has no such column (`wide`) or no row with that key (`long`): the header name differs in spelling or case, or the characteristic is not in this report | take the address from `browse`, exactly as written. An empty cell gives no sample and no error: a characteristic not measured on a part. |
+| `read_errors` `file_too_large` growing, a file in `error/` | the file is above `max_file_size` (16 MiB at most) and is not read. Under `keep` it is refused again after every restart, since it is never hashed. | raise `max_file_size`, or ask the export to write smaller reports; a file that large is probably not a report. |
+| a `file` input `connected` false, `read_errors` `listing` growing, devices reported dead after `death_tolerance` | the directory cannot be listed: it does not exist, the network share is not mounted or the permission was lost. Silence never kills a device: only this does. Nothing is read, moved or recorded while it lasts. | mount the share, check the path (it must be absolute) and that the agent's user can read it. The devices are born again at the first successful listing, and the files present are read normally. |
+| the document is `rejected` with `connection.format: not available in this build` | `format: qdas` is not built yet | use `format: csv`, or export the report as CSV. |
 | `read_errors` `availability` growing | a message on the availability topic is neither the `online` nor the `offline` string of the entry; the comparison is exact, case and spaces included | fix the two strings to what the device publishes (`browse` shows it) |
 | an `mqtt` device dead while the broker is connected, then born again at its first message | its availability topic holds `offline`: the device (or its Last Will, which a broker may retain) said so. The device stays dead until `online` or a sample arrives, however long it is silent | check what the device publishes on the topic; publish `online`, or clear a stale retained `offline` on the broker |
 | `mqtt` samples carry the time of the connection though the data is old | the sample time is the arrival time unless the document sets a `timestamp`, and a retained message (or one replayed by a persistent session) arrives at each connection | set `timestamp: {path, format}` for the topic, so the payload's own time is used; without it the first sample after a connection can be a stale value stamped now |

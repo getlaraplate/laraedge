@@ -1,6 +1,6 @@
 # File driver: design
 
-**Status:** Approved (2026-11-18). Plan 1 (sample context and `file` with CSV, `../plans/2026-11-18-file-csv.md`) is open.
+**Status:** Approved (2026-11-18). Plan 1 (sample context and `file` with CSV, `../plans/2026-11-18-file-csv.md`) delivered 2026-11-18; plan 2 (Q-DAS) is open.
 
 **Date:** 2026-11-18
 
@@ -99,7 +99,7 @@ it (section 5).
 | `pattern` | `*` | a glob on the file name (Go `path.Match`), e.g. `*.csv`; matched case-insensitively. Hidden files (leading `.`) and names ending in `.tmp`, `.part` or `~` are always skipped |
 | `format` | | required: `csv` or `qdas` (plan 2). One input, one format |
 | `interval` | `2s` | polling period, at least `500ms` |
-| `stable_for` | `5s` | how long size and modification time must stay unchanged before a file is read; at least `interval` |
+| `stable_for` | the larger of `5s` and `interval` | how long size and modification time must stay unchanged before a file is read; at least `interval` (default amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`: `5s` alone would be below an `interval` set above it) |
 | `max_file_size` | `16MiB` | a larger file is not read: moved to `error/` (or left, with `keep`), kind `file_too_large` |
 | `max_files_per_scan` | `100` | files read in one scan, oldest modification time first; the rest wait for the next scan, so a backlog never floods the buffers |
 | `after_read` | `move` | `move` or `keep` (F5) |
@@ -114,6 +114,8 @@ it (section 5).
 
 **Scan.** Every `interval` the driver lists `directory` (top level, `pattern`, skips as in section 4). For each
 file it keeps the size and modification time it saw last.
+
+**Scan order** (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`). The directory is listed before pending files are committed: while the listing fails nothing is committed, moved or written, the ledger included.
 
 **Stable.** A file is ready when its size and modification time have not changed for `stable_for`. A file that
 changes meanwhile restarts its wait. A file that cannot be opened (another process holds it, as Windows does while
@@ -141,6 +143,8 @@ timestamp are already stored. What stays possible is shared by every driver and 
 restarting beyond its hold limit records a loss marker, a refused buffer append is logged. A core change making
 `emit` acknowledge durability was considered and left out: it would touch supervisor, router and buffer for every
 driver, to close windows the deferred commit already closes for this one.
+
+**A corrupt ledger** (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`): a ledger that does not parse is renamed `{input_id}.json.corrupt-<unix seconds>`, a warning is logged and the input starts with an empty one; the reports still present are read again and the backend drops their repeated samples. `probe` and `browse` read the ledger without ever renaming it.
 
 **Moving fails** (read-only share, missing permission): logged at warn once per file, kind `move_failed`; the
 ledger still stops it from being read again. A share the agent may not write to should use `keep`.
@@ -177,7 +181,7 @@ points of an input never re-reads old files.
 |---|---|---|
 | `delimiter` | `,` | one character; `;` is common in European exports, `\t` for tab |
 | `decimal` | `.` | `.` or `,`; with `,` the delimiter may not be `,` |
-| `header_row` | `1` | the 1-based row holding the column names; rows before it are skipped |
+| `header_row` | `1` | the 1-based row holding the column names; rows before it are skipped. It counts physical lines, blank ones included (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`) |
 | `layout` | `wide` | `wide` or `long` |
 | `key_column` | | `long` only, required: the column naming the characteristic |
 | `value_column` | | `long` only, required: the column holding the measured value |
@@ -197,17 +201,17 @@ points of an input never re-reads old files.
 **Read:** `event` only; `poll` and `subscribe` refuse the document. `type` is required.
 
 **Timestamp:** `timestamp: {column, format}`, `format` one of `rfc3339`, `unix_s`, `unix_ms`, or a layout written
-with the tokens `YYYY`, `MM`, `DD`, `hh`, `mm`, `ss` and literal separators (e.g. `DD.MM.YYYY hh:mm:ss`). A value
+with the tokens `YYYY`, `MM`, `DD`, `hh`, `mm`, `ss` and literal separators (e.g. `DD.MM.YYYY hh:mm:ss`); `YYYY`, `MM` and `DD` are required, each token appears at most once and the literals hold no letter or digit (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`). A value
 without an offset is read in `timezone`. Without `timestamp`, every sample of the file takes its modification time;
 a `wide` file with more than one data row and no `timestamp` is then `malformed_file`, since its parts would share one
 timestamp and the backend would keep only the first of them (decided after the builder check of 2026-11-18).
 
 **Context:** each key names a column (`context: {serial: "Serial No", order_ref: "Order"}`). An empty cell gives no
-key; a missing column makes the file `malformed_file`, since the mapping is wrong for every row.
+key; a missing column makes the file `malformed_file`, since the mapping is wrong for every row; so does a configured `timestamp.column` missing from the header (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`).
 
 **Conversion** to the point's `type`, lossless or `bad`, with the rules of the `mqtt` plain payloads (number
 grammar, booleans `true`/`false`, `1`/`0`, `on`/`off`), after replacing `decimal` `,` with `.`. Thousands separators
-are not accepted.
+are not accepted: under `decimal: ","` a numeric value that contains a `.` is a `conversion` error (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`).
 
 **Outcomes:**
 
@@ -242,9 +246,9 @@ else. What follows fixes the behaviour; the plan fixes the details.
 
 ## 8. Commands and metrics
 
-**`probe <input>`:** lists the files the driver would read now (stable, not in the ledger), parses the newest one
+**`probe <input>`:** parses the newest file the driver would read now (stable, not in the ledger)
 without emitting, moving or recording it, and shows each point's value, type, quality and timestamp, or why it has
-none (`no file`, `missing_field`, the read error kind). It never touches the directory or the ledger.
+none (`no file`, `missing_field`, the read error kind), then a `source: <file>` line. It never touches the directory or the ledger. (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`, P10): it does not list the pending files, since `browse` does, with their states. The read error kind is attributed per file, not per point.)
 
 **`browse <input> [--limit 20]`:** lists the newest files of the directory with size, age and state (`waiting`,
 `ready`, `seen`), then, for the newest readable one, the addresses it offers in the form to copy into the document:
@@ -253,8 +257,7 @@ nominal and limits, and the K-fields of the first value line usable as context.
 
 **Metrics:** those of the driver kit, `laraplate_edge_input_connected{input}` and
 `laraplate_edge_input_read_errors_total{input,kind}` with the kinds `listing`, `file_too_large`, `malformed_file`,
-`malformed_row`, `missing_field`, `conversion`, `bad_timestamp` and `move_failed`; plus
-`laraplate_edge_file_files_total{input,outcome}` with `outcome` `read`, `duplicate` and `error`.
+`malformed_row`, `missing_field`, `conversion`, `bad_timestamp` and `move_failed`; each file read, duplicate or refused is logged at `info` with its name, the number of samples and its outcome (`read`, `duplicate`, `refused`). (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`, P9): the metric `laraplate_edge_file_files_total{input,outcome}` is not built, since the status endpoint takes input metrics only from the driver kit's health and a per-driver counter would widen that interface for every driver.)
 
 ## 9. Sample context in the core (plan 1, first task)
 
@@ -297,6 +300,8 @@ plugin SDK's `Sample` message has none. The backend accepts it already (`larapla
 
 Each plan closes with its documentation in `docs/CONFIGURATION.md` and `docs/USAGE.md` and an example in
 `examples/file`. Plan 1 also amends the parent spec's `file` row to point here, recording the reversal of section 2.
+
+**Known limits of plan 1** (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`): a file above `max_file_size` under `keep` is never hashed, so it is refused again after each restart; plugin inputs and outputs do not carry the sample context (section 9).
 
 **Out of scope:** growing files and tailing; recursion into subdirectories; file system events (section 2); the
 `context` field in the plugin SDK; Excel and other binary formats; the descriptive Q-DAS fields sent as signals;
