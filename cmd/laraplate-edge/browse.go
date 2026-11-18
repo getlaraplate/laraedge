@@ -369,10 +369,14 @@ func sparkplugBrowseLines(entries []mqtt.SparkplugEntry) []string {
 
 // browseFile lists the limit newest files of the watched directory of a file
 // input, one line "<name>  <size> B  <age in whole seconds>s  <state>" each
-// (state waiting, ready or seen), then an empty line, "addresses of <name>:"
-// and one "  <address>  <preview>" line per header name (wide) or key (long)
-// of the newest file that can be read, the address being usable as the
-// address of a point. Without a readable file it prints "no file to read".
+// (state waiting, ready, seen or, for a .dfx without its .dfd, incomplete),
+// then an empty line, "addresses of <name>:" and one "  <address>  <preview>"
+// line per header name (wide) or key (long) of the newest file that can be
+// read, the address being usable as the address of a point. For a Q-DAS
+// report (a .dfq, or "<dfd> + <dfx>") the lines are the characteristics,
+// "  <address>  <preview>  <detail>", followed, when the first record has
+// any, by an empty line, "context fields:" and one "  <key>  <preview>"
+// line each. Without a readable file it prints "no file to read".
 // It reads files and writes nothing, the ledger of read files included.
 func browseFile(doc config.Document, boot bootstrap.File, cfg config.Input, configFile, bootstrapPath string, limit int, stdout, stderr io.Writer) int {
 	const prefix = "laraplate-edge browse: "
@@ -410,7 +414,17 @@ func browseFile(doc config.Document, boot bootstrap.File, cfg config.Input, conf
 
 	fmt.Fprintf(stdout, "\naddresses of %s:\n", mqtt.Escape(b.Source))
 	for _, a := range b.Addresses {
-		fmt.Fprintf(stdout, "  %s  %s\n", mqtt.Escape(a.Address), a.Preview)
+		line := "  " + mqtt.Escape(a.Address) + "  " + a.Preview
+		if a.Detail != "" {
+			line += "  " + mqtt.Escape(a.Detail)
+		}
+		fmt.Fprintln(stdout, line)
+	}
+	if len(b.Context) > 0 {
+		fmt.Fprint(stdout, "\ncontext fields:\n")
+		for _, c := range b.Context {
+			fmt.Fprintf(stdout, "  %s  %s\n", mqtt.Escape(c.Address), c.Preview)
+		}
 	}
 
 	return exitOK

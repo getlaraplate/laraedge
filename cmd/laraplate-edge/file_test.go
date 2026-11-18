@@ -134,7 +134,7 @@ func TestProbeAFileInputWritesNothing(t *testing.T) {
 	}
 }
 
-var browseFileLine = regexp.MustCompile(`^\S+  \d+ B  \d+s  (waiting|ready|seen)$`)
+var browseFileLine = regexp.MustCompile(`^\S+  \d+ B  \d+s  (waiting|ready|seen|incomplete)$`)
 
 func TestBrowseAFileInputPrintsFilesAndAddresses(t *testing.T) {
 	env := newFileEnv(t)
@@ -205,5 +205,29 @@ func TestBrowseRefusesLimitForOtherDrivers(t *testing.T) {
 	r := runCLI(t, "", "browse", "line", "--config", env.config, "--limit", "5")
 	if r.code != exitUsage || !strings.Contains(r.stderr, errNotFileBrowseLimit) {
 		t.Errorf("browse: %+v", r)
+	}
+}
+
+func TestBrowseAQDASInputPrintsCharacteristicsAndContext(t *testing.T) {
+	env := newFileEnv(t)
+	doc, err := os.ReadFile(env.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, env.config, strings.Replace(string(doc), "format: csv", "format: qdas", 1))
+	env.report(t, "a.dfq", "K0100 2\nK2001/1 Bore\nK2002/1 Diameter\nK2101/1 12.5\nK2142/1 mm\n12.5\x0f3\nK0014/0 P-1\n", time.Hour)
+	env.report(t, "b.dfx", "1\n", 2*time.Hour)
+
+	r := runCLI(t, "", "browse", "cmm-line", "--config", env.config, "--bootstrap", env.bootstrap)
+	if r.code != exitOK || r.stderr != "" {
+		t.Fatalf("exit code = %d, stderr = %q", r.code, r.stderr)
+	}
+	lines := strings.Split(strings.TrimSuffix(r.stdout, "\n"), "\n")
+	if len(lines) < 2 || !strings.HasSuffix(lines[0], "  ready") || !strings.HasSuffix(lines[1], "  incomplete") {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+	want := "\naddresses of a.dfq:\n  Bore  \"12.5\"  Diameter  nominal 12.5  mm\n  #2  \"3\"\n\ncontext fields:\n  K0014  \"P-1\""
+	if rest := strings.Join(lines[2:], "\n"); rest != want {
+		t.Errorf("rest = %q, want %q", rest, want)
 	}
 }

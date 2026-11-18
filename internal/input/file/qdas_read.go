@@ -1,6 +1,7 @@
 package file
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -219,6 +220,73 @@ func (f *qdasFile) Field(n, index int, key string) string {
 	}
 
 	return v.field(index, key)
+}
+
+// ContextKeys lists the context fields of record n: the keys K0005 to K0099
+// the record has a value for, the record-wide ones first in key order, then
+// those of the characteristics in index order (a key once, at its first
+// place). Empty values are left out.
+func (f *qdasFile) ContextKeys(n int) []string {
+	v := f.view(n)
+	seen := map[string]bool{}
+	var keys []string
+	add := func(key string) {
+		if seen[key] || !qdasContextKey(key) || v.value(key) == "" {
+			return
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+
+	var shared []string
+	var own []qdasSlot
+	for _, e := range v.entries() {
+		if e.index == 0 {
+			shared = append(shared, e.key)
+		} else {
+			own = append(own, qdasSlot{e.index, e.key})
+		}
+	}
+	slices.Sort(shared)
+	for _, key := range shared {
+		add(key)
+	}
+
+	for i := 1; i <= min(v.r.blocks, f.Count); i++ {
+		for pos, key := range qdasValueKeys {
+			if qdasContextKey(key) && v.r.positional(i, pos) != "" {
+				own = append(own, qdasSlot{i, key})
+			}
+		}
+	}
+	slices.SortStableFunc(own, func(a, b qdasSlot) int {
+		if a.index != b.index {
+			return a.index - b.index
+		}
+
+		return strings.Compare(a.key, b.key)
+	})
+	for _, s := range own {
+		add(s.key)
+	}
+
+	return keys
+}
+
+// ContextValue returns the value of the context field key of record n: the
+// record-wide one, else that of the lowest characteristic index that has one.
+func (f *qdasFile) ContextValue(n int, key string) string {
+	return f.view(n).value(key)
+}
+
+// qdasContextKey reports whether key is one of K0005 to K0099.
+func qdasContextKey(key string) bool {
+	if len(key) != 5 || key[0] != 'K' {
+		return false
+	}
+	number, err := strconv.Atoi(key[1:])
+
+	return err == nil && number >= 5 && number <= 99
 }
 
 func (v qdasView) entries() []qdasCoded {

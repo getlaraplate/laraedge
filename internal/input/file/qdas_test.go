@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -692,5 +693,23 @@ func TestQDASMemoryGrowsWithTheInput(t *testing.T) {
 				t.Fatalf("allocated %d bytes for %d bytes of input, limit %d", got, len(tc.data), limit)
 			}
 		})
+	}
+}
+
+func TestQDASContextKeys(t *testing.T) {
+	text := qdasLines("K0100 2",
+		"1"+qf+qf+qf+"EV"+qf+"B1"+qs+"2",
+		"K0053/0 O", "K0014/0 P", "K0006/2 B2", "K0008/1 ", "K0099/2 Z")
+	f, err := readQDAS(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := f.ContextKeys(0)
+	want := []string{"K0014", "K0053", "K0005", "K0006", "K0099"}
+	if !slices.Equal(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
+	}
+	if v := f.ContextValue(0, "K0006"); v != "B1" {
+		t.Errorf("K0006 = %q, want the lowest characteristic's", v)
 	}
 }

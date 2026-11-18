@@ -2,9 +2,7 @@ package file
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -63,7 +61,7 @@ func (in *Input) ProbeSource() string {
 // cause stays in the debug log, as it can name a path.
 var errListing = errors.New("the directory cannot be listed")
 
-// Probe reads the newest unread file once and returns its samples (see
+// Probe reads the newest unread report once and returns its samples (see
 // ProbePoints).
 func (in *Input) Probe(ctx context.Context) ([]model.Sample, error) {
 	samples, _, err := in.ProbePoints(ctx)
@@ -71,8 +69,8 @@ func (in *Input) Probe(ctx context.Context) ([]model.Sample, error) {
 	return samples, err
 }
 
-// ProbePoints lists the directory once and parses the newest matching file
-// that is at least stable_for old and not in the ledger, writing nothing: the
+// ProbePoints lists the directory once and parses the newest report (a file, or a
+// .dfd and .dfx pair under qdas) whose files are at least stable_for old and not in the ledger, writing nothing: the
 // ledger is read as it is, empty when it is missing or corrupt. kinds says
 // why a point has no good sample: the kind of a bad one (conversion,
 // malformed_row or bad_timestamp, the first the file counted), missing_field
@@ -111,33 +109,33 @@ func (in *Input) ProbePoints(ctx context.Context) ([]model.Sample, map[edgeinput
 
 	led := peekLedger(in.opts.DataDir, in.cfg.ID)
 	now := in.clk.Now()
-	for _, f := range in.matching(files) {
+	matching := in.matching(files)
+	var ready []fileInfo
+	for _, f := range matching {
+		if now.Sub(f.ModTime) >= in.conn.StableFor {
+			ready = append(ready, f)
+		}
+	}
+	reports, _ := reportsOf(in.conn, ready, matching)
+	for _, r := range reports {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		if now.Sub(f.ModTime) < in.conn.StableFor {
-			continue
-		}
-		if f.Size > int64(in.conn.MaxFileSize) {
-			in.setProbeSource(f.Name)
+		data, key, tooLarge, err := readReport(in.deps, in.conn.Directory, r, in.conn.MaxFileSize)
+		if tooLarge {
+			in.setProbeSource(reportSource(r))
 
 			return nil, refused(KindFileTooLarge), nil
 		}
-		data, err := in.deps.readFile(filepath.Join(in.conn.Directory, f.Name))
 		if err != nil {
 			continue
 		}
-		if len(data) > in.conn.MaxFileSize {
-			in.setProbeSource(f.Name)
-
-			return nil, refused(KindFileTooLarge), nil
-		}
-		if led.Has(ledgerKey{Hash: sha256.Sum256(data), ModTime: f.ModTime}) {
+		if led.Has(key) {
 			continue
 		}
 
-		in.setProbeSource(f.Name)
-		samples, errKinds, err := parseCSV(in.plan, data, f.ModTime)
+		in.setProbeSource(reportSource(r))
+		samples, errKinds, err := parseReport(in.plan, in.conn.Format, data, r.Primary.ModTime)
 		if errors.Is(err, errMalformedFile) {
 			return nil, refused(KindMalformedFile), nil
 		}
@@ -149,6 +147,15 @@ func (in *Input) ProbePoints(ctx context.Context) ([]model.Sample, map[edgeinput
 	}
 
 	return noFile()
+}
+
+// reportSource names a report: its file, or for a pair "<dfd> + <dfx>".
+func reportSource(r fileReport) string {
+	if r.Companion == nil {
+		return r.Primary.Name
+	}
+
+	return r.Companion.Name + " + " + r.Primary.Name
 }
 
 // setProbeSource records the file a probe read.
