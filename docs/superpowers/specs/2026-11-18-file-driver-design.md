@@ -1,6 +1,6 @@
 # File driver: design
 
-**Status:** Draft (2026-11-18), awaiting the user's review.
+**Status:** Approved (2026-11-18). Plan 1 (sample context and `file` with CSV, `../plans/2026-11-18-file-csv.md`) is open.
 
 **Date:** 2026-11-18
 
