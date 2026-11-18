@@ -860,7 +860,7 @@ value, so a path or a column name does not reach a log.
 |---|---|---|
 | `directory` | | required: an absolute path. Only its top level is read; subdirectories are never entered. |
 | `format` | | required: `csv`. `qdas` is refused (`connection.format: not available in this build`). |
-| `pattern` | `*` | a glob on the file name (Go `path.Match`), such as `*.csv`, matched case-insensitively. A name that starts with `.` and one that ends in `.tmp`, `.part` or `~` is never read, whatever the pattern. |
+| `pattern` | `*` | a glob on the file name (Go `path.Match`), such as `*.csv`, matched case-insensitively. A name that starts with `.` and one that ends in `.tmp`, `.part` or `~` (in any letter case) is never read, whatever the pattern. A range inverted once lowercased, such as `[Z-a]`, is refused. |
 | `interval` | `2s` | the polling period, at least `500ms` |
 | `stable_for` | the larger of `5s` and `interval` | how long a file's size and modification time must stay unchanged before it is read; at least `interval` |
 | `max_file_size` | `16MiB` | a number of bytes, or a size written `<n>KiB` or `<n>MiB`, from 1 byte to 16 MiB. A larger file is not read (read error `file_too_large`) |
@@ -882,8 +882,8 @@ dead (see "Death and birth").
 
 | Key | Default | Meaning |
 |---|---|---|
-| `delimiter` | `,` | one character, not a quote or a line break; `;` is common in European exports, a tab is written `"\t"` |
-| `decimal` | `.` | the decimal separator of numbers, `.` or `,`. With `,` the delimiter may not be `,`. |
+| `delimiter` | `,` | one character, not a quote, a digit or a line break; must differ from `decimal`; `;` is common in European exports, a tab is written `"\t"` |
+| `decimal` | `.` | the decimal separator of numbers, `.` or `,`. The delimiter may not be the same character (so with `,` it may not be `,`). |
 | `header_row` | `1` | the 1-based line that holds the column names. The lines before it are skipped, blank ones counted: it counts physical lines. |
 | `layout` | `wide` | `wide` or `long` |
 | `key_column` | | with `long` only, then required: the column that names the characteristic |
@@ -963,7 +963,7 @@ The read error kinds, with `listing` and `move_failed` below, are those of `/sta
    gives no sample. The modification time is part of the pair because it is the timestamp of a report that has
    none, so two identical reports written at different times are two parts, while a rename or a move is the
    same report. Entries older than `seen_retention` are dropped, counted from the scan that no longer finds the
-   file, so an entry whose file is still there never expires. A ledger that does not parse is renamed
+   file, so an entry whose file is still there never expires. A file is the same file only with the same name and the same modification time: an exporter that rewrites `result.csv` every time does not keep the entries of its older reports alive. A ledger that does not parse is renamed
    `<input id>.json.corrupt-<unix seconds>`, a warning is logged, and the input starts with an empty one: the
    reports still present are read again, and the backend drops their repeated samples (see below).
 4. **Deferred commit.** The samples are emitted, the file is then held pending in memory. At a scan at least
@@ -1011,7 +1011,8 @@ receives samples without it: the plugin SDK has no field for it in this build.
 **Declared limits.**
 
 - Files are read whole, once. Growing files, subdirectories, Excel and other binary formats, and file system
-  events are not supported.
+  events are not supported. Symbolic links and other non-regular files in the directory are not read.
+- Rows whose fields are all blank, such as the `;;;` rows Excel appends after the data, are ignored.
 - `probe` attributes a read error to the points of a file as a whole (`malformed_file`, `file_too_large`) or to
   the points that have a bad sample, per file and not per point.
 - A file above `max_file_size` under `keep` is refused again after each restart, since it is never hashed.

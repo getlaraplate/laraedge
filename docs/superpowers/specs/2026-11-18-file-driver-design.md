@@ -248,7 +248,7 @@ else. What follows fixes the behaviour; the plan fixes the details.
 
 **`probe <input>`:** parses the newest file the driver would read now (stable, not in the ledger)
 without emitting, moving or recording it, and shows each point's value, type, quality and timestamp, or why it has
-none (`no file`, `missing_field`, the read error kind), then a `source: <file>` line. It never touches the directory or the ledger. (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`, P10): it does not list the pending files, since `browse` does, with their states. The read error kind is attributed per file, not per point.)
+none (`no file`, `missing_field`, the read error kind), then a `source: <file>` line. It never touches the directory or the ledger. (Amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`, P10: it does not list the pending files, since `browse` does, with their states. The read error kind is attributed per file, not per point.)
 
 **`browse <input> [--limit 20]`:** lists the newest files of the directory with size, age and state (`waiting`,
 `ready`, `seen`), then, for the newest readable one, the addresses it offers in the form to copy into the document:
@@ -257,7 +257,7 @@ nominal and limits, and the K-fields of the first value line usable as context.
 
 **Metrics:** those of the driver kit, `laraplate_edge_input_connected{input}` and
 `laraplate_edge_input_read_errors_total{input,kind}` with the kinds `listing`, `file_too_large`, `malformed_file`,
-`malformed_row`, `missing_field`, `conversion`, `bad_timestamp` and `move_failed`; each file read, duplicate or refused is logged at `info` with its name, the number of samples and its outcome (`read`, `duplicate`, `refused`). (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`, P9): the metric `laraplate_edge_file_files_total{input,outcome}` is not built, since the status endpoint takes input metrics only from the driver kit's health and a per-driver counter would widen that interface for every driver.)
+`malformed_row`, `missing_field`, `conversion`, `bad_timestamp` and `move_failed`; each file read, duplicate or refused is logged at `info` with its name, the number of samples and its outcome (`read`, `duplicate`, `refused`). (Amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`, P9: the metric `laraplate_edge_file_files_total{input,outcome}` is not built, since the status endpoint takes input metrics only from the driver kit's health and a per-driver counter would widen that interface for every driver.)
 
 ## 9. Sample context in the core (plan 1, first task)
 

@@ -564,15 +564,14 @@ response time: 3.2ms
   moving or recording it, and prints one line per sample, as for the other drivers: device, signal, value,
   kind and quality. `source: <file name>` names the file the samples came from. `probe` does not list the files
   waiting to be read: that is `browse`'s job.
-- A point with no sample shows why instead of the value: `no file` (nothing qualifies, or the directory cannot
-  be listed), `missing_field` (the file has no such column or key), or, for a file refused as a whole,
+- A point with no sample shows why instead of the value: `no file` (nothing qualifies), `missing_field` (the file has no such column or key), or, for a file refused as a whole,
   `malformed_file` or `file_too_large`, which `source:` then names. A `bad` sample ends with the read error
   kind that made it bad: `conversion`, `bad_timestamp` or `malformed_row`. The kinds are attributed per file,
   not per point: every bad sample of a file gets the first of the three kinds the file counted.
 - The sample time is the one of the file: the `timestamp` column, or the file's modification time. The context
   is not printed; `--record <file>` writes the samples as for the other drivers.
 - `probe` reads files only. The exit code is 0 when the directory could be read, also with `no file`, and 1
-  for an invalid document.
+  when it cannot be listed ("the directory cannot be listed") or the document is invalid.
 
 ### Finding the files and the addresses: `browse`
 
@@ -891,7 +890,7 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `read_errors` `conversion` or `malformed_row` growing, `file` points `bad` | a value does not convert to the point's `type`, or a row has another number of fields than the header (an unquoted delimiter in a value). With `decimal: ","` a number that contains a `.` is a conversion error: thousands separators are not accepted. | set the `delimiter` and `decimal` the export uses (`;` and `,` for most European Excel files); `browse` shows the addresses and a preview of the first row; `probe` shows the kind of each bad sample. |
 | `read_errors` `missing_field` growing, a point of a `file` input has no samples | the file has no such column (`wide`) or no row with that key (`long`): the header name differs in spelling or case, or the characteristic is not in this report | take the address from `browse`, exactly as written. An empty cell gives no sample and no error: a characteristic not measured on a part. |
 | `read_errors` `file_too_large` growing, a file in `error/` | the file is above `max_file_size` (16 MiB at most) and is not read. Under `keep` it is refused again after every restart, since it is never hashed. | raise `max_file_size`, or ask the export to write smaller reports; a file that large is probably not a report. |
-| a `file` input `connected` false, `read_errors` `listing` growing, devices reported dead after `death_tolerance` | the directory cannot be listed: it does not exist, the network share is not mounted or the permission was lost. Silence never kills a device: only this does. Nothing is read, moved or recorded while it lasts. | mount the share, check the path (it must be absolute) and that the agent's user can read it. The devices are born again at the first successful listing, and the files present are read normally. |
+| a `file` input `connected` false, `read_errors` `listing` growing, devices reported dead after `death_tolerance` | the directory cannot be listed (`probe` and `browse` then exit 1): it does not exist, the network share is not mounted or the permission was lost. Silence never kills a device: only this does. Nothing is read, moved or recorded while it lasts. | mount the share, check the path (it must be absolute) and that the agent's user can read it. The devices are born again at the first successful listing, and the files present are read normally. |
 | the document is `rejected` with `connection.format: not available in this build` | `format: qdas` is not built yet | use `format: csv`, or export the report as CSV. |
 | `read_errors` `availability` growing | a message on the availability topic is neither the `online` nor the `offline` string of the entry; the comparison is exact, case and spaces included | fix the two strings to what the device publishes (`browse` shows it) |
 | an `mqtt` device dead while the broker is connected, then born again at its first message | its availability topic holds `offline`: the device (or its Last Will, which a broker may retain) said so. The device stays dead until `online` or a sample arrives, however long it is silent | check what the device publishes on the topic; publish `online`, or clear a stale retained `offline` on the broker |
