@@ -178,7 +178,6 @@ func decodeMetric(b []byte) (spMetric, error) {
 		}
 		b = b[used:]
 
-		ok := true
 		switch {
 		case num == 1 && typ == protowire.BytesType:
 			m.Name, m.HasName = string(raw), true
@@ -215,9 +214,7 @@ func decodeMetric(b []byte) (spMetric, error) {
 			// but not one the driver reads.
 			m.Value = spValue{Field: num}
 		case (num >= 1 && num <= 5) || num == 7 || num == 9 || (num >= 10 && num <= 15):
-			ok = false
-		}
-		if !ok {
+			// A known field with the wrong wire type.
 			return spMetric{}, errSparkplugWire
 		}
 	}

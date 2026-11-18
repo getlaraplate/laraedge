@@ -349,10 +349,13 @@ func TestBrowseASparkplugInputListsEntriesAndMetrics(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %q", r.code, r.stderr)
 	}
 
-	want := `g/n1/d1  1 msg  born
+	// Each node seen only through its devices has its own line.
+	want := `g/n1  0 msg  -
+g/n1/d1  1 msg  born
   g/n1/d1|Recipe  unsupported:DataSet
   g/n1/d1|Run  bool
   g/n1/d1|Speed  int32
+g/n2  0 msg  -
 g/n2/d9  1 msg  -  1 malformed
 `
 	if r.stdout != want {
@@ -361,7 +364,7 @@ g/n2/d9  1 msg  -  1 malformed
 
 	// An explicit filter wins over the default.
 	r = runCLI(t, "", "browse", "line", "--config", env.config, "--duration", "1s", "--filter", "spBv1.0/g/+/n2/#")
-	if r.code != exitOK || r.stdout != "g/n2/d9  1 msg  -  1 malformed\n" {
+	if r.code != exitOK || r.stdout != "g/n2  0 msg  -\ng/n2/d9  1 msg  -  1 malformed\n" {
 		t.Errorf("explicit filter: %+v", r)
 	}
 
@@ -384,6 +387,15 @@ func TestSparkplugBrowseLines(t *testing.T) {
 	}
 	if got := sparkplugBrowseLines(entries); !slices.Equal(got, want) {
 		t.Errorf("lines =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestMQTTBrowseTruncatedLineNamesWhatItCounts(t *testing.T) {
+	if got, want := mqttBrowseTruncatedLine(false), "... stopped after 1000 topics"; got != want {
+		t.Errorf("json: %q, want %q", got, want)
+	}
+	if got, want := mqttBrowseTruncatedLine(true), "... stopped after 1000 entries"; got != want {
+		t.Errorf("sparkplug_b: %q, want %q", got, want)
 	}
 }
 

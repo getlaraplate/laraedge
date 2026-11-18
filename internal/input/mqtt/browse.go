@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -211,7 +212,7 @@ func collectLeaves(v any, path []string, topic string, out *leaves) {
 
 			return
 		}
-		for _, key := range slices.Sorted(mapKeys(node)) {
+		for _, key := range slices.Sorted(maps.Keys(node)) {
 			if key == "" || strings.Contains(key, ".") {
 				continue
 			}
@@ -234,16 +235,6 @@ func collectLeaves(v any, path []string, topic string, out *leaves) {
 		addLeaf(path, topic, strconv.FormatBool(node), out)
 	default:
 		addLeaf(path, topic, preview(fmt.Sprint(node), false), out)
-	}
-}
-
-func mapKeys(m map[string]any) func(yield func(string) bool) {
-	return func(yield func(string) bool) {
-		for k := range m {
-			if !yield(k) {
-				return
-			}
-		}
 	}
 }
 
@@ -358,7 +349,8 @@ type SparkplugEntry struct {
 // BrowseSparkplug is Browse for format sparkplug_b (decision S14): it
 // subscribes to filter with the client id <client_id>-browse for duration and
 // returns one entry per node and device seen, sorted by group, node and
-// device, and whether it stopped early at the 1001st entry. NCMD, DCMD and
+// device, and whether it stopped early at the 1001st entry. A node seen only
+// through its devices has its own entry, not born and without messages. NCMD, DCMD and
 // STATE messages are not listed. With rebirth on, it publishes one rebirth
 // request to each node the input's points address at the node's first
 // message in the window, and that is its only write (ruling R12): a node no
@@ -414,20 +406,30 @@ func (in *Input) BrowseSparkplug(ctx context.Context, filter string, duration ti
 			return
 		}
 
-		e := found[target]
-		if e == nil {
-			if len(found) >= BrowseMaxTopics {
-				truncated = true
-				close(full)
-
-				return
-			}
-			e = &seen{SparkplugEntry: SparkplugEntry{Group: target.Group, Node: target.Node, Device: target.Device}, metrics: make(map[string]string)}
-			found[target] = e
+		// A device's node gets its own entry with the device's, so every
+		// device line has its node line, even for a node seen only through
+		// its devices (not born, no message of its own).
+		node := SparkplugTarget{Group: target.Group, Node: target.Node}
+		var missing []SparkplugTarget
+		if found[node] == nil {
+			missing = append(missing, node)
 		}
+		if target != node && found[target] == nil {
+			missing = append(missing, target)
+		}
+		if len(found)+len(missing) > BrowseMaxTopics {
+			truncated = true
+			close(full)
+
+			return
+		}
+		for _, t := range missing {
+			found[t] = &seen{SparkplugEntry: SparkplugEntry{Group: t.Group, Node: t.Node, Device: t.Device}, metrics: make(map[string]string)}
+		}
+		e := found[target]
 		e.Messages++
 
-		if node := (SparkplugTarget{Group: target.Group, Node: target.Node}); in.conn.Rebirth && addressed[node] && !asked[node] {
+		if in.conn.Rebirth && addressed[node] && !asked[node] {
 			asked[node] = true
 			rebirths <- node
 		}
@@ -492,7 +494,7 @@ wait:
 
 	entries = make([]SparkplugEntry, 0, len(found))
 	for _, e := range found {
-		for _, address := range slices.Sorted(mapKeysOf(e.metrics)) {
+		for _, address := range slices.Sorted(maps.Keys(e.metrics)) {
 			e.Metrics = append(e.Metrics, SparkplugMetricEntry{Address: address, Type: e.metrics[address]})
 		}
 		entries = append(entries, e.SparkplugEntry)
@@ -502,14 +504,4 @@ wait:
 	})
 
 	return entries, truncated, nil
-}
-
-func mapKeysOf[V any](m map[string]V) func(yield func(string) bool) {
-	return func(yield func(string) bool) {
-		for k := range m {
-			if !yield(k) {
-				return
-			}
-		}
-	}
 }

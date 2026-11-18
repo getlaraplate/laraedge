@@ -357,7 +357,8 @@ type router struct {
 	stopped bool
 	// session is the Sparkplug B session; nil under json.
 	session *sparkplugSession
-	// rebirths are the nodes due a rebirth request not yet published.
+	// rebirths are the nodes due a rebirth request not yet published, each
+	// once, in the order they became due.
 	rebirths []SparkplugTarget
 }
 
@@ -465,7 +466,13 @@ func (r *router) sparkplug(topic string, payload []byte) {
 	}
 
 	if due := r.session.RebirthNodes(now); len(due) > 0 {
-		r.rebirths = append(r.rebirths, due...)
+		// A node still waiting, across a reconnection too, is not queued
+		// again: one node never gets two NCMD back to back.
+		for _, node := range due {
+			if !slices.Contains(r.rebirths, node) {
+				r.rebirths = append(r.rebirths, node)
+			}
+		}
 		select {
 		case r.rebirthsDue <- struct{}{}:
 		default:

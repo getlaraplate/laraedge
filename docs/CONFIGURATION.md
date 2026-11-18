@@ -624,17 +624,18 @@ apply once a document with `persistent_session: false` for that input before rem
 discards the broker's session), or clear the session of its client id on the broker.
 
 **Refused subscriptions.** A broker can refuse the subscription of a topic (SUBACK `0x80`, typically an ACL that
-does not let the client read it). The input keeps the connection and its other topics. It logs a warning
-once per connection for each refused topic, naming the topic and the input, and counts `subscribe_refused`
-once for every point on that topic (once for a refused availability topic). A device whose points are all on
-refused topics is no longer kept alive, so it dies after `death_tolerance`; a device with at least one accepted
-topic stays alive. Under `sparkplug_b` the topic is the node filter `spBv1.0/<group>/+/<edge_node>/#`: its refusal
-counts every point of the node and its devices, and only those agent devices stop being kept alive. Every connection subscribes the document's topics again, so a refused topic is retried at the
-next connection: after a reconnection, a reload or a restart. A topic refused at its first subscription is not
-written to the subscription set; one the set already held (granted on an earlier connection, which a broker
-usually keeps in the session) stays in it, so a document that drops it still unsubscribes it. There is no retry timer: fix the ACL on the
-broker, then reload the configuration (`SIGHUP`) or restart the agent. `connected` turns true only once the
-broker has answered the subscriptions.
+does not let the client read it). The input keeps the connection and its other topics. It logs a warning once
+per connection for each refused topic, naming the topic and the input, and counts `subscribe_refused` once for
+every point on that topic (once for a refused availability topic). A device whose points are all on refused
+topics is no longer kept alive, so it dies after `death_tolerance`; a device with at least one accepted topic
+stays alive. Under `sparkplug_b` the topic is the node filter `spBv1.0/<group>/+/<edge_node>/#`: its refusal
+counts every point of the node and its devices, and only those agent devices stop being kept alive. Every
+connection subscribes the document's topics again, so a refused topic is retried at the next connection: after a
+reconnection, a reload or a restart. A topic refused at its first subscription is not written to the
+subscription set; one the set already held (granted on an earlier connection, which a broker usually keeps in
+the session) stays in it, so a document that drops it still unsubscribes it. There is no retry timer: fix the
+ACL on the broker, then reload the configuration (`SIGHUP`) or restart the agent. `connected` turns true only
+once the broker has answered the subscriptions.
 
 **Client id uniqueness.** A broker keeps one connection per client id: when a second client connects with the
 id of the first, it disconnects the first, and two clients sharing an id take each other's connection over
@@ -718,6 +719,9 @@ handled silently (the sequence number and the aliases are kept up to date) and g
   node's agent device alive too, an NDATA leaves the node's devices dead until their own data or birth), its
   samples are emitted, the message counts `missed_birth` once, and with `rebirth: true` the agent asks the node
   for a rebirth (at most once every 30 s per node). With `rebirth: false` the device revives all the same.
+  A DBIRTH under a node dead since its NDEATH proves the same of the node: its NBIRTH was lost. It puts the
+  node's agent device alive with the device's, counts `missed_birth` once and, with `rebirth: true`, makes the
+  agent ask the node for a rebirth, as data does. A DBIRTH after a DDEATH of its device is an ordinary birth.
 - The `bdSeq` metric ties a death to its birth. An NDEATH whose `bdSeq` differs from the last NBIRTH's is the
   stale Last Will of an earlier session and is ignored. The NDEATH is honoured when no NBIRTH was seen, when the last NBIRTH carried no `bdSeq`, or when the NDEATH has none.
 
@@ -758,8 +762,8 @@ datatype, which is the one in the message or else the one learnt from the birth.
 Signed integers are two's complement at the datatype's width. Everything else is a `bad` sample with the read
 error `conversion`: DataSet, Bytes, File, Template, PropertySet, PropertySetList, arrays, an unknown datatype, a
 metric with no datatype, and a value that does not fit the point's type. A metric with `is_null` is a `bad`
-sample and no read error, since it is the device's own report. A `bad` sample carries the zero of the point's
-kind. `is_historical` metrics are ordinary samples.
+sample and no read error, since it is the device's own report, even when its timestamp is out of range. A `bad`
+sample carries the zero of the point's kind. `is_historical` metrics are ordinary samples.
 
 A Float or Double is a typed binary number, so a whole value (`3.0`) is accepted by an integer point type, which
 differs from `json`, where the text `3.0` is refused for an integer type.
@@ -779,7 +783,7 @@ after year 9999 makes the sample `bad` with the read error `bad_timestamp`.
 | The payload is not a Sparkplug B protobuf | dropped, no sample; read error `malformed_payload`, once per message |
 | A data metric with an alias no birth declared | dropped; read error `unknown_alias`, once per metric |
 | `seq` is not the expected one | the messages are handled; read error `sequence_gap` |
-| NDATA or DDATA of a node or device a death put offline | the device is alive again and the samples are emitted; read error `missed_birth`, once per message |
+| NDATA or DDATA of a node or device a death put offline, or a DBIRTH under a node an NDEATH put offline | the device (and for a DBIRTH the node) is alive again and the samples are emitted; read error `missed_birth`, once per message |
 | A metric no point addresses | ignored, no count |
 | A value that does not convert, a datatype that is not scalar | `bad` sample; read error `conversion` |
 | A topic that is not `spBv1.0/<group>/<type>/<node>[/<device>]`, or of a node no point addresses | dropped; read error `unmapped` |
@@ -806,7 +810,7 @@ kinds below. Like every input that reports its health, an `mqtt` input shows `ti
 | `unmapped` | a message on a topic no point subscribes to (under `sparkplug_b`: a topic that is not Sparkplug, or of a node no point addresses) |
 | `unknown_alias` | `sparkplug_b`: a data metric with an alias no birth declared, once per metric |
 | `sequence_gap` | `sparkplug_b`: a message whose `seq` does not follow the node's last one |
-| `missed_birth` | `sparkplug_b`: an NDATA or DDATA of a node or device a death put offline, which proves its birth was lost, once per message |
+| `missed_birth` | `sparkplug_b`: an NDATA or DDATA of a node or device a death put offline, or a DBIRTH under a node an NDEATH put offline, which proves a birth was lost, once per message |
 | `malformed_payload` | `sparkplug_b`: a payload that is not a Sparkplug B protobuf, once per message |
 | `subscribe_refused` | a point on a topic whose subscription the broker refused, once per connection (once for a refused availability topic; under `sparkplug_b` a refused node filter counts every point of that node and its devices) |
 

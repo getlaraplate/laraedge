@@ -517,6 +517,9 @@ func TestSessionNullAndTimestamps(t *testing.T) {
 	badTS := temp(1, 5)
 	badTS.Timestamp = ptr(uint64(1) << 63)
 
+	nullBadTS := null
+	nullBadTS.Timestamp = ptr(uint64(1) << 63)
+
 	tests := []struct {
 		name      string
 		p         mqtttest.SparkplugPayload
@@ -531,6 +534,10 @@ func TestSessionNullAndTimestamps(t *testing.T) {
 			tempSample(5, spStart.Add(-time.Minute)), nil},
 		{"implausible timestamp", mqtttest.SparkplugPayload{Metrics: []mqtttest.SparkplugMetric{badTS}},
 			badSample(PlannedPoint{Device: "press", Signal: "temp", Point: config.Point{Type: "float64", Priority: model.Critical}}, spStart), []string{KindBadTimestamp}},
+		{"is_null with an implausible timestamp is bad without a kind", mqtttest.SparkplugPayload{Metrics: []mqtttest.SparkplugMetric{nullBadTS}},
+			badSample(PlannedPoint{Device: "press", Signal: "temp", Point: config.Point{Type: "float64", Priority: model.Critical}}, spStart), nil},
+		{"is_null with an implausible payload timestamp is bad without a kind", mqtttest.SparkplugPayload{Timestamp: ptr(uint64(1) << 63), Metrics: []mqtttest.SparkplugMetric{null}},
+			badSample(PlannedPoint{Device: "press", Signal: "temp", Point: config.Point{Type: "float64", Priority: model.Critical}}, spStart), nil},
 	}
 
 	for _, tt := range tests {
@@ -567,22 +574,24 @@ func TestSessionUnplannedDeviceOfAPlannedNode(t *testing.T) {
 	steps := []struct {
 		topic string
 		p     []byte
+		// unaddressed marks a message of d2, which must give nothing.
+		unaddressed bool
 	}{
-		{tDBIRTH, payload(ptr(uint64(1)))},
-		{"spBv1.0/g/DBIRTH/n1/d2", payload(ptr(uint64(2)), named("Level", 40, dtDouble))},
-		{"spBv1.0/g/DDATA/n1/d2", payload(ptr(uint64(3)), byAlias(40, 1))},
-		{tDDATA, payload(ptr(uint64(4)))},
-		{"spBv1.0/g/NDATA/n1", payload(ptr(uint64(5)), temp(1, 1))},
-		{"spBv1.0/g/DDATA/n1/d2", payload(ptr(uint64(6)), mqtttest.SparkplugMetric{Name: ptr("Level"), Double: ptr(2.0)})},
-		{"spBv1.0/g/DDEATH/n1/d2", payload(ptr(uint64(7)))},
-		{tNDATA, payload(ptr(uint64(8)))},
+		{tDBIRTH, payload(ptr(uint64(1))), false},
+		{"spBv1.0/g/DBIRTH/n1/d2", payload(ptr(uint64(2)), named("Level", 40, dtDouble)), true},
+		{"spBv1.0/g/DDATA/n1/d2", payload(ptr(uint64(3)), byAlias(40, 1)), true},
+		{tDDATA, payload(ptr(uint64(4))), false},
+		{"spBv1.0/g/NDATA/n1", payload(ptr(uint64(5)), temp(1, 1)), false},
+		{"spBv1.0/g/DDATA/n1/d2", payload(ptr(uint64(6)), mqtttest.SparkplugMetric{Name: ptr("Level"), Double: ptr(2.0)}), true},
+		{"spBv1.0/g/DDEATH/n1/d2", payload(ptr(uint64(7))), true},
+		{tNDATA, payload(ptr(uint64(8))), false},
 	}
 	for _, st := range steps {
 		r := s.Handle(st.topic, st.p, spStart)
 		if !r.Mapped || r.Ignored || r.Kinds != nil {
 			t.Fatalf("%s: result = %+v, want mapped and no kinds", st.topic, r)
 		}
-		if st.topic[len(st.topic)-2:] == "d2" && (r.Samples != nil || r.Online != nil || r.Offline != nil) {
+		if st.unaddressed && (r.Samples != nil || r.Online != nil || r.Offline != nil) {
 			t.Fatalf("%s: result = %+v, want nothing", st.topic, r)
 		}
 	}
@@ -605,4 +614,99 @@ func TestSessionUnplannedDeviceAliasesStayItsOwn(t *testing.T) {
 	if r.Samples != nil || !reflect.DeepEqual(r.Kinds, []string{KindUnknownAlias}) {
 		t.Fatalf("result = %+v, want no sample and unknown_alias", r)
 	}
+}
+
+// TestSessionMalformedPayloadOfAnUnaddressedDevice: a malformed payload from
+// a device no point addresses, under a planned node, counts
+// malformed_payload (ruling R5).
+func TestSessionMalformedPayloadOfAnUnaddressedDevice(t *testing.T) {
+	s, _ := newTestSession(t, false)
+	s.Handle(tNBIRTH, nbirth(1, 0), spStart)
+
+	r := s.Handle("spBv1.0/g/DDATA/n1/d2", []byte{0x0a, 0xff}, spStart)
+	if want := []string{KindMalformedPayload}; !r.Mapped || r.Samples != nil || r.Online != nil || !reflect.DeepEqual(r.Kinds, want) {
+		t.Fatalf("result = %+v, want mapped, no samples, Kinds %q", r, want)
+	}
+}
+
+// TestSessionMetricDatatypeWinsOverTheBirths: a data metric that carries its
+// own datatype is converted by it, not by the different one its birth
+// declared.
+func TestSessionMetricDatatypeWinsOverTheBirths(t *testing.T) {
+	s, _ := newTestSession(t, false)
+
+	count := named("Count", 2, dtInt64)
+	count.Long = ptr(uint64(1))
+	s.Handle(tNBIRTH, payload(ptr(uint64(0)), mqtttest.BdSeq(1), count), spStart)
+
+	asDouble := mqtttest.SparkplugMetric{Alias: ptr(uint64(2)), Datatype: ptr(dtDouble), Double: ptr(3.0)}
+	r := s.Handle(tNDATA, payload(ptr(uint64(1)), asDouble), spStart)
+	want := []model.Sample{{Device: "press", Signal: "count", TS: spStart, Value: model.IntValue(3), Quality: model.Good}}
+	if !reflect.DeepEqual(r.Samples, want) || r.Kinds != nil {
+		t.Fatalf("result = %+v, want samples %+v and no kinds", r, want)
+	}
+
+	// The birth's datatype still applies to a metric without its own.
+	byBirth := mqtttest.SparkplugMetric{Alias: ptr(uint64(2)), Double: ptr(3.0)}
+	if r := s.Handle(tNDATA, payload(ptr(uint64(2)), byBirth), spStart); !reflect.DeepEqual(r.Kinds, []string{KindConversion}) {
+		t.Fatalf("Kinds by the birth's datatype = %q, want [conversion]", r.Kinds)
+	}
+}
+
+// TestSessionDBIRTHUnderADeadNodeIsAMissedBirth: a DBIRTH under a node held
+// dead by an NDEATH proves the node alive, its NBIRTH lost. It brings the
+// node's agent device online with the device's, counts missed_birth once
+// and, with rebirth on, makes the node due one rebirth, as data does
+// (ruling R13, reversed on 2026-11-17).
+func TestSessionDBIRTHUnderADeadNodeIsAMissedBirth(t *testing.T) {
+	node := []SparkplugTarget{{Group: "g", Node: "n1"}}
+	tests := []struct {
+		name   string
+		topic  string
+		online []string
+	}{
+		{"a planned device", tDBIRTH, []string{"oven", "press"}},
+		{"an unplanned device", "spBv1.0/g/DBIRTH/n1/d9", []string{"press"}},
+	}
+
+	for _, tt := range tests {
+		for _, rebirth := range []bool{true, false} {
+			t.Run(tt.name+map[bool]string{true: ", rebirth on", false: ", rebirth off"}[rebirth], func(t *testing.T) {
+				s, clk := newTestSession(t, rebirth)
+				s.Handle(tNBIRTH, nbirth(1, 0), spStart)
+				s.Handle(tNDEATH, ndeath(ptr(uint64(1))), spStart)
+
+				r := s.Handle(tt.topic, payload(ptr(uint64(0)), speed(30, 7)), spStart)
+				if !reflect.DeepEqual(r.Online, tt.online) || !reflect.DeepEqual(r.Kinds, []string{KindMissedBirth}) {
+					t.Fatalf("DBIRTH = %+v, want Online %q and one missed_birth", r, tt.online)
+				}
+				got := s.RebirthNodes(clk.Now())
+				if rebirth && !reflect.DeepEqual(got, node) {
+					t.Fatalf("RebirthNodes = %+v, want %+v", got, node)
+				}
+				if !rebirth && got != nil {
+					t.Fatalf("RebirthNodes = %+v, want none with rebirth off", got)
+				}
+
+				// The node is alive: its data is no missed birth.
+				if r := s.Handle(tNDATA, payload(ptr(uint64(1)), temp(1, 1)), spStart); r.Online != nil || r.Kinds != nil {
+					t.Fatalf("NDATA after the DBIRTH = %+v, want nobody online, no kinds", r)
+				}
+			})
+		}
+	}
+
+	t.Run("a DBIRTH after a DDEATH is no missed birth", func(t *testing.T) {
+		s, clk := newTestSession(t, true)
+		s.Handle(tNBIRTH, nbirth(1, 0), spStart)
+		s.Handle(tDDEATH, payload(ptr(uint64(1))), spStart)
+
+		r := s.Handle(tDBIRTH, payload(ptr(uint64(2)), speed(30, 7)), spStart)
+		if !reflect.DeepEqual(r.Online, []string{"oven"}) || r.Kinds != nil {
+			t.Fatalf("DBIRTH = %+v, want oven online, no kinds", r)
+		}
+		if got := s.RebirthNodes(clk.Now()); got != nil {
+			t.Fatalf("RebirthNodes = %+v, want none", got)
+		}
+	})
 }

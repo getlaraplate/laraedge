@@ -405,8 +405,9 @@ func TestMQTTSparkplug(t *testing.T) {
 	a := startAgent(t, boot)
 
 	// The broker does not deliver retained node messages to the node filter,
-	// so publish once the subscription is in place.
-	broker.WaitSubscribed("laraplate-edge-e2e-spb-sp", 1)
+	// so publish once the input's own filter is subscribed (decision S1b,
+	// ruling R3), whatever its client id.
+	broker.WaitSubscribedTo("spBv1.0/plant/+/edge1/#")
 
 	u64 := func(v uint64) *uint64 { return &v }
 	u32 := func(v uint32) *uint32 { return &v }

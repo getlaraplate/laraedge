@@ -72,13 +72,20 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 			return exitUsage
 		}
 
+		conn, err := mqtt.ParseConnection(cfg.Connection, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "%smqtt input %q: %v\n", prefix, cfg.ID, err)
+			return exitFailure
+		}
+		sparkplug := conn.Format == mqtt.FormatSparkplugB
+
 		// An input with format sparkplug_b browses spBv1.0/# unless --filter
 		// says otherwise (decision S14).
-		if conn, err := mqtt.ParseConnection(cfg.Connection, cfg); err == nil && conn.Format == mqtt.FormatSparkplugB && !given["filter"] {
+		if sparkplug && !given["filter"] {
 			*filter = mqtt.DefaultSparkplugBrowseFilter
 		}
 
-		return browseMQTT(doc, boot, cfg, *configFile, *bootstrapPath, *filter, *duration, stdout, stderr)
+		return browseMQTT(doc, boot, cfg, *configFile, *bootstrapPath, *filter, *duration, sparkplug, stdout, stderr)
 	}
 	if found && (given["filter"] || given["duration"]) {
 		fmt.Fprintf(stderr, "%s%s\n", prefix, errOtherBrowseFlags)
@@ -198,7 +205,9 @@ func loadedInput(configFile, bootstrapPath, id string) (doc config.Document, boo
 // of the messages seen, the last one for size and retain. It stops after
 // 1000 topics. The connection settings and the password are never printed.
 // Ctrl-C ends the collection early and still prints what was collected.
-func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, configFile, bootstrapPath, filter string, duration time.Duration, stdout, stderr io.Writer) int {
+// sparkplug selects the Sparkplug B listing of format sparkplug_b, which
+// stops after 1000 entries.
+func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, configFile, bootstrapPath, filter string, duration time.Duration, sparkplug bool, stdout, stderr io.Writer) int {
 	const prefix = "laraplate-edge browse: "
 
 	if err := mqtt.CheckFilter(filter); err != nil {
@@ -238,7 +247,7 @@ func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, conf
 
 	var lines []string
 	var truncated bool
-	if conn, err := mqtt.ParseConnection(cfg.Connection, cfg); err == nil && conn.Format == mqtt.FormatSparkplugB {
+	if sparkplug {
 		var entries []mqtt.SparkplugEntry
 		if entries, truncated, err = in.BrowseSparkplug(ctx, filter, duration); err != nil {
 			fmt.Fprintf(stderr, "%s%v\n", prefix, err)
@@ -261,7 +270,7 @@ func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, conf
 		fmt.Fprintln(stdout, browseNoMessage)
 	}
 	if truncated {
-		fmt.Fprintf(stdout, "... stopped after %d topics\n", mqtt.BrowseMaxTopics)
+		fmt.Fprintln(stdout, mqttBrowseTruncatedLine(sparkplug))
 	}
 
 	return exitOK
@@ -269,6 +278,18 @@ func browseMQTT(doc config.Document, boot bootstrap.File, cfg config.Input, conf
 
 // browseNoMessage is what an mqtt browse prints when nothing arrived.
 const browseNoMessage = "(no message received)"
+
+// mqttBrowseTruncatedLine is the line an mqtt browse that stopped early ends
+// with: it counts topics under json, and nodes and devices (entries) under
+// sparkplug_b.
+func mqttBrowseTruncatedLine(sparkplug bool) string {
+	what := "topics"
+	if sparkplug {
+		what = "entries"
+	}
+
+	return fmt.Sprintf("... stopped after %d %s", mqtt.BrowseMaxTopics, what)
+}
 
 // mqttBrowseLines formats entries as browseMQTT documents.
 func mqttBrowseLines(entries []mqtt.BrowseEntry) []string {
