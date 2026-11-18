@@ -148,3 +148,140 @@ func TestFileInput(t *testing.T) {
 		t.Errorf("the agent output does not name the file it read")
 	}
 }
+
+// qdasReport is a Q-DAS report of two parts written as coded lines: the
+// serial (K0014) and the order (K0053) follow the values of each part.
+const qdasReport = "K0100 2\n" +
+	"K2001/1 bore\n" +
+	"K2001/2 length\n" +
+	"K0001/1 12.5\n" +
+	"K0001/2 100\n" +
+	"K0004/0 03.05.2021/14:12:50\n" +
+	"K0014/0 " + fileContextMarker + "-A\n" +
+	"K0053/0 ORD-1\n" +
+	"K0001/1 12.7\n" +
+	"K0001/2 101\n" +
+	"K0004/0 03.05.2021/14:15:10\n" +
+	"K0014/0 " + fileContextMarker + "-B\n" +
+	"K0053/0 ORD-2\n"
+
+// writeQDASInputSetup writes the file provider setup of a qdas input on
+// watched into dir and returns the bootstrap path.
+func writeQDASInputSetup(t *testing.T, dir, url, watched string) string {
+	t.Helper()
+
+	doc := marshal(t, map[string]any{
+		"schema":  "laraplate-edge-config/1",
+		"version": 1,
+		"inputs": []any{map[string]any{
+			"id":              "cmm",
+			"driver":          "file",
+			"death_tolerance": "3s",
+			"connection": map[string]any{
+				"directory":  watched,
+				"pattern":    "*.dfq",
+				"format":     "qdas",
+				"interval":   "500ms",
+				"stable_for": "500ms",
+				"timezone":   "UTC",
+				"context":    map[string]any{"serial": "K0014", "order_ref": "K0053"},
+			},
+			"devices": []any{map[string]any{"device": "cmm-1", "points": []any{
+				map[string]any{"signal": "bore", "address": "bore", "type": "float64", "unit": "mm", "read": "event"},
+				map[string]any{"signal": "length", "address": "length", "type": "int32", "unit": "mm", "read": "event"},
+			}}},
+		}},
+		"outputs": []any{map[string]any{
+			"id": "laraplate", "type": "laraplate-http", "url": url, "token": "secret://env/" + tokenEnv,
+			"batch": map[string]any{"max_samples": 40, "max_wait": "200ms"},
+		}},
+	})
+	writeFile(t, filepath.Join(dir, "config.json"), string(doc))
+
+	boot := filepath.Join(dir, "bootstrap.yaml")
+	writeFile(t, boot, fmt.Sprintf("agent_id: e2e-qdas\nconfig:\n  provider: file\n  file: %s\ndata_dir: %s\nstatus_listen: 127.0.0.1:0\n",
+		filepath.Join(dir, "config.json"), filepath.Join(dir, "data")))
+
+	return boot
+}
+
+// TestFileInputQDAS: the built binary reads a Q-DAS report of two parts.
+// Every sample carries the serial and the order of its own part, the
+// envelope is valid against the backend schema, the report ends in done/.
+func TestFileInputQDAS(t *testing.T) {
+	b := newBackend(t)
+
+	dir := t.TempDir()
+	watched := filepath.Join(dir, "reports")
+	if err := os.Mkdir(watched, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	boot := writeQDASInputSetup(t, dir, b.url(), watched)
+	a := startAgent(t, boot)
+
+	writeFile(t, filepath.Join(watched, "part.tmp"), qdasReport)
+	if err := os.Rename(filepath.Join(watched, "part.tmp"), filepath.Join(watched, "part.dfq")); err != nil {
+		t.Fatal(err)
+	}
+
+	b.waitFor(t, a, "the samples of both parts", func() bool {
+		events := b.events()
+
+		return countSignal(events, "cmm-1", "bore") >= 2 && countSignal(events, "cmm-1", "length") >= 2
+	})
+
+	done := filepath.Join(watched, "done", "part.dfq")
+	b.waitFor(t, a, "the report in done/", func() bool {
+		_, err := os.Stat(done)
+
+		return err == nil
+	})
+
+	a.stop(t)
+
+	events := b.events()
+	// The first value of each part tells the parts apart.
+	wantContext := map[string]map[string]string{
+		"12.5": {"serial": fileContextMarker + "-A", "order_ref": "ORD-1"},
+		"12.7": {"serial": fileContextMarker + "-B", "order_ref": "ORD-2"},
+		"100":  {"serial": fileContextMarker + "-A", "order_ref": "ORD-1"},
+		"101":  {"serial": fileContextMarker + "-B", "order_ref": "ORD-2"},
+	}
+	seen := map[string]bool{}
+	for _, e := range events {
+		if e.kind != "sample" {
+			continue
+		}
+		if e.quality != "good" {
+			t.Errorf("%s: quality %q, want good", e.signal, e.quality)
+		}
+		v := string(e.value)
+		want, ok := wantContext[v]
+		if !ok {
+			t.Errorf("%s: unexpected value %s", e.signal, v)
+
+			continue
+		}
+		if !maps.Equal(e.context, want) {
+			t.Errorf("%s=%s: context %v, want %v", e.signal, v, e.context, want)
+		}
+		if seen[v] {
+			t.Errorf("%s=%s: delivered more than once", e.signal, v)
+		}
+		seen[v] = true
+	}
+	if len(seen) != len(wantContext) {
+		t.Errorf("values seen %v, want %d of them", seen, len(wantContext))
+	}
+	if entries, err := os.ReadDir(filepath.Join(watched, "error")); err == nil && len(entries) > 0 {
+		t.Errorf("error/ holds %d files, want none", len(entries))
+	}
+
+	b.noViolations(t)
+	a.checkOutput(t, false)
+
+	out := a.stdout.String() + a.stderr.String()
+	if strings.Contains(out, fileContextMarker) {
+		t.Errorf("the agent output holds a context value")
+	}
+}
