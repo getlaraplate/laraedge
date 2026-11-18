@@ -454,3 +454,37 @@ func TestPendingFileGoneOrChangedIsNotMoved(t *testing.T) {
 		t.Fatal("the changed file was not committed after its second read")
 	}
 }
+
+// TestReusedFileNameDoesNotKeepOldEntriesAlive: an exporter that writes the
+// same name every time must not keep the ledger entries of its older reports
+// alive; an entry is present only while a file of that name has its
+// modification time.
+func TestReusedFileNameDoesNotKeepOldEntriesAlive(t *testing.T) {
+	h := newRunHarness(t, harnessSetup{conn: map[string]any{"after_read": "keep", "seen_retention": "1h"}})
+	h.write("result.csv", report, fileTime)
+	h.start()
+	h.scans(4)
+	if !h.inLedger(report, fileTime) {
+		t.Fatal("the first report was not committed")
+	}
+
+	newer := fileTime.Add(time.Minute)
+	next := report + "\n"
+	h.write("result.csv", next, newer)
+	h.scans(4)
+	if !h.inLedger(next, newer) {
+		t.Fatal("the second report was not committed")
+	}
+
+	h.scanAfter(30 * time.Minute)
+	if !h.inLedger(report, fileTime) {
+		t.Fatal("the older entry expired before the retention")
+	}
+	h.scanAfter(31 * time.Minute)
+	if h.inLedger(report, fileTime) {
+		t.Fatal("the older entry outlived the retention while a newer file reuses its name")
+	}
+	if !h.inLedger(next, newer) {
+		t.Fatal("the entry of the file on disk expired")
+	}
+}

@@ -170,14 +170,16 @@ func (l *ledger) Add(k ledgerKey, name string) {
 	})
 }
 
-// Prune keeps every entry whose name is still present, however old, marks the
-// others gone since now, and drops those gone for longer than retention.
-func (l *ledger) Prune(now time.Time, present map[string]bool, retention time.Duration) {
+// Prune keeps every entry whose file is still present, however old, marks the
+// others gone since now, and drops those gone for longer than retention. A
+// file is present when a file of that name has the entry's modification time:
+// an exporter that reuses one name must not keep its older entries alive.
+func (l *ledger) Prune(now time.Time, present map[string]time.Time, retention time.Duration) {
 	now = now.UTC().Round(0)
 	kept := l.entries[:0]
 	for _, e := range l.entries {
 		switch {
-		case present[e.Name]:
+		case isPresent(present, e):
 			e.GoneSince = nil
 		case e.GoneSince == nil:
 			since := now
@@ -206,4 +208,12 @@ func (l *ledger) Save() error {
 	}
 
 	return atomicfile.Write(l.dir, l.name, data)
+}
+
+// isPresent reports whether a file named like the entry is listed with the
+// entry's modification time.
+func isPresent(present map[string]time.Time, e ledgerEntry) bool {
+	mod, ok := present[e.Name]
+
+	return ok && mod.Equal(e.ModTime)
 }

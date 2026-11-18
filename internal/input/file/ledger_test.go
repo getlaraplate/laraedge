@@ -58,30 +58,30 @@ func TestLedgerPrune(t *testing.T) {
 	ret := time.Hour
 
 	// Present however old: kept, no gone_since.
-	l.Prune(t0, map[string]bool{"a.csv": true}, ret)
+	l.Prune(t0, map[string]time.Time{"a.csv": k.ModTime}, ret)
 	if !l.Has(k) || l.entries[l.index(k)].GoneSince != nil {
 		t.Fatal("present entry not kept clean")
 	}
 
 	// Disappears: gone_since set, kept.
-	l.Prune(t0, map[string]bool{}, ret)
+	l.Prune(t0, map[string]time.Time{}, ret)
 	if !l.Has(k) || l.entries[l.index(k)].GoneSince == nil {
 		t.Fatal("gone_since not set")
 	}
 
 	// Comes back: cleared.
-	l.Prune(t0.Add(time.Minute), map[string]bool{"a.csv": true}, ret)
+	l.Prune(t0.Add(time.Minute), map[string]time.Time{"a.csv": k.ModTime}, ret)
 	if l.entries[l.index(k)].GoneSince != nil {
 		t.Fatal("gone_since not cleared")
 	}
 
 	// Gone again, within retention: kept; beyond: dropped.
-	l.Prune(t0.Add(2*time.Minute), map[string]bool{}, ret)
-	l.Prune(t0.Add(2*time.Minute+ret), map[string]bool{}, ret)
+	l.Prune(t0.Add(2*time.Minute), map[string]time.Time{}, ret)
+	l.Prune(t0.Add(2*time.Minute+ret), map[string]time.Time{}, ret)
 	if !l.Has(k) {
 		t.Fatal("dropped at exactly retention")
 	}
-	l.Prune(t0.Add(2*time.Minute+ret+time.Second), map[string]bool{}, ret)
+	l.Prune(t0.Add(2*time.Minute+ret+time.Second), map[string]time.Time{}, ret)
 	if l.Has(k) {
 		t.Fatal("not dropped after retention")
 	}
@@ -110,5 +110,23 @@ func TestLedgerCorrupt(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "in1.json")); !os.IsNotExist(err) {
 		t.Fatal("corrupt file still in place")
+	}
+}
+
+func TestLedgerPruneReusedNameWithOtherModTime(t *testing.T) {
+	data := t.TempDir()
+	t0 := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
+	l, _ := loadLedger(data, "in1", testLogger())
+	old := key("a", t0.Add(-time.Hour))
+	l.Add(old, "result.csv")
+
+	present := map[string]time.Time{"result.csv": t0}
+	l.Prune(t0, present, time.Hour)
+	if l.entries[l.index(old)].GoneSince == nil {
+		t.Fatal("an entry whose modification time differs was kept as present")
+	}
+	l.Prune(t0.Add(time.Hour+time.Second), present, time.Hour)
+	if l.Has(old) {
+		t.Fatal("the older entry of a reused name never expires")
 	}
 }

@@ -131,13 +131,13 @@ func (s *scanner) scan(ctx context.Context) {
 	s.revisit(files, moved)
 
 	listed := make([]fileInfo, 0, len(files))
-	present := make(map[string]bool, len(files))
+	present := make(map[string]time.Time, len(files))
 	for _, f := range files {
 		if moved[f.Name] {
 			continue
 		}
 		listed = append(listed, f)
-		present[f.Name] = true
+		present[f.Name] = f.ModTime
 	}
 	s.prune(now, present)
 
@@ -159,7 +159,7 @@ func (s *scanner) scan(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		s.handle(now, f)
+		s.handle(f)
 	}
 }
 
@@ -262,7 +262,7 @@ func (s *scanner) revisit(files []fileInfo, moved map[string]bool) {
 
 // prune applies the retention to the ledger and saves it when an entry
 // changed.
-func (s *scanner) prune(now time.Time, present map[string]bool) {
+func (s *scanner) prune(now time.Time, present map[string]time.Time) {
 	gone := make([]bool, len(s.ledger.entries))
 	for i, e := range s.ledger.entries {
 		gone[i] = e.GoneSince != nil
@@ -291,10 +291,10 @@ func (s *scanner) save() {
 // error (it is tried again at the next scan), a duplicate when its hash and
 // modification time are in the ledger, otherwise parsed and emitted. Read
 // and refused files become pending.
-func (s *scanner) handle(now time.Time, f fileInfo) {
+func (s *scanner) handle(f fileInfo) {
 	in := s.in
 	if f.Size > int64(in.conn.MaxFileSize) {
-		s.refuse(now, f, KindFileTooLarge, nil)
+		s.refuse(f, KindFileTooLarge, nil)
 
 		return
 	}
@@ -306,7 +306,7 @@ func (s *scanner) handle(now time.Time, f fileInfo) {
 		return
 	}
 	if len(data) > in.conn.MaxFileSize {
-		s.refuse(now, f, KindFileTooLarge, nil)
+		s.refuse(f, KindFileTooLarge, nil)
 
 		return
 	}
@@ -321,7 +321,7 @@ func (s *scanner) handle(now time.Time, f fileInfo) {
 
 	samples, kinds, err := parseCSV(in.plan, data, f.ModTime)
 	if err != nil {
-		s.refuse(now, f, KindMalformedFile, &key)
+		s.refuse(f, KindMalformedFile, &key)
 
 		return
 	}
@@ -332,16 +332,16 @@ func (s *scanner) handle(now time.Time, f fileInfo) {
 		in.health.CountError(kind)
 	}
 	s.logFile(f.Name, len(samples), outcomeRead)
-	s.pending[f.Name] = pendingFile{info: f, key: key, keyed: true, emitted: now}
+	s.pending[f.Name] = pendingFile{info: f, key: key, keyed: true, emitted: in.clk.Now()}
 }
 
 // refuse counts a file refused as a whole and holds it pending, so it is
 // committed like a read one (decision P8). key is nil for a file not read.
-func (s *scanner) refuse(now time.Time, f fileInfo, kind string, key *ledgerKey) {
+func (s *scanner) refuse(f fileInfo, kind string, key *ledgerKey) {
 	s.in.health.CountError(kind)
 	s.in.log.Info("file read", "input", s.in.cfg.ID, "file", f.Name, "samples", 0, "outcome", outcomeRefused, "kind", kind)
 
-	p := pendingFile{info: f, refused: true, emitted: now}
+	p := pendingFile{info: f, refused: true, emitted: s.in.clk.Now()}
 	if key != nil {
 		p.key, p.keyed = *key, true
 	}
