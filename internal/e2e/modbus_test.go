@@ -210,6 +210,8 @@ type busEvent struct {
 	signal  string
 	value   json.RawMessage
 	quality string
+	// context is the context of a sample, nil without one.
+	context map[string]string
 	// signals are the announced signals of a birth.
 	signals []birthSignal
 }
@@ -232,7 +234,7 @@ func (b *backend) events() []busEvent {
 				out = append(out, busEvent{device: dev.Device, kind: dev.Type, signals: dev.Signals})
 			}
 			for _, s := range dev.Samples {
-				out = append(out, busEvent{device: dev.Device, kind: "sample", signal: s.Signal, value: s.Value, quality: s.Quality})
+				out = append(out, busEvent{device: dev.Device, kind: "sample", signal: s.Signal, value: s.Value, quality: s.Quality, context: s.Context})
 			}
 		}
 	}

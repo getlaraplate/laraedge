@@ -55,10 +55,11 @@ type envelope struct {
 		Device  string `json:"device"`
 		Type    string `json:"type"`
 		Samples []struct {
-			Signal  string          `json:"signal"`
-			TS      time.Time       `json:"ts"`
-			Value   json.RawMessage `json:"value"`
-			Quality string          `json:"quality"`
+			Signal  string            `json:"signal"`
+			TS      time.Time         `json:"ts"`
+			Value   json.RawMessage   `json:"value"`
+			Quality string            `json:"quality"`
+			Context map[string]string `json:"context"`
 		} `json:"samples"`
 		Signals []birthSignal `json:"signals"`
 	} `json:"devices"`
