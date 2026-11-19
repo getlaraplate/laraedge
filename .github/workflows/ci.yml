@@ -106,3 +106,24 @@ jobs:
         run: go vet -tags e2e ./...
       - name: End-to-end test
         run: go test -tags e2e -race ./internal/e2e
+
+  # TEMPORARY: repeats the opcua tests that time out on CI runners, to collect
+  # their diagnostics. Removed before merge.
+  opcua-stress:
+    name: opcua stress (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-amd64
+            os: windows-latest
+          - name: linux-amd64
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Repeat
+        run: go test -race -count=15 -run "TestWatchdogFailureReconnects|TestSubscribeDeliversInitialValuesAndChanges|TestWatchdog|TestSubscribe" ./internal/input/opcua/
