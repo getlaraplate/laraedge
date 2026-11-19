@@ -1,0 +1,16 @@
+# Bootstrap of the file demo. Run from this directory:
+#
+#   export LARAPLATE_EDGE_TOKEN=...
+#   laraplate-edge run --bootstrap bootstrap.yaml
+#
+# The disk buffer, the applied configuration and the ledger of read files
+# (data/file/seen/cmm.json) go under ./data (ignored by git). The status
+# endpoint binds its default, 127.0.0.1:9180.
+
+agent_id: file-qdas-demo-01
+
+config:
+  provider: file
+  file: config.yaml
+
+data_dir: ./data

@@ -1,6 +1,6 @@
 # File driver: design
 
-**Status:** Approved (2026-11-18). Plan 1 (sample context and `file` with CSV, `../plans/2026-11-18-file-csv.md`) delivered 2026-11-18; plan 2 (Q-DAS) is open.
+**Status:** Approved (2026-11-18). Plan 1 (sample context and `file` with CSV, `../plans/2026-11-18-file-csv.md`) delivered 2026-11-18; plan 2 (Q-DAS, `../plans/2026-11-18-file-qdas.md`) delivered 2026-11-18; the spec is complete.
 
 **Date:** 2026-11-18
 
@@ -227,20 +227,36 @@ are not accepted: under `decimal: ","` a numeric value that contains a `.` is a 
 
 ## 7. Q-DAS (plan 2)
 
-The Q-DAS ASCII transfer format is described publicly in the AQDEF document (Advanced Quality Data Exchange Format);
-plan 2 takes field numbers and separators from that document, read when the plan is written, and from nowhere
-else. What follows fixes the behaviour; the plan fixes the details.
+The Q-DAS ASCII transfer format is described publicly in the AQDEF document (Advanced Quality Data Exchange Format).
+(Amended 2026-11-18 by `../plans/2026-11-18-file-qdas.md`: the AQDEF manual (V12) and excerpt are published by Q-DAS
+but refused automated download, so plan 2 took the field numbers and separators from three public sources that agree
+with each other, named in that plan's "Sources of the format": the Hexagon PC-DMIS Q-DAS Converter manual, the
+Apache-2.0 `aqdef-reader` (read for facts only, no code taken) and a Calypso `.dfq` shown on the Zeiss quality forum.)
+What follows fixes the behaviour; the plan fixes the details.
 
 - Files: `.dfq` (description and values in one file) and the pair `.dfd` + `.dfx` (description, values). Plan 2
   reads `.dfq`; a pair is read when both are stable, as one report, the `.dfd` named by the `.dfx`'s base name.
 - **Address:** the characteristic number (K2001) as written, trimmed; `#<n>` addresses the n-th characteristic when
   K2001 is missing.
 - Each value line is one part: one sample per point, with that line's date and time (K0004) as timestamp, read in
-  `timezone`. A file with more than one value line, one of them without date and time, is `malformed_file`, for the
-  reason given for `wide` CSV in section 6.
+  `timezone`; `K0004` may omit the seconds (Q10). A file with more than one value line, one of them without date
+  and time, is `malformed_file`, for the reason given for `wide` CSV in section 6.
 - **Context:** each key names a K-field of the value line (e.g. `serial: K0014`, `order_ref: K0053`); without a
   `context` mapping the driver sets none.
 - A value marked as excluded by its attribute (K0002) gives no sample; the attribute values follow AQDEF.
+- (Amended 2026-11-18 by `../plans/2026-11-18-file-qdas.md`.) **Q1:** no `qdas` block; `csv` and `timestamp` are
+  refused with `format: qdas`; `context` values are K-field keys `K0005` to `K0099`; `encoding` applies as for CSV
+  (`windows-1252` for exporters on Windows). **Q3:** one part type per file: a `K1xxx` index above 1 is
+  `malformed_file`. **Q7:** attributive characteristics (`K2004` `1`) are not read: a point addressing one gets no
+  sample and one `missing_field` per file. **Q8:** under `qdas` only `.dfq`, `.dfd` and `.dfx` are considered; a
+  `.dfd` is never a report alone; the ledger key of a pair is the SHA-256 of the 8-byte big-endian `.dfd` length,
+  the `.dfd` bytes and the `.dfx` bytes, with the `.dfx` modification time, named after the `.dfx`; both files move
+  together under one suffix and `max_files_per_scan` counts reports. **Q9:** a `.dfx` without its `.dfd` waits.
+  **Q10:** `K0004` without seconds is accepted. `#<n>` addresses only a characteristic without `K2001`; a file that
+  holds only a description is read with zero samples and no read error; `K2xxx/0` sets the field for every
+  characteristic without its own value; `K0001/0`, a `K0100` that is not a number or is negative, and a `K0xxx`
+  index above the number of characteristics (`K0100`, or else the highest `K2xxx` index) refuse the file; `K0100`
+  and every index are capped at 100000; memory and work grow with the input size, not with `K0100`.
 - The descriptive fields (nominal, limits, unit) are shown by `browse` to help the technician, and never sent: the
   limits of record are the quality plan's in Laraplate.
 
@@ -251,7 +267,7 @@ without emitting, moving or recording it, and shows each point's value, type, qu
 none (`no file`, `missing_field`, the read error kind), then a `source: <file>` line. It never touches the directory or the ledger. (Amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`, P10: it does not list the pending files, since `browse` does, with their states. The read error kind is attributed per file, not per point.)
 
 **`browse <input> [--limit 20]`:** lists the newest files of the directory with size, age and state (`waiting`,
-`ready`, `seen`), then, for the newest readable one, the addresses it offers in the form to copy into the document:
+`ready`, `seen`; `incomplete` for a `.dfx` whose `.dfd` is missing, under `qdas`; a `.dfd` shows its own age, and `seen` when its pair is in the ledger), then, for the newest readable one, the addresses it offers in the form to copy into the document:
 `wide` column names or `long` keys with a value preview; under `qdas` the characteristics with K2001, K2002 and the
 nominal and limits, and the K-fields of the first value line usable as context.
 
@@ -302,6 +318,13 @@ Each plan closes with its documentation in `docs/CONFIGURATION.md` and `docs/USA
 `examples/file`. Plan 1 also amends the parent spec's `file` row to point here, recording the reversal of section 2.
 
 **Known limits of plan 1** (amended 2026-11-18 by `../plans/2026-11-18-file-csv.md`): a file above `max_file_size` under `keep` is never hashed, so it is refused again after each restart; plugin inputs and outputs do not carry the sample context (section 9).
+
+**Known limits of plan 2** (amended 2026-11-18 by `../plans/2026-11-18-file-qdas.md`): one part type per file (Q3);
+attributive characteristics are not read (Q7); a `.dfd` shared by `.dfx` files of other names, the counter layout of
+Q-DAS monitoring folders, is not supported (Q9); at most 100000 characteristics; of two `.dfx` names that differ
+only in the case of the extension, sharing one `.dfd`, only one pair is read; a `.dfx` whose `.dfd` was moved but
+whose own move keeps failing is, after a restart, left alone as `incomplete` (in the ledger, never read again,
+never moved), and only the first warning names it.
 
 **Out of scope:** growing files and tailing; recursion into subdirectories; file system events (section 2); the
 `context` field in the plugin SDK; Excel and other binary formats; the descriptive Q-DAS fields sent as signals;

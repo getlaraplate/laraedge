@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -361,4 +362,175 @@ func equalKinds(got, want map[edgeinput.PointRef]string) bool {
 
 func sha256Of(content string) [32]byte {
 	return sha256.Sum256([]byte(content))
+}
+
+// qdasBrowseReport describes three characteristics: a full one, one without
+// K2001 and an attributive one, with context fields shared, positional and
+// coded per characteristic.
+var qdasBrowseReport = qdasLines(
+	"K0100 3",
+	"K2001/1 Bore", "K2002/1 Diameter", "K2101/1 12.5", "K2110/1 12.4", "K2111/1 12.6", "K2142/1 mm",
+	"K2002/3 Flag", "K2004/3 1",
+	"12.5"+qf+qf+qf+"EV"+qs+"7"+qs+"1",
+	"K0014/0 P-1", "K0053/0 O-1", "K0006/2 B9",
+)
+
+func TestProbeQDASReadsAFileAndAPair(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.write("a.dfq", qdasReport, fileTime)
+	samples, kinds, err := h.in.ProbePoints(t.Context())
+	if err != nil || len(kinds) != 0 || h.in.ProbeSource() != "a.dfq" {
+		t.Fatalf("kinds = %v, source = %q, err = %v", kinds, h.in.ProbeSource(), err)
+	}
+	checkQDASSamples(t, samples, fileTime)
+
+	p := newQDASHarness(t, nil)
+	p.writePair("a", fileTime)
+	samples, kinds, err = p.in.ProbePoints(t.Context())
+	if err != nil || len(kinds) != 0 || p.in.ProbeSource() != "a.dfd + a.dfx" {
+		t.Fatalf("pair: kinds = %v, source = %q, err = %v", kinds, p.in.ProbeSource(), err)
+	}
+	checkQDASSamples(t, samples, fileTime)
+}
+
+func TestProbeQDASSkipsASeenPair(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.writePair("a", fileTime)
+	l := peekLedger(h.dataDir, h.cfg.ID)
+	l.Add(pairKey(qdasDescription, qdasValues, fileTime), "a.dfx")
+	if err := l.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	samples, kinds, err := h.in.ProbePoints(t.Context())
+	if err != nil || len(samples) != 0 || len(kinds) != 2 || h.in.ProbeSource() != "" {
+		t.Fatalf("samples = %v, kinds = %v, source = %q, err = %v", samples, kinds, h.in.ProbeSource(), err)
+	}
+}
+
+func TestProbeQDASDfxAloneIsNoFile(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.write("a.dfx", qdasValues, fileTime)
+	h.write("b.dfd", qdasDescription, fileTime)
+	samples, kinds, err := h.in.ProbePoints(t.Context())
+	want := map[edgeinput.PointRef]string{
+		{Device: "cmm", Signal: "bore"}:     ProbeNoFile,
+		{Device: "gauge", Signal: "serial"}: ProbeNoFile,
+	}
+	if err != nil || len(samples) != 0 || !equalKinds(kinds, want) || h.in.ProbeSource() != "" {
+		t.Fatalf("samples = %v, kinds = %v, source = %q, err = %v", samples, kinds, h.in.ProbeSource(), err)
+	}
+}
+
+func TestBrowseQDASStates(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.writePair("seen", fileTime.Add(-3*time.Hour))
+	h.write("lonely.dfx", qdasValues, fileTime.Add(-2*time.Hour))
+	h.write("old.dfd", qdasDescription, fileTime.Add(-time.Hour))
+	h.write("young.dfd", qdasDescription, runEpoch.Add(-time.Second))
+	h.write("fresh.dfq", qdasReport, fileTime)
+	h.write("note.txt", "x", fileTime)
+	l := peekLedger(h.dataDir, h.cfg.ID)
+	l.Add(pairKey(qdasDescription, qdasValues, fileTime.Add(-3*time.Hour)), "seen.dfx")
+	if err := l.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := h.in.Browse(DefaultBrowseLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, f := range b.Files {
+		got[f.Name] = f.State
+	}
+	want := map[string]string{
+		"young.dfd":  StateWaiting,
+		"fresh.dfq":  StateReady,
+		"old.dfd":    StateReady,
+		"lonely.dfx": StateIncomplete,
+		"seen.dfd":   StateSeen,
+		"seen.dfx":   StateSeen,
+	}
+	if !reflect.DeepEqual(got, want) || StateIncomplete != "incomplete" {
+		t.Errorf("states = %v", got)
+	}
+}
+
+func TestBrowseQDASAddressesAndContext(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.write("a.dfq", qdasBrowseReport, fileTime)
+
+	b, err := h.in.Browse(DefaultBrowseLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAddrs := []BrowseAddress{
+		{Address: "Bore", Preview: `"12.5"`, Detail: "Diameter  nominal 12.5  limits 12.4..12.6  mm"},
+		{Address: "#2", Preview: `"7"`},
+		{Address: "#3", Preview: `"1"`, Detail: "Flag  attributive, not read"},
+	}
+	wantContext := []BrowseAddress{
+		{Address: "K0014", Preview: `"P-1"`},
+		{Address: "K0053", Preview: `"O-1"`},
+		{Address: "K0005", Preview: `"EV"`},
+		{Address: "K0006", Preview: `"B9"`},
+	}
+	if b.Source != "a.dfq" || !slices.Equal(b.Addresses, wantAddrs) || !slices.Equal(b.Context, wantContext) {
+		t.Errorf("source = %q, addresses = %+v, context = %+v", b.Source, b.Addresses, b.Context)
+	}
+}
+
+func TestBrowseQDASSourceOfAPair(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.write("p.dfd", qdasLines("K0100 1", "K2001/1 Bore"), fileTime)
+	h.write("p.dfx", qdasLines("5", "K0014/0 SN"), fileTime)
+
+	b, err := h.in.Browse(DefaultBrowseLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Source != "p.dfd + p.dfx" || len(b.Addresses) != 1 || b.Addresses[0].Preview != `"5"` || len(b.Context) != 1 {
+		t.Errorf("browse = %+v", b)
+	}
+}
+
+func TestProbeAndBrowseQDASWriteNothing(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.writePair("a", fileTime)
+	h.write("b.dfq", qdasReport, fileTime.Add(time.Minute))
+	before := h.snapshot()
+
+	if _, _, err := h.in.ProbePoints(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.in.Browse(DefaultBrowseLimit); err != nil {
+		t.Fatal(err)
+	}
+	if after := h.snapshot(); after != before {
+		t.Errorf("changed:\n%s\n---\n%s", before, after)
+	}
+}
+
+// TestBrowseReadsEachReportOnce: a pair whose two files are both shown is
+// read once, also when its addresses cannot be read, and the newest readable
+// report is still found after it.
+func TestBrowseReadsEachReportOnce(t *testing.T) {
+	h := newQDASHarness(t, nil)
+	h.write("a.dfq", qdasBrowseReport, fileTime)
+	h.write("p.dfd", qdasLines("K0100 three"), fileTime.Add(time.Minute))
+	h.write("p.dfx", qdasValues, fileTime.Add(time.Minute))
+
+	b, err := h.in.Browse(DefaultBrowseLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Source != "a.dfq" || len(b.Files) != 3 {
+		t.Fatalf("browse = %+v", b)
+	}
+	got := h.readLog()
+	slices.Sort(got)
+	if want := []string{"a.dfq", "p.dfd", "p.dfx"}; !slices.Equal(got, want) {
+		t.Errorf("reads = %v, want each file once", got)
+	}
 }

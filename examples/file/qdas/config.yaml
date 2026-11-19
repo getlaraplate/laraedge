@@ -1,0 +1,60 @@
+# Configuration document of the Q-DAS demo: one file input watching the
+# directory a coordinate measuring machine writes its Q-DAS reports to, sent to
+# a Laraplate running on this machine. The token is read from the environment
+# of the agent: export LARAPLATE_EDGE_TOKEN before running it.
+#
+# The directory must be absolute: change it to yours, or try the demo with the
+# sample report in this folder (written as coded lines, so it can be read and
+# edited in a text editor; a machine usually writes value lines too):
+#   mkdir -p /tmp/cmm-qdas && cp report.dfq /tmp/cmm-qdas/
+# A report that is a .dfd + .dfx pair is read once both files are stable.
+#
+# Check the document offline, then see what the driver would read. Give the
+# bootstrap too, so that probe and browse find the ledger of read files (both
+# only read, and write nothing). browse lists the characteristics with their
+# description, nominal and limits, and the K-fields usable as context:
+#   laraplate-edge config validate config.yaml
+#   laraplate-edge browse cmm --config config.yaml --bootstrap bootstrap.yaml
+#   laraplate-edge probe cmm --config config.yaml --bootstrap bootstrap.yaml
+# Docs: docs/CONFIGURATION.md, "The file driver", "Q-DAS reports";
+# docs/USAGE.md, "Report files".
+
+schema: laraplate-edge-config/1
+version: 1
+
+inputs:
+  - id: cmm
+    driver: file
+    death_tolerance: 60s
+    connection:
+      directory: /tmp/cmm-qdas
+      format: qdas
+      # Under qdas only .dfq, .dfd and .dfx are considered, after this
+      # pattern, which must match both names of a .dfd + .dfx pair.
+      pattern: "*.df*"
+      interval: 2s
+      stable_for: 5s
+      after_read: move
+      # Q-DAS exporters on Windows usually write windows-1252.
+      encoding: windows-1252
+      # A value of K0004 without an offset is read in this zone.
+      timezone: Europe/Rome
+      # Where the serial and the order of the part are: K-fields of the
+      # value line or of the coded lines that follow it.
+      context:
+        serial: K0014
+        order_ref: K0053
+    devices:
+      - device: cmm-1
+        points:
+          # The address is the K2001 value of the characteristic, or #<n> for
+          # the n-th characteristic when it has no K2001.
+          - {signal: bore_diameter, address: bore, type: float64, unit: mm, read: event, priority: critical}
+          - {signal: length, address: length, type: float64, unit: mm, read: event, priority: critical}
+          - {signal: flatness, address: flatness, type: float64, unit: mm, read: event, priority: critical}
+
+outputs:
+  - id: laraplate
+    type: laraplate-http
+    url: http://127.0.0.1:8000
+    token: secret://env/LARAPLATE_EDGE_TOKEN

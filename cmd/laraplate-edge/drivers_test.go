@@ -301,8 +301,9 @@ func TestInputDriversRegisterFile(t *testing.T) {
 	}
 }
 
-// TestConfigValidateShowsTheFileFactoryMessage: a file input with format
-// qdas is refused by the factory with the field path, never the value.
+// TestConfigValidateShowsTheFileFactoryMessage: a file input with a qdas
+// connection that sets a csv block is refused by the factory with the
+// field path, never the value.
 func TestConfigValidateShowsTheFileFactoryMessage(t *testing.T) {
 	dir := t.TempDir()
 	doc := filepath.Join(dir, "config.yaml")
@@ -310,7 +311,7 @@ func TestConfigValidateShowsTheFileFactoryMessage(t *testing.T) {
 inputs:
   - id: cmm
     driver: file
-    connection: {directory: '`+filepath.ToSlash(filepath.Join(dir, "reports"))+`', format: qdas}
+    connection: {directory: '`+filepath.ToSlash(filepath.Join(dir, "reports"))+`', format: qdas, csv: {delimiter: ';'}}
     devices:
       - device: cmm-01
         points:
@@ -320,7 +321,7 @@ outputs:
 `)
 
 	r := runCLI(t, "", "config", "validate", doc)
-	if r.code != exitFailure || !strings.Contains(r.stderr, "connection.format: not available in this build") {
+	if r.code != exitFailure || !strings.Contains(r.stderr, "connection.csv: not allowed with format qdas") {
 		t.Fatalf("config validate = %+v, want the factory's message", r)
 	}
 }

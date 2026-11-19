@@ -843,8 +843,8 @@ Watches a directory, local or a mounted network share, for the reports a measuri
 measuring machine writes one per inspected part), reads each finished report once and turns it into typed
 samples, with the serial and the order of the part as their context. The driver reads files only: the one
 thing it writes is the move of a read file into `done/` or `error/` under the watched directory (or nothing at
-all with `after_read: keep`), besides its own ledger under `data_dir`. This build reads CSV; Q-DAS is refused
-(see "What this build refuses"). `examples/file` is a complete document; [USAGE.md](USAGE.md#report-files)
+all with `after_read: keep`), besides its own ledger under `data_dir`. This build reads CSV and Q-DAS reports
+(see "Q-DAS reports"). `examples/file` and `examples/file/qdas` are complete documents; [USAGE.md](USAGE.md#report-files)
 describes the `probe` and `browse` commands that go with it.
 
 The directory is polled every `interval`: size and modification time of each file are compared with the last
@@ -859,7 +859,7 @@ value, so a path or a column name does not reach a log.
 | Key | Default | Meaning |
 |---|---|---|
 | `directory` | | required: an absolute path. Only its top level is read; subdirectories are never entered. |
-| `format` | | required: `csv`. `qdas` is refused (`connection.format: not available in this build`). |
+| `format` | | required: `csv` or `qdas` (anything else is `connection.format: want csv or qdas`). `qdas` is described under "Q-DAS reports". |
 | `pattern` | `*` | a glob on the file name (Go `path.Match`), such as `*.csv`, matched case-insensitively. A name that starts with `.` and one that ends in `.tmp`, `.part` or `~` (in any letter case) is never read, whatever the pattern. A range inverted once lowercased, such as `[Z-a]`, is refused. |
 | `interval` | `2s` | the polling period, at least `500ms` |
 | `stable_for` | the larger of `5s` and `interval` | how long a file's size and modification time must stay unchanged before it is read; at least `interval` |
@@ -869,9 +869,9 @@ value, so a path or a column name does not reach a log.
 | `seen_retention` | `30d` | how long the ledger keeps the hash of a read file: a Go duration or a number of days (`30d`), at least `1h`, at most `36500d` |
 | `encoding` | `utf-8` | `utf-8`, `windows-1252` or `iso-8859-1`; a UTF-8 byte order mark is skipped |
 | `timezone` | the agent's local zone | an IANA name (`Europe/Rome`) used for timestamps written without an offset. The names resolve on every platform, Windows and minimal images included. |
-| `timestamp` | the file's modification time | `{column, format}`: where the sample time is in the file (see "Timestamp") |
-| `context` | none | `{serial, order_ref, operation_ref, lot}`, each naming the column that holds the value (see "Context") |
-| `csv` | | the CSV settings below |
+| `timestamp` | the file's modification time | `{column, format}`: where the sample time is in the file (see "Timestamp"); refused with `qdas`, whose time is `K0004` |
+| `context` | none | `{serial, order_ref, operation_ref, lot}`, each naming the column that holds the value (see "Context"); with `qdas` each names a K-field |
+| `csv` | | the CSV settings below; refused with `qdas` |
 
 `Start` checks nothing in the directory and returns at once; scanning runs in the background. A directory
 that does not exist or cannot be listed is never a failing start (a network share may be mounted after the
@@ -1007,6 +1007,116 @@ transforms keep the context of the sample they transform. A transform that drops
 `min_interval`, `debounce`) drops their context with them, so a measurement point should not use one. A signal
 derived by a plugin processor has no context. A plugin input cannot set a context and a plugin output
 receives samples without it: the plugin SDK has no field for it in this build.
+
+#### Q-DAS reports
+
+With `format: qdas` the driver reads the Q-DAS ASCII transfer format (AQDEF) that coordinate measuring machines and
+Q-DAS software write. `examples/file/qdas` is a complete document with a report written as coded lines.
+
+**Settings.** There is no `qdas` block. `csv` and `timestamp` are refused with `format: qdas`
+(`connection.csv: not allowed with format qdas`): the time of a sample is `K0004` (see
+"Timestamp and records"). `context` keys are K-fields, `K` and four digits in upper case, from `K0005` to `K0099`
+(`context: {serial: K0014, order_ref: K0053}`); with `csv` they stay column names. `pattern`, `interval`,
+`stable_for`, `max_file_size`, `max_files_per_scan`, `after_read`, `seen_retention`, `encoding` and `timezone`
+work as for CSV. Exporters on Windows usually write `windows-1252`: set `encoding` to it when a description such
+as `Ø Bohrung` reads wrong or the file is refused as not valid text.
+
+**Files.** Under `qdas` only the names ending in `.dfq`, `.dfd` and `.dfx` (in any letter case) are considered,
+after `pattern`.
+
+- A `.dfq` holds the description and the values and is a report alone.
+- A `.dfd` (description) and a `.dfx` (values) of the same base name are one report, the pair. The stem must match
+  exactly and the extension in any letter case, so `a.dfd` pairs with `a.DFX`. `pattern` must match both names
+  (`*.df*`, not `*.dfx`). A pair is read when both files are stable: the `.dfd` text, a line end, then the `.dfx`
+  text. An exporter that writes the `.dfx` first is waited for.
+- A `.dfd` is never a report alone, and a `.dfx` without its `.dfd` waits (`browse` shows it as `incomplete`). An
+  orphan `.dfd` is never moved.
+- The ledger entry of a pair is keyed on the length of the `.dfd`, its bytes and the `.dfx` bytes, with the `.dfx`'s
+  modification time, and named after the `.dfx`. `max_file_size` applies to each file. Both files are moved
+  together under one free suffix (`a-1.dfd` and `a-1.dfx`), and a pair that is refused goes to `error/` together.
+  A move that fails for either file counts `move_failed` once per report and is retried for the file still there.
+  `max_files_per_scan` counts reports.
+
+**Lines.** Lines end with LF or CRLF and blank lines are skipped. A line that starts with `K` is a coded line: `K`,
+four digits, an optional `/` and a decimal index, then one space or the end of the line; the rest, trimmed, is
+the value. A key without an index is index 1. A line starting with `K` of another shape refuses the file. Keys the
+driver does not use are ignored. Any other line is a value line.
+
+**Characteristics.** Their number is `K0100` when present, else the highest index of the `K2xxx` lines. The
+number and every index are capped at 100000. A `K0100` that is not a number or is negative refuses the file, and
+so does a `K0xxx` index above the number of characteristics (`K0100`, or else the highest `K2xxx` index), also
+before any record. The values of a characteristic are described by the `K2xxx` lines with its index: `K2001` its number,
+`K2002` its description, `K2004` its type (`1` is attributive), `K2101` the nominal, `K2110` and `K2111` the
+limits, `K2142` the unit. `K2xxx/0` sets a field for every characteristic that has no value of its own: an own
+`/i` wins. `K1xxx` describes the part: a `K1xxx` index above 1 refuses the file (one part type per file). A value
+line or a coded value before any characteristic is defined refuses the file. The descriptive fields are shown by
+`browse` and never sent.
+
+**Address.** The `K2001` value of the characteristic, trimmed. `#<n>` addresses the characteristic of index `n`
+(1-based) only when it has no `K2001`: a point that uses `#<n>` on a numbered characteristic has no sample and
+counts `missing_field`. Several points may share one address. A `K2001` value addressed by a point and carried by two
+characteristics refuses the file (`malformed_file`), as a repeated key does in CSV.
+
+**Records.** A part is one record, built from the value lines and the coded lines.
+
+- A value line holds one block per characteristic, separated by `0x0F`, and its fields are separated by `0x14`, in
+  the order `K0001` (value), `K0002` (attribute), `K0004` (date and time), `K0005` (events), `K0006` (batch),
+  `K0007` (cavity), `K0008` (inspector), `K0010` (machine), `K0011` (process parameter), `K0012` (gage). Fields
+  beyond the tenth are ignored and a missing trailing field is empty. A value line with another number of blocks
+  than there are characteristics makes its samples `bad`, with one `malformed_row`.
+- Coded `K0001/i` starts a new record when the current one has a value for `i`, else adds to it. A coded `K0002`
+  to `K0099` with index `i`, after a record, sets that field of characteristic `i` in the last record; with index
+  `0` it sets the field for the whole record. Before any record it is ignored. `K0001/0` refuses the file.
+
+**Timestamp and records.** The time of a sample is the `K0004` of its characteristic, else the record's `/0`, else
+the record's lowest-index `K0004`, written `DD.MM.YYYY/hh:mm:ss` (the seconds may be missing) and read in
+`timezone`. A record without any `K0004` takes the file's modification time when it is the only record of the
+file; with more than one record and one of them without `K0004` the file is refused (`malformed_file`), for the
+reason given for `wide` CSV. A `K0004` that does not read makes the samples of that record `bad` and counts one
+`bad_timestamp`.
+
+**Values.** `K0001` is converted to the point's `type` with the rules of CSV, the decimal separator being `.`: a `,`
+is a `conversion` error. An empty value gives no sample. A `K0002` attribute of `255` or `256` marks the value as
+excluded (invalid): no sample and no count, so a characteristic excluded in one part and valid in another gives
+exactly one sample. A point that addresses an attributive characteristic (`K2004` `1`) has no sample and counts one
+`missing_field` per file: the value block of those is not read (see the limits). A file that holds only a
+description, with no value, is read with zero samples, no read error, and moved to `done/`.
+
+**Context.** For each mapped key the sample carries the record's `/0` value, else the value of the lowest
+characteristic index that has one; an absent field gives no key. In a report of several parts, each value line is
+followed by its own `K0014/0` and `K0053/0` lines, and each part's samples carry that part's serial and order.
+
+**Outcomes** of reading a Q-DAS report (the read error kinds are those of CSV):
+
+| Case | Result |
+|---|---|
+| A point's address is not a characteristic of the file, a `#<n>` on a numbered one, or an attributive characteristic | no sample for that point; read error `missing_field`, once per file |
+| An empty value, or an attribute of `255` or `256` | no sample, no count |
+| A value that does not convert (a `,` decimal included) | `bad` sample; read error `conversion` |
+| A `K0004` that does not read | `bad` samples for that record; read error `bad_timestamp`, once per record |
+| A value line with another number of blocks than characteristics | its samples are `bad`, without context; read error `malformed_row`, once per line |
+| Text not valid in the `encoding`, a coded line of a wrong shape, a value or coded value before any characteristic, an index above 100000, a `K0xxx` index above the number of characteristics (`K0100`, or else the highest `K2xxx` index), a `K0100` that is not a number or is negative, `K0001/0`, `K1xxx` of an index above 1, an addressed `K2001` carried twice, several records and one without `K0004` | no samples; the file is refused, read error `malformed_file`; with `move` the report goes to `error/` |
+| A file above `max_file_size` (either file of a pair) | not read; read error `file_too_large` |
+
+**Cost.** Memory and work grow with the size of the input, not with `K0100`: a file cannot make the driver
+allocate more than a bounded multiple of its own size.
+
+**Q-DAS limits.**
+
+- One part type per file: `K1xxx` of an index above 1 refuses the file, since a characteristic-to-part mapping is
+  not settled by the public descriptions of the format.
+- Attributive characteristics (`K2004` `1`) are not read: their value block differs and the public sources do not
+  settle it. `browse` marks them `attributive, not read`.
+- A `.dfd` shared by many `.dfx` files of other names (the counter layout of Q-DAS monitoring folders) is not
+  supported: a `.dfx` is paired with the `.dfd` of its own name only.
+- Two `.dfx` names that differ only in the case of the extension (`a.dfx`, `a.DFX`) share one `.dfd`, and only one
+  of the two pairs is read: the older `.dfx`, or the name first in byte order. The other `.dfx` is not read: with
+  `move` it is left `incomplete` once the `.dfd` is moved, with `keep` it waits while the first pair is kept.
+- A `.dfx` whose `.dfd` was moved but whose own move keeps failing is, after a restart, left alone as `incomplete`:
+  its ledger entry stays, it is never read again and never moved. Only the first `move_failed` warning names it.
+- At most 100000 characteristics, and an index above it refuses the file.
+- The format description comes from public sources, not from the AQDEF manual, which is not freely downloadable.
+  Try a new exporter with `probe` and `browse` before relying on it.
 
 **Declared limits.**
 
@@ -1481,7 +1591,6 @@ Outcomes, as reported to Laraplate:
 | Part | Comes with |
 |---|---|
 | drivers other than `simulated`, `modbus`, `opcua`, `mqtt` and `file` | the driver plan of `serial` |
-| `format: qdas` of a `file` input (`connection.format: not available in this build`) | the Q-DAS plan of the `file` driver |
 | output types other than `laraplate-http` and `plugin:<id>` | the MQTT output plan (`laraplate-mqtt`) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references, `outputs[].config` and `processors[].config` included | a later plan with the OS keystore |

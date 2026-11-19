@@ -1,9 +1,7 @@
 package file
 
 import (
-	"crypto/sha256"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +22,8 @@ const (
 	StateReady = "ready"
 	// StateSeen is a file whose hash and modification time are in the ledger.
 	StateSeen = "seen"
+	// StateIncomplete is a .dfx whose .dfd is not in the directory (qdas).
+	StateIncomplete = "incomplete"
 )
 
 // previewMax is the longest preview, in characters of the value.
@@ -42,6 +42,8 @@ type BrowseFile struct {
 type BrowseAddress struct {
 	Address string
 	Preview string
+	// Detail describes the characteristic of a Q-DAS address; empty for CSV.
+	Detail string
 }
 
 // Browse is what browse shows: the newest files, and the addresses of the
@@ -50,6 +52,9 @@ type Browse struct {
 	Files     []BrowseFile
 	Source    string
 	Addresses []BrowseAddress
+	// Context holds the K0005 to K0099 fields of the first record of a Q-DAS
+	// report, with their value as preview.
+	Context []BrowseAddress
 }
 
 // Browse lists the limit newest files that match, with their state, then the
@@ -68,44 +73,146 @@ func (in *Input) Browse(limit int) (Browse, error) {
 	}
 
 	matching := in.matching(files)
-	if len(matching) > limit {
-		matching = matching[:limit]
+	shown := matching
+	if len(shown) > limit {
+		shown = shown[:limit]
 	}
 
 	led := peekLedger(in.opts.DataDir, in.cfg.ID)
 	now := in.clk.Now()
-	for _, f := range matching {
+
+	// Every file counts as ready for the pairing: browse shows the state of a
+	// file by its own age, not by the rules of the scanner.
+	reports, incomplete := reportsOf(in.conn, matching, matching)
+	reportOf := map[string]fileReport{}
+	for _, r := range reports {
+		for _, f := range r.files() {
+			reportOf[f.Name] = r
+		}
+	}
+	isIncomplete := map[string]bool{}
+	for _, f := range incomplete {
+		isIncomplete[f.Name] = true
+	}
+
+	// A report is read once, also when both files of a pair are shown: only
+	// its key is kept, and its addresses are taken at once while none were
+	// found yet, so no report's bytes outlive its turn.
+	type read struct {
+		key ledgerKey
+		ok  bool
+	}
+	cache := map[string]read{}
+	load := func(r fileReport) read {
+		if c, ok := cache[r.Name()]; ok {
+			return c
+		}
+		data, key, tooLarge, err := readReport(in.deps, in.conn.Directory, r, in.conn.MaxFileSize)
+		c := read{key: key, ok: err == nil && !tooLarge}
+		cache[r.Name()] = c
+		if c.ok && out.Source == "" {
+			if addrs, ctx, ok := in.addressesOf(data); ok {
+				out.Source, out.Addresses, out.Context = reportSource(r), addrs, ctx
+			}
+		}
+
+		return c
+	}
+
+	for _, f := range shown {
 		age := max(now.Sub(f.ModTime), 0)
 		bf := BrowseFile{Name: f.Name, Size: f.Size, Age: age, State: StateWaiting}
 		if age >= in.conn.StableFor {
 			bf.State = StateReady
 		}
-
-		var data []byte
-		if f.Size <= int64(in.conn.MaxFileSize) {
-			data, err = in.deps.readFile(filepath.Join(in.conn.Directory, f.Name))
-			if err != nil || len(data) > in.conn.MaxFileSize {
-				data = nil
-			}
+		if isIncomplete[f.Name] {
+			bf.State = StateIncomplete
 		}
-		if data != nil && led.Has(ledgerKey{Hash: sha256.Sum256(data), ModTime: f.ModTime}) {
-			bf.State = StateSeen
+
+		if r, inReport := reportOf[f.Name]; inReport {
+			if c := load(r); c.ok && led.Has(c.key) {
+				bf.State = StateSeen
+			}
 		}
 		out.Files = append(out.Files, bf)
-
-		if out.Source == "" && data != nil {
-			if addrs, ok := in.addressesOf(data); ok {
-				out.Source, out.Addresses = f.Name, addrs
-			}
-		}
 	}
 
 	return out, nil
 }
 
-// addressesOf returns the addresses of a file; ok is false when the file
-// cannot be read as a CSV with the layout of the connection.
-func (in *Input) addressesOf(data []byte) ([]BrowseAddress, bool) {
+// addressesOf returns the addresses of a report, and under qdas its context
+// fields; ok is false when it cannot be read with the layout of the
+// connection.
+func (in *Input) addressesOf(data []byte) (addrs, context []BrowseAddress, ok bool) {
+	if in.conn.Format == FormatQDAS {
+		return in.qdasAddressesOf(data)
+	}
+	addrs, ok = in.csvAddressesOf(data)
+
+	return addrs, nil, ok
+}
+
+// qdasAddressesOf lists the characteristics of a Q-DAS report in index order
+// and the context fields of its first record.
+func (in *Input) qdasAddressesOf(data []byte) (addrs, context []BrowseAddress, ok bool) {
+	text, err := decodeText(data, in.conn.Encoding)
+	if err != nil {
+		return nil, nil, false
+	}
+	f, err := readQDAS(text)
+	if err != nil {
+		return nil, nil, false
+	}
+
+	var v qdasView
+	if len(f.Records) > 0 {
+		v = f.view(0)
+	}
+	addrs = make([]BrowseAddress, 0, f.Count)
+	for i := 1; i <= f.Count; i++ {
+		c := f.Characteristic(i)
+		a := BrowseAddress{Address: c.Address(i), Detail: qdasDetail(c)}
+		if len(f.Records) > 0 {
+			a.Preview = preview(v.field(i, "K0001"))
+		}
+		addrs = append(addrs, a)
+	}
+	if len(f.Records) > 0 {
+		for _, key := range v.contextKeys() {
+			context = append(context, BrowseAddress{Address: key, Preview: preview(v.value(key))})
+		}
+	}
+
+	return addrs, context, true
+}
+
+// qdasDetail describes a characteristic: its description, nominal, limits and
+// unit, the parts it lacks left out, and a note for an attributive one.
+func qdasDetail(c qdasCharacteristic) string {
+	var parts []string
+	if d := strings.TrimSpace(c.Description); d != "" {
+		parts = append(parts, d)
+	}
+	if n := strings.TrimSpace(c.Nominal); n != "" {
+		parts = append(parts, "nominal "+n)
+	}
+	lower, upper := strings.TrimSpace(c.Lower), strings.TrimSpace(c.Upper)
+	if lower != "" || upper != "" {
+		parts = append(parts, "limits "+lower+".."+upper)
+	}
+	if u := strings.TrimSpace(c.Unit); u != "" {
+		parts = append(parts, u)
+	}
+	if c.Attributive {
+		parts = append(parts, "attributive, not read")
+	}
+
+	return strings.Join(parts, "  ")
+}
+
+// csvAddressesOf returns the addresses of a CSV file; ok is false when the
+// file cannot be read with the layout of the connection.
+func (in *Input) csvAddressesOf(data []byte) ([]BrowseAddress, bool) {
 	text, err := decodeText(data, in.conn.Encoding)
 	if err != nil {
 		return nil, false

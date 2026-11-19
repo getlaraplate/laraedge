@@ -235,11 +235,31 @@ func (c columns) contextOf(fields []string) *model.Context {
 		OperationRef: cell(fields, c.ctx[2]),
 		Lot:          cell(fields, c.ctx[3]),
 	}
+	return contextOrNil(ctx)
+}
+
+// contextOrNil returns ctx, or nil when every value is empty.
+func contextOrNil(ctx model.Context) *model.Context {
 	if ctx == (model.Context{}) {
 		return nil
 	}
 
 	return &ctx
+}
+
+// inEnvelope reports whether t is a time the envelope can write: not before
+// the Unix epoch and with a four-digit year.
+func inEnvelope(t time.Time) bool {
+	return t.Unix() >= 0 && t.Before(timestampCeiling)
+}
+
+// appendOnce appends kind unless kinds already holds it.
+func appendOnce(kinds []string, kind string) []string {
+	if slices.Contains(kinds, kind) {
+		return kinds
+	}
+
+	return append(kinds, kind)
 }
 
 // timestampOf reads the timestamp of a row in UTC.
@@ -249,7 +269,7 @@ func (p *plan) timestampOf(c columns, fields []string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	t, ok := ParseTimestamp(p.conn.Timestamp, text, p.conn.Location)
-	if !ok || t.Unix() < 0 || !t.Before(timestampCeiling) {
+	if !ok || !inEnvelope(t) {
 		return time.Time{}, false
 	}
 
@@ -279,6 +299,20 @@ func (p *plan) sampleOf(pp PlannedPoint, ts time.Time, text string, bad bool, ct
 	return s, KindConversion
 }
 
+// appendSamples appends one sample per point of addr, built by sampleOf, and
+// the kind of each sample that did not convert.
+func (p *plan) appendSamples(samples []model.Sample, kinds []string, addr string, ts time.Time, text string, bad bool, ctx *model.Context) ([]model.Sample, []string) {
+	for _, pp := range p.points[addr] {
+		s, kind := p.sampleOf(pp, ts, text, bad, ctx)
+		if kind != "" {
+			kinds = append(kinds, kind)
+		}
+		samples = append(samples, s)
+	}
+
+	return samples, kinds
+}
+
 // thousandsDot reports a numeric text with a dot under decimal comma: a
 // European thousands separator, which is not accepted.
 func (p *plan) thousandsDot(typ, text string) bool {
@@ -299,9 +333,7 @@ func parseWide(p *plan, f *csvFile, modTime time.Time) ([]model.Sample, []string
 	for _, addr := range p.addrs {
 		switch len(f.index[addr]) {
 		case 0:
-			if !slices.Contains(kinds, KindMissingField) {
-				kinds = append(kinds, KindMissingField)
-			}
+			kinds = appendOnce(kinds, KindMissingField)
 		case 1:
 		default:
 			return nil, nil, refuse("an addressed column name appears twice in the header")
@@ -349,13 +381,7 @@ func parseWide(p *plan, f *csvFile, modTime time.Time) ([]model.Sample, []string
 			if text == "" && !r.bad {
 				continue
 			}
-			for _, pp := range p.points[addr] {
-				s, kind := p.sampleOf(pp, ts, rawCell(r.fields, idx[0]), rowBad, ctx)
-				if kind != "" {
-					kinds = append(kinds, kind)
-				}
-				samples = append(samples, s)
-			}
+			samples, kinds = p.appendSamples(samples, kinds, addr, ts, rawCell(r.fields, idx[0]), rowBad, ctx)
 		}
 	}
 
@@ -434,10 +460,7 @@ func parseLong(p *plan, f *csvFile, modTime time.Time) ([]model.Sample, []string
 		kinds = append(kinds, KindBadTimestamp)
 		ts, rowBad = modTime, true
 	}
-	var rowCtx *model.Context
-	if ctx != (model.Context{}) {
-		rowCtx = &ctx
-	}
+	rowCtx := contextOrNil(ctx)
 
 	for _, addr := range p.addrs {
 		if !seen[addr] {
@@ -450,13 +473,7 @@ func parseLong(p *plan, f *csvFile, modTime time.Time) ([]model.Sample, []string
 		if strings.TrimSpace(m.text) == "" && !m.bad {
 			continue
 		}
-		for _, pp := range p.points[m.addr] {
-			s, kind := p.sampleOf(pp, ts, m.text, rowBad || m.bad, rowCtx)
-			if kind != "" {
-				kinds = append(kinds, kind)
-			}
-			samples = append(samples, s)
-		}
+		samples, kinds = p.appendSamples(samples, kinds, m.addr, ts, m.text, rowBad || m.bad, rowCtx)
 	}
 
 	return samples, kinds, nil

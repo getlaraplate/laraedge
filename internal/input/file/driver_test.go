@@ -36,7 +36,6 @@ func TestNewRefusesNamingTheInputAndTheField(t *testing.T) {
 		cfg  config.Input
 		want string
 	}{
-		"qdas":        {fileInput(t, dir, FormatQDAS, eventPoint("bore", "Bore", "float64")), `file input "cmm-line": connection.format: not available in this build`},
 		"poll point":  {fileInput(t, dir, FormatCSV, eventPoint("ok", "Ok", "float64"), poll), `file input "cmm-line": devices.0.points.1: read: want event`},
 		"blank point": {fileInput(t, dir, FormatCSV, blank), `file input "cmm-line": devices.0.points.0: address: required`},
 	} {
