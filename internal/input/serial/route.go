@@ -38,12 +38,30 @@ type contextEntry struct {
 	set   time.Time
 }
 
+// contextHistory keeps the current entry of a key and the one before it, so a
+// frame read before the latest change still sees the value it was read under.
+type contextHistory struct {
+	cur, prev contextEntry
+	hasPrev   bool
+}
+
+// pick returns the entry in force at at, ok false when none was set by then.
+func (h contextHistory) pick(at time.Time) (contextEntry, bool) {
+	if !h.cur.set.After(at) {
+		return h.cur, true
+	}
+	if h.hasPrev && !h.prev.set.After(at) {
+		return h.prev, true
+	}
+	return contextEntry{}, false
+}
+
 // router turns frames into samples and context changes (spec section 7). It is
 // pure: no clock, no logging, no locks; the caller serialises access.
 type router struct {
 	conn   Connection
 	points []routePoint
-	keys   map[string]contextEntry
+	keys   map[string]contextHistory
 }
 
 // routed is the outcome of one frame: a sample, a context change, or a Kind
@@ -58,7 +76,7 @@ type routed struct {
 // newRouter compiles the points of cfg in document order across devices. The
 // error names the input position of the point, never an address.
 func newRouter(cfg config.Input, conn Connection) (*router, error) {
-	r := &router{conn: conn, keys: make(map[string]contextEntry)}
+	r := &router{conn: conn, keys: make(map[string]contextHistory)}
 	for di, dev := range cfg.Devices {
 		for pi, p := range dev.Points {
 			re, err := CheckPoint(p)
@@ -102,7 +120,10 @@ func (r *router) decode(frame []byte) (string, bool) {
 	}
 }
 
-// route handles one frame read at at.
+// route handles one frame. Frames are expected in read order and at is the
+// time the frame's last byte was read: a context key applies only to frames
+// read at or after the time it was set, so a frame read before a scan but
+// routed after it still carries the earlier value.
 func (r *router) route(frame []byte, at time.Time) routed {
 	text, ok := r.decode(frame)
 	if !ok {
@@ -114,11 +135,8 @@ func (r *router) route(frame []byte, at time.Time) routed {
 			continue
 		}
 		value := m[rule.Group]
-		if value == "" {
-			delete(r.keys, rule.Key)
-		} else {
-			r.keys[rule.Key] = contextEntry{value: value, set: at}
-		}
+		h, had := r.keys[rule.Key]
+		r.keys[rule.Key] = contextHistory{cur: contextEntry{value: value, set: at}, prev: h.cur, hasPrev: had}
 		return routed{ContextKey: rule.Key, ContextValue: value}
 	}
 	for _, p := range r.points {
@@ -145,7 +163,11 @@ func (r *router) route(frame []byte, at time.Time) routed {
 // TTL dropped; nil when nothing is left.
 func (r *router) context(at time.Time) *model.Context {
 	var c model.Context
-	for key, e := range r.keys {
+	for key, h := range r.keys {
+		e, ok := h.pick(at)
+		if !ok || e.value == "" {
+			continue
+		}
 		if r.conn.ContextTTL > 0 && at.Sub(e.set) > r.conn.ContextTTL {
 			continue
 		}

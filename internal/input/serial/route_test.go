@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/getlaraplate/laraedge/internal/config"
+	"github.com/getlaraplate/laraedge/internal/input/driverkit"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
@@ -62,6 +63,9 @@ func TestRouteConversion(t *testing.T) {
 	got := r.route([]byte("01Aabc"), t0)
 	if got.Kind != "conversion" || got.Sample == nil || got.Sample.Quality != model.Bad {
 		t.Fatalf("got %+v", got)
+	}
+	if got.Sample.Value != driverkit.ZeroValue("float64") || got.Sample.Priority != model.Critical {
+		t.Fatalf("value %+v priority %v", got.Sample.Value, got.Sample.Priority)
 	}
 }
 
@@ -164,5 +168,42 @@ func TestDuplicateAddresses(t *testing.T) {
 	got := r.duplicateAddresses()
 	if len(got) != 1 || got[0] != "devices.1.points.0" {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestRouteContextByReadTime(t *testing.T) {
+	conn := Connection{Encoding: "utf-8", Context: []ContextRule{rule("serial", `^SN(\w+)$`, 1)}}
+	r := mustRouter(t, conn, config.Device{Device: "a", Points: []config.Point{evPoint("w", `^01A(.+)$`, "float64")}})
+	t1, t2 := t0.Add(time.Minute), t0.Add(2*time.Minute)
+	r.route([]byte("SN42"), t0)
+	r.route([]byte("SN43"), t2)
+	if got := r.route([]byte("01A1.0"), t1); got.Sample.Context == nil || got.Sample.Context.Serial != "42" {
+		t.Fatalf("read before the scan: %+v", got.Sample.Context)
+	}
+	if got := r.route([]byte("01A1.0"), t2.Add(time.Second)); got.Sample.Context == nil || got.Sample.Context.Serial != "43" {
+		t.Fatalf("read after the scan: %+v", got.Sample.Context)
+	}
+	if got := r.route([]byte("01A1.0"), t0.Add(-time.Second)); got.Sample.Context != nil {
+		t.Fatalf("read before any scan: %+v", got.Sample.Context)
+	}
+}
+
+func TestRouteContextTTLPerKey(t *testing.T) {
+	conn := Connection{Encoding: "utf-8", ContextTTL: 10 * time.Minute, Context: []ContextRule{rule("serial", `^SN(\w+)$`, 1), rule("order_ref", `^PO-(\d+)$`, 1)}}
+	r := mustRouter(t, conn, config.Device{Device: "a", Points: []config.Point{evPoint("w", `^01A(.+)$`, "float64")}})
+	r.route([]byte("SN42"), t0)
+	r.route([]byte("PO-7"), t0.Add(5*time.Minute))
+	got := r.route([]byte("01A1.0"), t0.Add(11*time.Minute))
+	if got.Sample.Context == nil || *got.Sample.Context != (model.Context{OrderRef: "7"}) {
+		t.Fatalf("got %+v", got.Sample.Context)
+	}
+}
+
+func TestRouteRuleBeforePoint(t *testing.T) {
+	conn := Connection{Encoding: "utf-8", Context: []ContextRule{rule("serial", `^SN(\w+)$`, 1)}}
+	r := mustRouter(t, conn, config.Device{Device: "a", Points: []config.Point{evPoint("w", `^SN(.+)$`, "string")}})
+	got := r.route([]byte("SN42"), t0)
+	if got.Sample != nil || got.ContextKey != "serial" {
+		t.Fatalf("got %+v", got)
 	}
 }
