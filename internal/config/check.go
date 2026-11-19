@@ -16,7 +16,7 @@ const pluginPrefix = "plugin:"
 
 // CheckBuild is the second validation layer: it refuses, with "<path>: not
 // available in this build", the parts of a valid document this build does
-// not provide: drivers other than simulated, modbus, opcua, mqtt, file and
+// not provide: drivers other than simulated, modbus, opcua, mqtt, file, serial and
 // plugin:<id>, output types other than laraplate-http and plugin:<id>,
 // secret://keystore/ references, and derived signals with their transforms. Plugins, their
 // drivers, processors and outputs are provided. Point transforms are
@@ -29,7 +29,7 @@ func CheckBuild(doc Document) []string {
 
 	for i, in := range doc.Inputs {
 		p := path{"inputs"}.index(i)
-		if in.Driver != DriverSimulated && in.Driver != DriverModbus && in.Driver != DriverOPCUA && in.Driver != DriverMQTT && in.Driver != DriverFile && !strings.HasPrefix(in.Driver, pluginPrefix) {
+		if in.Driver != DriverSimulated && in.Driver != DriverModbus && in.Driver != DriverOPCUA && in.Driver != DriverMQTT && in.Driver != DriverFile && in.Driver != DriverSerial && !strings.HasPrefix(in.Driver, pluginPrefix) {
 			add(p.key("driver"))
 		}
 		checkKeystore(in.Connection, p.key("connection"), add)

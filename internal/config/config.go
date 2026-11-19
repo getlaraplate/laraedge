@@ -39,6 +39,8 @@ const (
 	DriverMQTT = "mqtt"
 	// DriverFile is the file input driver.
 	DriverFile = "file"
+	// DriverSerial is the serial input driver.
+	DriverSerial = "serial"
 	// OutputLaraplateHTTP is the HTTP output to the Laraplate ingest route.
 	OutputLaraplateHTTP = "laraplate-http"
 )
