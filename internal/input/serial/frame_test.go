@@ -2,6 +2,7 @@ package serial
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -136,6 +137,15 @@ func TestFramer(t *testing.T) {
 		{"length with start trailing noise", Framing{Length: 4, Start: 2, HasStart: true}, 4, []framerStep{
 			{data: "\x02ABCD\r\n", frames: []string{"ABCD"}},
 		}},
+		{"endless trailing noise is bounded in gap mode", Framing{Gap: 50 * ms}, 4, []framerStep{
+			{data: "A" + strings.Repeat("\x00", 10000), kinds: []string{"frame_too_long"}},
+			{at: 100 * ms, data: "OK"},
+			{at: 200 * ms, tick: true, frames: []string{"OK"}},
+		}},
+		{"start then multi-byte terminator is an empty frame", Framing{Terminator: []byte("\r\n"), Start: 2, HasStart: true}, 1024, []framerStep{
+			{data: "\x02\r\nXY"},
+			{at: 3 * time.Second, tick: true},
+		}},
 		{"nothing pending tick", cr, 1024, []framerStep{{at: 5 * time.Second, tick: true}}},
 	}
 	for _, tt := range tests {
@@ -158,5 +168,13 @@ func TestFramerFramesDoNotAliasBuffer(t *testing.T) {
 	fr.push([]byte("XY\r"), frameT0)
 	if string(frames[0]) != "AB" {
 		t.Fatalf("frame changed to %q", frames[0])
+	}
+}
+
+func TestFramerBufferStaysBounded(t *testing.T) {
+	fr := newFramer(Framing{Gap: 50 * time.Millisecond}, 4)
+	fr.push([]byte("A"+strings.Repeat("\x00", 10000)), frameT0)
+	if len(fr.buf) > fr.bufCap() {
+		t.Fatalf("buffer holds %d bytes, cap %d", len(fr.buf), fr.bufCap())
 	}
 }

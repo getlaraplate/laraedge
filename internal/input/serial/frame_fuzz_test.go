@@ -29,6 +29,9 @@ func FuzzFramer(f *testing.F) {
 		step := int(split%7) + 1
 		at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 		check := func(frames [][]byte) {
+			if len(fm.buf) > fm.bufCap() {
+				t.Fatalf("buffer of %d bytes exceeds cap %d", len(fm.buf), fm.bufCap())
+			}
 			for _, fb := range frames {
 				if len(fb) > maxFrame {
 					t.Fatalf("frame of %d bytes exceeds %d", len(fb), maxFrame)
@@ -42,7 +45,7 @@ func FuzzFramer(f *testing.F) {
 			end := min(i+step, len(data))
 			frames, _ := fm.push(data[i:end], at)
 			check(frames)
-			at = at.Add(time.Duration(int(data[i])%40) * 20 * time.Millisecond)
+			at = at.Add(time.Duration(int(data[i])%150) * 20 * time.Millisecond)
 			frames, _ = fm.tick(at)
 			check(frames)
 		}

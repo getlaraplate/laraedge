@@ -28,6 +28,11 @@ type framer struct {
 	inFrame bool
 	// skipping is true after a too long frame, until the resync point.
 	skipping bool
+	// noiseRun is the length of the CR, LF and NUL run ending buf.
+	noiseRun int
+	// head holds the last bytes of leading noise dropped before a frame, to
+	// spot a terminator made of noise bytes.
+	head []byte
 
 	last    time.Time
 	hasLast bool
@@ -39,9 +44,7 @@ func newFramer(f Framing, maxFrame int) *framer {
 
 // reset drops what is pending, without counting it (port lost).
 func (f *framer) reset() {
-	f.buf = f.buf[:0]
-	f.inFrame = false
-	f.skipping = false
+	f.clear()
 	f.hasLast = false
 }
 
@@ -91,6 +94,8 @@ func (f *framer) tick(at time.Time) ([][]byte, []string) {
 
 func (f *framer) clear() {
 	f.buf = f.buf[:0]
+	f.noiseRun = 0
+	f.head = f.head[:0]
 	f.inFrame = false
 	f.skipping = false
 }
@@ -101,6 +106,7 @@ func (f *framer) emit(frames [][]byte) [][]byte {
 		frames = append(frames, bytes.Clone(t))
 	}
 	f.buf = f.buf[:0]
+	f.noiseRun = 0
 	return frames
 }
 
@@ -109,6 +115,8 @@ func (f *framer) feed(c byte, frames [][]byte, kinds []string) ([][]byte, []stri
 	if fr.HasStart {
 		if c == fr.Start {
 			f.buf = f.buf[:0]
+			f.noiseRun = 0
+			f.head = f.head[:0]
 			f.inFrame = true
 			f.skipping = false
 			return frames, kinds
@@ -134,12 +142,25 @@ func (f *framer) feed(c byte, frames [][]byte, kinds []string) ([][]byte, []stri
 	if len(f.buf) == 0 && fr.Length == 0 && isFrameNoise(c) {
 		// Leading CR, LF and NUL are trimmed from the frame, so they do not
 		// count toward max_frame; never buffering them keeps it that way.
-		if len(term) == 1 && c == term[0] {
-			f.inFrame = false
+		if len(term) > 0 {
+			f.head = append(f.head, c)
+			if len(f.head) > len(term) {
+				f.head = f.head[len(f.head)-len(term):]
+			}
+			if bytes.Equal(f.head, term) {
+				f.head = f.head[:0]
+				f.inFrame = false
+			}
 		}
 		return frames, kinds
 	}
+	f.head = f.head[:0]
 	f.buf = append(f.buf, c)
+	if isFrameNoise(c) {
+		f.noiseRun++
+	} else {
+		f.noiseRun = 0
+	}
 	switch {
 	case len(term) > 0:
 		if bytes.HasSuffix(f.buf, term) {
@@ -147,11 +168,12 @@ func (f *framer) feed(c byte, frames [][]byte, kinds []string) ([][]byte, []stri
 			f.inFrame = false
 			if len(trimFrame(f.buf)) > f.maxFrame {
 				f.buf = f.buf[:0]
+				f.noiseRun = 0
 				return frames, append(kinds, kindFrameTooLong)
 			}
 			return f.emit(frames), kinds
 		}
-		if f.contentLen() > f.maxFrame+len(term)-1 {
+		if f.contentLen() > f.maxFrame+len(term)-1 || len(f.buf) > f.bufCap() {
 			return frames, f.tooLong(kinds)
 		}
 	case fr.Length > 0:
@@ -160,7 +182,7 @@ func (f *framer) feed(c byte, frames [][]byte, kinds []string) ([][]byte, []stri
 			f.inFrame = false
 		}
 	default:
-		if f.contentLen() > f.maxFrame {
+		if f.contentLen() > f.maxFrame || len(f.buf) > f.bufCap() {
 			return frames, f.tooLong(kinds)
 		}
 	}
@@ -169,6 +191,7 @@ func (f *framer) feed(c byte, frames [][]byte, kinds []string) ([][]byte, []stri
 
 // tooLong counts the frame and starts skipping to the resync point.
 func (f *framer) tooLong(kinds []string) []string {
+	f.noiseRun = 0
 	term := f.framing.Terminator
 	if len(term) > 1 && !f.framing.HasStart {
 		f.buf = f.buf[len(f.buf)-(len(term)-1):]
@@ -195,5 +218,11 @@ func isFrameNoise(c byte) bool {
 // contentLen is the pending size without trailing CR, LF and NUL, which are
 // trimmed from the frame and so never count toward max_frame.
 func (f *framer) contentLen() int {
-	return len(bytes.TrimRight(f.buf, "\r\n\x00"))
+	return len(f.buf) - f.noiseRun
+}
+
+// bufCap is the hard limit of buffered bytes: a frame of max_frame bytes plus
+// its terminator and a short CRLF tail still fits, endless noise does not.
+func (f *framer) bufCap() int {
+	return f.maxFrame + len(f.framing.Terminator) + 2
 }
