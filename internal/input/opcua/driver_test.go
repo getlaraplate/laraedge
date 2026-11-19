@@ -200,7 +200,11 @@ func (h *harness) waitFor(what string, cond func() bool) {
 	deadline := time.Now().Add(guard)
 	for !cond() {
 		if time.Now().After(deadline) {
-			h.t.Fatalf("%s: not reached", what)
+			// The input's own log (debug included) says what it was doing:
+			// a session lost, a retry waiting on the fake clock, a refused
+			// subscription.
+			h.t.Fatalf("%s: not reached; health %+v, clock %s, pending timers %d; input log:\n%s",
+				what, h.in.Health(), h.clk.Now().Sub(driverEpoch), h.clk.PendingTimers(), h.logs.String())
 		}
 		time.Sleep(time.Millisecond)
 	}
