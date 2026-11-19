@@ -79,7 +79,7 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 	log := logging.New(stderr, slog.LevelWarn)
 	defer routeLibraryLogs(log)()
 
-	samples, kinds, source, elapsed, err := probeInput(doc, boot, positional[0], log)
+	samples, kinds, source, notes, elapsed, err := probeInput(doc, boot, positional[0], log)
 	if err != nil {
 		fmt.Fprintf(stderr, "laraplate-edge probe: %v\n", err)
 		return exitFailure
@@ -102,6 +102,9 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, p := range pointsWithoutSample(doc, positional[0], samples) {
 		fmt.Fprintf(&out, "%s\t%s\t%s\n", p[0], p[1], cmp.Or(kinds[input.PointRef{Device: p[0], Signal: p[1]}], probeNoMessage))
+	}
+	for _, note := range notes {
+		fmt.Fprintln(&out, note)
 	}
 	if source != "" {
 		fmt.Fprintf(&out, "source: %s\n", mqtt.Escape(source))
@@ -133,6 +136,12 @@ type pointKindProber interface {
 // the file input.
 type probeSourcer interface {
 	ProbeSource() string
+}
+
+// probeNoter is an input that has more to say after the point lines: the
+// serial input, with the context it saw and the frames that matched nothing.
+type probeNoter interface {
+	ProbeNotes() []string
 }
 
 // pointsWithoutSample returns the device and signal of the points of input id
@@ -217,7 +226,7 @@ func probeBootstrap(doc config.Document, boot bootstrap.File, id, configFile, bo
 // one that can (probeSourcer), the file the samples come from. Passwords
 // resolve from the environment and files of this process; log receives the
 // drivers' warnings.
-func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) (samples []model.Sample, kinds map[input.PointRef]string, source string, elapsed time.Duration, err error) {
+func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.Logger) (samples []model.Sample, kinds map[input.PointRef]string, source string, notes []string, elapsed time.Duration, err error) {
 	var cfg *config.Input
 	for i := range doc.Inputs {
 		if doc.Inputs[i].ID == id {
@@ -227,25 +236,25 @@ func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.L
 		}
 	}
 	if cfg == nil {
-		return nil, nil, "", 0, fmt.Errorf("the configuration has no input %q (inputs: %s)", id, inputIDs(doc))
+		return nil, nil, "", nil, 0, fmt.Errorf("the configuration has no input %q (inputs: %s)", id, inputIDs(doc))
 	}
 
 	if strings.HasPrefix(cfg.Driver, plugin.DriverPrefix) {
 		samples, elapsed, err := probePlugin(doc, boot, *cfg, log)
 
-		return samples, nil, "", elapsed, err
+		return samples, nil, "", nil, elapsed, err
 	}
 
 	factory := inputDrivers(boot, secrets.NewResolver(), log, nil)[cfg.Driver]
 	if factory == nil {
-		return nil, nil, "", 0, fmt.Errorf("input %q: driver %s is not available in this build", id, cfg.Driver)
+		return nil, nil, "", nil, 0, fmt.Errorf("input %q: driver %s is not available in this build", id, cfg.Driver)
 	}
 
 	clk := clock.Real()
 
 	in, err := factory(*cfg, clk)
 	if err != nil {
-		return nil, nil, "", 0, fmt.Errorf("input %q: %w", id, err)
+		return nil, nil, "", nil, 0, fmt.Errorf("input %q: %w", id, err)
 	}
 	defer func() { _ = in.Close() }()
 
@@ -260,14 +269,18 @@ func probeInput(doc config.Document, boot bootstrap.File, id string, log *slog.L
 		samples, err = in.Probe(ctx)
 	}
 	if err != nil {
-		return nil, nil, "", 0, fmt.Errorf("input %q: %w", id, err)
+		return nil, nil, "", nil, 0, fmt.Errorf("input %q: %w", id, err)
 	}
 
 	if sourcer, ok := in.(probeSourcer); ok {
 		source = sourcer.ProbeSource()
 	}
 
-	return samples, kinds, source, clk.Now().Sub(start), nil
+	if noter, ok := in.(probeNoter); ok {
+		notes = noter.ProbeNotes()
+	}
+
+	return samples, kinds, source, notes, clk.Now().Sub(start), nil
 }
 
 // pluginStopTimeout bounds the stop of the plugin process, which has its own

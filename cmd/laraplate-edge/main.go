@@ -59,7 +59,12 @@ commands:
                              input reads the newest file that is stable and
                              not yet read, prints "source: <name>" and, for
                              a point it has no sample for, why, or "no file"
-                             (nothing is moved or recorded)
+                             (nothing is moved or recorded); a serial input
+                             opens its port once (stop the input first), sends
+                             its requests, waits up to 30 s for a frame on
+                             every point and prints "no frame" for a silent
+                             one, then the context it saw and up to ten
+                             unmatched frames
   browse <input> (--config <file> | --bootstrap <path>) [--node <nodeid>] [--depth <n>]
          [--filter <topic filter>] [--duration <1s-5m>] [--limit <n>]
                              list the nodes of an OPC UA server, or of a
@@ -81,6 +86,10 @@ commands:
                              "<name>  <size> B  <age>s  <waiting|ready|seen>"
                              then the addresses of the newest readable one,
                              header names or keys, with the first value
+                             a serial input takes no flag: it lists the
+                             host's serial ports as "<name>  <stable path>
+                             <vid:pid>  <product>  <serial>", the one the
+                             input's device names marked with *
   opcua trust <input> (--config <file> | --bootstrap <path>) [--thumbprint <hex>]
                              show the certificate an OPC UA server presents and
                              trust it after a yes on stdin, or without asking

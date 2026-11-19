@@ -56,6 +56,8 @@ type Input struct {
 	cancel  context.CancelFunc
 	// dropLogged is set once the context drop was logged by Close.
 	dropLogged bool
+	// notes are the lines of the last probe, for ProbeNotes.
+	notes []string
 
 	wg sync.WaitGroup
 }
@@ -176,12 +178,4 @@ func (in *Input) Close() error {
 // Health returns whether the port is open and the read errors of the input.
 func (in *Input) Health() edgeinput.Health {
 	return in.health.Snapshot()
-}
-
-// Probe is not available yet for serial inputs.
-//
-// TODO(serial, Task 7): open the port once, send the requests and route
-// frames without emitting.
-func (in *Input) Probe(ctx context.Context) ([]model.Sample, error) {
-	return nil, fmt.Errorf("serial input %q: probe is not available yet", in.cfg.ID)
 }
