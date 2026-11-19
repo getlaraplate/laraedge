@@ -1140,8 +1140,11 @@ document. `examples/serial` is a complete document; [USAGE.md](USAGE.md#serial-p
 mode (see USAGE.md). A frame is text: binary protocols and checksums are not read.
 
 An input opens one port. Several instruments on one port (a multiplexer) are several devices of the input, or
-several points of one device; a port belongs to one input, so two inputs naming the same port are not possible
-at once (the second finds it busy).
+several points of one device; a port belongs to one input: two `serial` inputs with the same `connection.device`
+are refused when the document is validated (`inputs.<i>.connection.device: the same port as inputs.<j>`). The
+names are compared as written, so the same port under two names (a `/dev/serial/by-id/` link and its
+`/dev/ttyUSB0` target) is not caught there; outside root on Linux, and always on Windows, the second open then
+finds the port busy.
 
 **Connection.** An unknown field in `connection`, `framing`, `context` or `requests` is an error, named with its
 path (`connection.<key>: unknown field`). Every error of the driver names the field and never repeats a value,
@@ -1163,7 +1166,9 @@ a frame or a context value. The line settings keep the names and rules of `modbu
 | `request_timeout` | `1s` | with `requests`: how long an answer is awaited before the next command may be sent |
 
 JSON and YAML escapes (`"\r"`, `"\n"`, `"\u0002"`) write control characters in `framing` and `requests`; the
-driver has no escape syntax of its own.
+driver has no escape syntax of its own. `start`, `terminator` and `command` are JSON strings, sent and matched as
+their UTF-8 bytes: a character from `"\u0080"` up becomes two or more bytes (`"\u00ff"` is `C3 BF`, not `FF`), so
+use ASCII control or printable characters there.
 
 `read` is `event` only (`subscribe` and `poll` are refused). `type` is required. `address` is a regular
 expression and is required.
@@ -1192,6 +1197,12 @@ expression and is required.
   CR, LF or NUL bytes (a gauge that sends `"\r\n\r\n"` after each value) is counted `frame_too_long`. Raise
   `max_frame` for such an instrument.
 - When the port is lost, what is held in the reader is dropped without a count.
+- A port can be opened in the middle of a frame (an instrument that streams, an adapter plugged back in while the
+  gauge sends). Whatever reached the port before the open is flushed, and the reader then drops bytes until a sync
+  point: a read cycle of 100 ms with nothing on the line, a `start` character, or a `terminator` (the bytes up to
+  and including it are dropped). With `gap` the first silence of `gap` is the sync point (the bytes before it are
+  dropped). Dropped bytes other than CR, LF and NUL count `incomplete_frame` once. So
+  `...5.250\r01A+1.000\r` arriving in the first read gives only `01A+1.000`.
 
 **Routing and context.** Each frame is tried against the `context` rules, in order, then against the points in
 document order across the devices of the input. The first match takes the frame; it is offered to nothing else.
@@ -1211,13 +1222,18 @@ document order across the devices of the input. The first match takes the frame;
   stays at the station: too short loses the part under measurement, too long (or none) attaches a measurement to
   the part before it when an operator skips a scan.
 - A change of a context key is logged at `info` with the key and its new value; this is the one place a context
-  value reaches a log. Unmatched frames are logged at `debug` only, quoted, truncated to 80 bytes and
-  rate-limited.
+  value reaches a log. A scan that repeats the value in force (an operator scanning the same part twice) changes
+  nothing and is not logged; a value expired by `context_ttl` counts as absent, so scanning it again is a change.
+  Unmatched frames are logged at `debug` only, quoted, truncated to 80 bytes and rate-limited; the summary of the
+  frames counted in a window (and the one written when the input stops) stays at `debug` too.
 - A **point**'s `address` is a regular expression; the first capture group, if the expression has one, is the
   value text, otherwise the whole frame. An expression that needs more groups uses non-capturing ones
   (`(?:...)`). The text is converted to the point's `type` with the rules of the `mqtt` plain payloads (see
   "Conversion to the point's `type`" under the `mqtt` driver): lossless, or the sample is `bad` and the read
-  error is `conversion`. Transforms follow as usual. Two points with the same address are allowed but the second
+  error is `conversion`. For a numeric `type` the value text is first trimmed of surrounding spaces and the
+  leading zeros of its integer part are dropped, keeping an optional sign and one digit before the point or when
+  the integer part is all zeros, since gauges pad their values: a Mitutoyo Digimatic `01A+00012.345` reads `12.345`,
+  `-0001.5` reads `-1.5`, `000` reads `0` and `00.5` reads `0.5`. A `string` or `bool` point gets the text as is. Transforms follow as usual. Two points with the same address are allowed but the second
   never receives a frame: it is logged at `warn` when the document is applied.
 - A frame that no rule and no point matches gives no sample and counts `unmatched`.
 - The time of a sample is the agent's clock when the last byte of its frame was read: instruments on a serial
@@ -1241,14 +1257,25 @@ requests:
   routed. The driver does not pair answers with commands: the routing above tells them apart (a multiplexer
   prefixes the channel), as it does for a frame sent unsolicited.
 - Requests start once the port is open and stop when it is lost.
+- On 2-wire RS-485 the adapter may hear its own command: an adapter that echoes it hands the command back as a
+  frame, which frees the request slot at once, so the next command may follow before the instrument answered. The
+  echo is routed like any frame (usually `unmatched`, or give it a point that matches nothing useful); the answers
+  are still attributed correctly, since routing is by regular expression and not by request. Turn the echo off in
+  the adapter when it can be.
 
 **Opening the port.** `Start` returns at once; the port is opened in the background with a backoff, so a USB
 adapter plugged in later, or a port a reloaded instance still holds, is opened when it becomes free and is
 never a failing start. A failure counts `open`; the log says whether the port is missing, busy or refused by
-permission (on Linux it names the `dialout` group), once per cause until the port opens. The port is exclusive:
+permission (on Linux it names the `dialout` group), once per cause until the port holds. The port is exclusive:
 on Windows by the system, on Linux the driver takes it with `TIOCEXCL`, so a second program (or `probe`, while
-the agent runs) gets "port busy" instead of interleaved frames. A read or write error (an adapter unplugged)
-closes the port, counts `port_lost` and goes back to opening.
+the agent runs) gets "port busy" instead of interleaved frames. Linux does not enforce `TIOCEXCL` for root: an
+agent running as root does not keep another root program (or a second input naming the port another way) off the
+port. Run the agent as its own user in the `dialout` group. A read or write error (an adapter unplugged) closes
+the port, counts `port_lost` and goes back to opening. Each loss is counted, but it is logged at `warn` once per
+episode, which ends when a frame is read. The backoff, and the once-per-cause open warnings, start again only once
+the port holds: it delivered a frame, or stayed open for a minute (the backoff maximum). A port that opens and
+fails at its first read (a flaky adapter) therefore still backs off up to a minute instead of reopening twice a
+second.
 
 **Death and birth.** While the port is open every device of the input is renewed on every read cycle, whether
 frames arrive or not, so silence never kills one: a gauge may send nothing for hours. With `requests` it is
@@ -1264,7 +1291,7 @@ frame is never carried across a reopening.
 | `open` | the port could not be opened: missing, busy or no permission |
 | `port_lost` | a read or write failed on an open port |
 | `frame_too_long` | a frame above `max_frame` was dropped (also the case of the buffer cap above) |
-| `incomplete_frame` | the bytes of an unfinished frame were dropped after 2 s of silence |
+| `incomplete_frame` | the bytes of an unfinished frame were dropped after 2 s of silence, or the tail of a frame was dropped while syncing after an open |
 | `decode` | a frame is not valid in `encoding` |
 | `unmatched` | a frame matched no context rule and no point |
 | `conversion` | the captured text does not convert to the point's `type`: a `bad` sample |

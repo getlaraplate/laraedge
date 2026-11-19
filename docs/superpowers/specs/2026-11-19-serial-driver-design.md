@@ -133,6 +133,12 @@ Rules:
   With `gap` the silence itself ends the frame, so this rule does not apply.
 - A frame that does not decode in `encoding` is dropped, kind `decode`.
 - When the port is lost, what is in the reader is dropped without a count.
+- (Amended 2026-11-19, final review: half-frame sync at open.) The open flushes what the port received before it,
+  and the framer starts syncing on construction and after a port loss: bytes are dropped until a sync point, which
+  is a read cycle with no byte (the line quiet for one read timeout), a `start` character, or a `terminator` (the
+  bytes up to and including it are dropped); with `gap`, the silence that ends a gap frame ends the sync (the
+  bytes before the first silence are dropped). Dropped bytes other than CR, LF and NUL count `incomplete_frame`
+  once per sync. `probe` uses a fresh framer and so syncs too.
 
 ## 6. Requests
 
@@ -182,7 +188,11 @@ sample carries the context as it was when its frame was read, so a later scan ne
 **Points.** `address` is a regular expression; the first capture group, if the expression has any, is the value
 text, else the whole frame. The text is converted to the point's `type` with the rules of the `mqtt` plain payloads
 (`driverkit.ConvertText`): lossless or a `bad` sample, kind `conversion`. Transforms follow as usual, so
-`regex_extract`, `scale` and the rest still apply to the extracted text or value.
+`regex_extract`, `scale` and the rest still apply to the extracted text or value. (Amended 2026-11-19, final review:
+leading zeros. `ConvertText` refuses a number with leading zeros, which gauges send: for a numeric `type` the router
+first trims surrounding spaces and drops the leading zeros of the integer part, keeping an optional sign and one
+digit before the point or when the integer part is all zeros, so `+00012.345` reads `12.345`, `-0001.5` reads
+`-1.5`, `000` reads `0`. `driverkit` is unchanged.)
 
 **Unmatched frames** give no sample, count kind `unmatched` and are logged at `debug`, rate-limited, with the frame
 quoted and truncated to 80 bytes, so a technician can turn the log up to see what an unknown instrument sends.
@@ -195,7 +205,9 @@ setting `context_ttl` to a little more than the longest time a part stays at the
 A point has no `group` field (refused with its path): an expression that needs more groups than one uses
 non-capturing groups `(?:...)` for the rest.
 
-**Validation at apply.** Every expression compiles; a rule's `group` exists in its expression; a
+**Validation at apply.** (Amended 2026-11-19, final review: duplicate device refusal. Two inputs with driver
+`serial` and the same `connection.device` text are refused by document validation, with
+`inputs.<i>.connection.device: the same port as inputs.<j>`; the paths are compared as written.) Every expression compiles; a rule's `group` exists in its expression; a
 `context` key appears once; two points with the same address are allowed (the first wins) but logged at `warn` at
 apply, since the second never receives a frame.
 
@@ -210,7 +222,10 @@ section 5 run on the clock, and stops promptly on `Stop`. Reads, framing and rou
 tests.
 
 **Losing the port.** A read or write error (a USB adapter unplugged) closes the port, counts kind `port_lost` and
-goes back to opening with backoff. Requests stop until the port is open again.
+goes back to opening with backoff. Requests stop until the port is open again. (Amended 2026-11-19, final review:
+the backoff and the once-per-cause open warnings reset only once the port holds, having delivered a frame or stayed
+open for the backoff maximum; `port_lost` is counted on every loss and logged at `warn` once per episode, which
+ends when a frame is read. A port that opens and fails at once thus backs off like one that does not open.)
 
 **Death and birth.** While the port is open the devices of the input are renewed on every read cycle, frames or
 not (without `requests`), or on every frame (with `requests`). Beyond
@@ -220,7 +235,10 @@ the next open (or frame) is their birth. `laraplate_edge_input_connected{input}`
 **Exclusive use.** The port is exclusive on Windows; on Linux the driver asks for exclusive use where the library
 offers it, so a second program (or `probe` while the agent runs) gets a clear "port busy" instead of interleaved
 frames. If the library does not offer it on Linux, the plan records that and the documentation keeps the advice of
-`modbus` `rtu`: stop the input before probing its port. (Amended 2026-11-19 by `../plans/2026-11-19-serial.md`, R1: v1.8.0 of the library offers it, with `TIOCEXCL` on open on Linux and the BSDs, so a second non-root open fails with "busy"; the advice to stop the input before probing stays, since the port is exclusive.)
+`modbus` `rtu`: stop the input before probing its port. (Amended 2026-11-19 by `../plans/2026-11-19-serial.md`, R1: v1.8.0 of the library offers it, with `TIOCEXCL` on open on Linux and the BSDs, so a second non-root open fails with "busy"; the advice to stop the input before probing stays, since the port is exclusive.) (Amended 2026-11-19, final review:
+root caveat. Linux does not enforce `TIOCEXCL` for root, so an agent running as root does not keep another root
+program off the port; the documentation says so and advises a dedicated user in `dialout`. Two `serial` inputs
+naming the same `device` are refused at validation, section 7.)
 
 ## 9. Commands and metrics
 
@@ -236,7 +254,9 @@ and the serial number, and on Linux the stable `/dev/serial/by-id/` path for eac
 **Metrics:** those of the driver kit, `laraplate_edge_input_connected{input}` and
 `laraplate_edge_input_read_errors_total{input,kind}` with the kinds `open`, `port_lost`, `frame_too_long`,
 `incomplete_frame`, `decode`, `unmatched`, `conversion` and `no_response`. A context change is logged at `info`
-with the key and the new value.
+with the key and the new value. (Amended 2026-11-19, final review: only a frame that changes the value in force at
+its read time is a change, an expired value counting as absent; the summary of the rate-limited unmatched log stays
+at `debug`.)
 
 ## 10. Tests
 

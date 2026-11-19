@@ -50,7 +50,9 @@ inputs:
       - device: gauge-bore
         points:
           # The address is a regular expression; its first capture group is
-          # the value (the whole frame when it has no group).
+          # the value (the whole frame when it has no group). A padded value
+          # such as 01A+00012.345 reads 12.345: a numeric point drops leading
+          # zeros.
           - {signal: bore_diameter, address: '^01A([+-]?\d+\.\d+)$', type: float64, unit: mm, read: event, priority: critical}
       - device: gauge-depth
         points:

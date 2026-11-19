@@ -683,6 +683,9 @@ and the usual two ways to find the document (`--config <file>`, or `--bootstrap 
   reader to a carriage return (also a programming barcode) so that each scan is one frame, and check with `probe`.
 - **The port is exclusive.** While the agent runs an input, no other program, `probe` included, can open its
   port: it gets "port busy". Stop the input (remove it from the document, or stop the agent) before probing it.
+  On Linux this does not hold for root, which the kernel lets past the exclusive lock: run the agent as its own
+  user in `dialout`, not as root. Two `serial` inputs naming the same `device` are refused by
+  `config validate`.
 
 ### Finding the port: `browse`
 
@@ -756,7 +759,17 @@ The troubleshooting table has the symptoms. Some points of how the driver reads:
 - **A frame is text between terminators.** The default terminator is `"\r"`, and a line feed after it is dropped.
   A gauge that sends something else (`"\r\n"` is fine as `"\r"`; `"\u0003"`, or a fixed `length`) needs `framing`.
   The quickest way to see what an instrument sends is `probe` with a catch-all point, `'^(.+)$'`, and the
-  `unmatched` notes.
+  `unmatched` notes. Write `terminator`, `start` and `command` with ASCII characters only: they are JSON strings,
+  and a character from `"\u0080"` up is sent and matched as two or more UTF-8 bytes.
+- **The first frame after an open may be lost.** The agent (and `probe`) cannot know whether it opened the port in
+  the middle of a frame, so it waits for a quiet moment (100 ms), a start character or a terminator before reading
+  frames; a tail dropped this way counts `incomplete_frame`. A gauge that streams without pause loses the frame it
+  was sending when the port opened, never reads it half.
+- **Padded values read as numbers.** A numeric point drops the leading zeros of the captured text, so a Digimatic
+  `01A+00012.345` with the address `'^01A([+-]?\d+\.\d+)$'` reads `12.345`.
+- **RS-485 echo.** On a 2-wire RS-485 adapter that echoes what it sends, each request comes back as a frame and
+  frees the request slot before the instrument answers; the answers are still routed to the right point by their
+  expressions. Turn the echo off in the adapter if it can be, or expect `unmatched` counts for the echoes.
 - **The part that a measurement belongs to is the one scanned before it was read.** A scan sets the context
   (`serial`, `order_ref`, `operation_ref`, `lot`), and every sample read afterwards carries it, until the next scan
   or `context_ttl`. A measurement read before the scan of the next part still belongs to the previous one, even if
@@ -766,8 +779,11 @@ The troubleshooting table has the symptoms. Some points of how the driver reads:
   measurements carry none until the next scan. Unplugging the adapter does not clear it.
 - **Silence is not death.** A gauge that sends nothing for hours stays alive. Only a port that stays closed beyond
   `death_tolerance` (or, with `requests`, no frame at all for that long) kills the devices.
-- **Frames never reach the log at `info`.** The context change line (key and value) and `--log-level debug`
-  (unmatched frames, rate-limited) are the exceptions.
+- **Frames never reach the log at `info`.** The context change line (key and value, only when the value changes)
+  and `--log-level debug` (unmatched frames and their summary, rate-limited) are the exceptions.
+- **A flaky adapter backs off.** A port that opens and fails at once is reopened after 0.5 s, 1 s, 2 s and so on up
+  to a minute, with one `warn` for the episode and `port_lost` counted every time; the waits start again from
+  0.5 s once the port delivers a frame or stays open for a minute.
 
 ## Running plugins
 
@@ -1046,12 +1062,13 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | messages published while the agent was down did not arrive, with `persistent_session: true` | the broker did not keep them: it was restarted without persistence, it expires or drops sessions by policy, the `client_id` changed, or the publisher or the input uses QoS 0 (the delivery is at the lower of the two QoS, and a broker queues only QoS 1 and 2 for an offline client) | publish at QoS 1, keep `qos: 1`, keep the `client_id` stable, and enable session persistence and a long enough expiry on the broker. The agent subscribes again at every connection but cannot recover what the broker dropped. |
 | the document is `rolled_back` with an `mqtt` input error naming `connection.tls.ca_file` (or another `tls` field) | `Start` cannot read the file: it is missing or unreadable, or a relative path was read against the agent's working directory | give an absolute path, readable by the agent's user |
 | a `serial` input `connected` false, `read_errors` `open` growing, the log says the port is missing, busy or permission denied, devices reported dead after `death_tolerance` | the port path is wrong or the adapter is unplugged (`browse` shows the ports), another program (a terminal, `probe`) holds it (the port is exclusive: "busy"), or the agent's user is not in the group that owns it (`dialout` on most Linux distributions) | check the path, prefer `/dev/serial/by-id/...`, close the other program or stop the input before `probe`, add the user to the group and log in again. The input never fails its start for this: it opens the port when it can, and the devices are born at the first open. |
-| a `serial` input `read_errors` `port_lost` growing | an adapter unplugged, a loose cable or a USB hub that resets; the agent closes the port and opens it again with a backoff. A half frame is dropped, never joined to the next one, and the context survives. | fix the cable or the hub; devices die only after `death_tolerance` |
+| a `serial` input `read_errors` `port_lost` growing | an adapter unplugged, a loose cable or a USB hub that resets; the agent closes the port and opens it again with a backoff. A half frame is dropped, never joined to the next one, and the context survives. A port that keeps failing right after it opens is warned once per episode and backs off up to a minute. | fix the cable or the hub; devices die only after `death_tolerance` |
 | a `serial` input: no samples, `read_errors` `unmatched` growing | frames arrive but no `address` matches them: a wrong expression, or a wrong `encoding`, `baud`, `parity` or `framing` that makes the text different from what the instrument shows | `probe` shows the unmatched frames quoted; write the expressions from them. `--log-level debug` logs them too, rate-limited. |
 | a `serial` input: `read_errors` `frame_too_long` growing, values missing | a frame above `max_frame` (the terminator is not the one the instrument sends, or `framing` is missing), or a frame of exactly `max_frame` bytes followed by more than two trailing CR, LF or NUL bytes | set the right `terminator`, `length` or `gap`; raise `max_frame` for an instrument that pads its frames with line ends |
-| a `serial` input: `read_errors` `incomplete_frame` growing | bytes of a frame were left 2 s without news: noise on a line with the wrong settings, a cable pulled mid-message, or a terminator that never comes | check `baud`, `data_bits`, `parity` and the `terminator`; `probe` |
+| a `serial` input: `read_errors` `incomplete_frame` growing | bytes of a frame were left 2 s without news: noise on a line with the wrong settings, a cable pulled mid-message, or a terminator that never comes. One count at each open of the port is normal for an instrument that streams: the tail of the frame it was sending is dropped. | check `baud`, `data_bits`, `parity` and the `terminator`; `probe` |
 | a `serial` input: `read_errors` `decode` growing | a frame is not valid in the `encoding`: an instrument that sends `Ø` or `°` in `windows-1252` under the default `utf-8` | set `encoding: windows-1252` (or `iso-8859-1`); the next frame is read normally |
 | a `serial` input: `read_errors` `no_response` growing | a command got no frame within `request_timeout`: a channel with no instrument, a wrong command or terminator, or an `every` shorter than the instrument takes | check the `command` (in YAML the escape `\r` works only in double quotes), raise `request_timeout`; the other channels are still asked every cycle |
+| a `serial` input: `conversion` growing on values that look right, such as `+00012.345` | not the leading zeros, which a numeric point drops: a decimal comma, a unit or spaces inside the capture, or a value beyond the point's `type` | capture only the number (`'^01A([+-]?\d+\.\d+)'`), or use a `string` point and `regex_extract`; `probe` shows the frame |
 | a `serial` input: samples carry the wrong part, or none | the context is the one set by the last scan before the frame was read, expired by `context_ttl`, or lost by a restart or reload (it is kept in memory only) | set `context_ttl` a little above the longest time a part stays at the station; scan the part again after a restart. A rule that does not match the barcode shows as `unmatched` in `probe`. |
 | the document is `rolled_back` with `cannot open the serial port: it does not exist`, `cannot open the serial port: permission denied` or plain `cannot open the serial port` | the `rtu` input could not open the port: `does not exist` is a wrong `device` path, `permission denied` is a user without access to it, and the plain text is any other failure (on Windows also a port another process already has open) | check the path (`ls -l /dev/ttyUSB0`, adapters change number when replugged: prefer `/dev/serial/by-id/...`), and that the agent's user belongs to the group that owns the port (`dialout` on most Linux distributions). On Linux a second open of the port succeeds, so never run `probe` on an `rtu` input while the agent runs: both would read the same port and corrupt each other's frames. |
 | a document is `rejected` with `plugins.N.sha256: does not match the plugin binary` (or `manifest_sha256 ... plugin.json`) | the file at `path`, or its `plugin.json`, is not the one the entry pins: a rebuilt or replaced plugin, or a hash copied from another build | run `laraplate-edge plugin hash <dir>` on the files you mean to deploy and put the two values in the entry. Nothing changed: the previous document keeps running. If the binary on disk changes under a running plugin, its next restart stops on the same check (restart reason `hash`) and the plugin stays down, `last_error` `the plugin files on disk do not match their hashes`, until the files match again or a new document pins the new ones. While the binary on disk differs from the pinned hash, every new document that keeps that plugin entry is rejected, even one that changes only something else, until the entry's hashes are updated with `plugin hash`. |
