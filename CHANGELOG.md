@@ -2,6 +2,322 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-11-18
+
+### 🚀 Features
+
+- *(model)* Optional context per sample, written by the envelope
+- *(file)* Connection and point validation
+- *(file)* Stability watcher and ledger of read files
+- *(file)* CSV parser for wide and long layouts
+- *(file)* The file input, with ledger, deferred commit and moves
+- *(file)* Probe and browse
+
+### 🐛 Bug Fixes
+
+- *(file)* Refuse a seen_retention beyond the duration range
+- *(file)* Count header_row in lines, refuse dots under decimal comma and a missing timestamp column
+- *(file)* Expire ledger entries by name and modification time, stamp the pending time after the emit
+- *(file)* Ignore rows of only blank fields
+- *(file)* Skip temporary names in any case, validate the lowercased pattern, refuse digit and decimal delimiters
+- *(file)* Probe fails when the directory cannot be listed
+
+### 🚜 Refactor
+
+- *(input)* Share text conversion, size parsing and PointRef
+
+### 📚 Documentation
+
+- *(file)* Design of the file input driver
+- *(file)* Plan 1, sample context and CSV
+- *(file)* Tick plan 1 task 1
+- *(file)* Document the file driver and close plan 1
+- *(file)* Document the final-review fixes, balance the spec amendments
+
+### 🧪 Testing
+
+- *(e2e)* File input end to end
+
+## [0.6.0] - 2026-11-18
+
+### 🚀 Features
+
+- *(mqtt)* Accept format sparkplug_b, its addresses and its plan
+- *(mqtt)* Decode Sparkplug B payloads by hand with protowire
+- *(mqtt)* Sparkplug births, deaths, aliases, seq and bdSeq
+- *(mqtt)* Run the input under format sparkplug_b
+- *(mqtt)* Probe and browse Sparkplug B inputs
+
+### 🐛 Bug Fixes
+
+- *(mqtt)* Treat device entries of one name as one Sparkplug device
+- *(mqtt)* Convert integral floats and narrow unsigned Sparkplug values exactly
+- *(mqtt)* Subscribe each Sparkplug node with all its devices so seq is complete
+- *(mqtt)* Revive a Sparkplug target whose data proves a missed birth
+- *(mqtt)* Make refused subscriptions format-aware under sparkplug_b
+- *(mqtt)* Browse asks a rebirth only of the nodes the input addresses
+- *(mqtt)* Revive a dead Sparkplug node on a DBIRTH and keep null metrics kindless
+- *(mqtt)* Queue one Sparkplug rebirth request per node
+- *(mqtt)* List device-only Sparkplug nodes in browse and skip refused nodes in probe
+
+### 🚜 Refactor
+
+- *(mqtt)* Simplify the Sparkplug metric decoder and its test encoder
+
+### 📚 Documentation
+
+- *(mqtt)* Plan 2 of the mqtt driver, Sparkplug B
+- *(plans)* Tick Task 1 of the Sparkplug B plan
+- *(plans)* Tick Task 2 of the Sparkplug B plan
+- *(plans)* Tick Task 3 of the Sparkplug B plan
+- *(plans)* Tick Task 4 of the Sparkplug B plan
+- *(plans)* Tick Task 5 of the Sparkplug B plan
+- *(mqtt)* Document Sparkplug B, its example and end-to-end test
+- *(mqtt)* State the Sparkplug float to integer rule and the alias and NDEATH details
+- *(plans)* Tick Task 6 steps of the Sparkplug B plan
+- *(plans)* Close the Sparkplug B plan of the mqtt driver
+- *(mqtt)* Rewrap the refused subscriptions paragraph
+- *(mqtt)* Document the DBIRTH missed birth and record the Sparkplug follow-up
+- *(mqtt)* Reword the rebirth clock comment, the DBIRTH rebirth trigger and the R13 reversal
+
+### 🧪 Testing
+
+- *(mqtt)* Make the Sparkplug rebirth rate-limit test able to fail
+- *(mqtt)* Restore the json reload case of a topic dropped while its device stays
+- *(e2e)* Wait for the Sparkplug input's own node filter
+
+## [0.5.1] - 2026-11-17
+
+### 🐛 Bug Fixes
+
+- *(mqtt)* Refuse a JSON null for string and boolean connection fields and an empty broker port
+- *(mqtt)* Read plain text numbers by the JSON number grammar and refuse a float32 underflow
+- *(mqtt)* Keep the connection when the broker refuses a subscription
+- *(mqtt)* Refuse two mqtt inputs with one client id on one broker
+- *(mqtt)* Warn when connections keep dropping right after connecting
+- *(mqtt)* Show in probe why a point has no good sample and mark the leaves browse drops
+- *(mqtt)* Prefer the broker's answer when it and the end of the context are both ready
+- *(mqtt)* Keep in the subscription set a refused topic the previous set held
+- *(mqtt)* Count a connection that ends on a failed SUBSCRIBE or UNSUBSCRIBE as a short one
+
+### 🚜 Refactor
+
+- *(mqtt)* Inject the backoff jitter and the trace observer at construction
+
+### 📚 Documentation
+
+- *(mqtt)* Document the closed known limits of the mqtt driver
+- *(mqtt)* Say that config validate compares explicit client ids only
+- *(plans)* Record the cmd test waits after the review fixes
+- *(mqtt)* Say browse counts --duration from the accepted subscription
+
+### 🧪 Testing
+
+- *(mqtt)* Drop the two trailing tracker calls that asserted nothing
+- *(mqtt)* Warm up and wait for the acknowledgements before the reconnection in the refused subscription test
+- *(cli)* Time the mqtt browse tests from the subscription and give probe a margin
+- *(cli)* Give the log scan's traffic loop its own deadline for slow Windows runners
+
+## [0.5.0] - 2026-11-16
+
+### 🚀 Features
+
+- *(mqtt)* Parse the connection and point addresses
+- *(mqtt)* Decode JSON and plain payloads into samples
+- *(input)* Let a driver report a device dead at once
+- *(mqtt)* Track device availability topics
+- *(mqtt)* Connect through paho behind a client interface
+- *(mqtt)* Run the input: subscribe, decode, keep devices alive
+- *(mqtt)* Probe and browse a broker
+
+### 🐛 Bug Fixes
+
+- *(mqtt)* Renew the devices when the connection is lost
+- *(mqtt)* Refuse implausible payload timestamps
+- *(mqtt)* Refuse availability and override topics that do not match the points
+- *(mqtt)* Keep the subscription set across rollbacks
+- *(mqtt)* Acknowledge a message only after the router handled it
+
+### 💼 Other
+
+- *(deps)* Bump laraedge-sdk to v0.1.2
+- *(deps)* Add paho.mqtt.golang (BSD-3-Clause) and mochi-mqtt (MIT, test only)
+
+### 📚 Documentation
+
+- *(specs)* Design the mqtt input driver
+- *(plans)* Plan the mqtt driver with JSON and plain payloads
+- *(plans)* Tick Task 1 of the mqtt plan
+- *(plans)* Tick Task 2 of the mqtt plan
+- *(plans)* Tick Task 3 of the mqtt plan
+- *(plans)* Tick Task 4 of the mqtt plan
+- *(plans)* Tick Task 5 of the mqtt plan
+- *(plans)* Tick Task 6 of the mqtt plan
+- Document the mqtt driver
+- *(plans)* Close the mqtt JSON plan
+- Correct the mqtt read error series, add R11, sort the browse example
+- *(mqtt)* Browse lists the leaves sorted
+- *(mqtt)* Record the final review fixes and amend Q7
+
+### 🧪 Testing
+
+- *(e2e)* Run the mqtt input against a broker
+- *(mqtt)* Wait for the broker to record the acknowledgement
+- *(cli)* Ignore the temporary directory when checking config validate echoes no values
+
+## [0.4.0] - 2026-11-04
+
+### 🚀 Features
+
+- *(clock)* Fake.BlockUntil, a negative Advance is a no-op, firing order pinned
+- *(opcua)* Browse shows the status of a child it could not expand
+- *(browse)* Say so when the start node has nothing below it
+- *(browse)* A plugin node with nothing below it prints the same note
+
+### 🐛 Bug Fixes
+
+- *(cmd)* Extra argument, help, -- and oversize status answers
+- *(cmd)* Check the HTTP status before the status answer size; pin -- at command level
+- *(model)* Copy birth signals, normalise -0, refuse non-UTF-8 plugin strings, pin the uuid counter
+- *(buffer)* Ack inside a cut region, pin one rotation under a lasting floor breach, document the recount limit
+- *(output)* Max_wait runs from the append of the first record waiting
+- *(output)* Count failed settlements, close idle connections, tolerate a foreign default transport
+- *(status,pipeline)* Rate-limited refusal warning, server timeouts, token compare, uptime
+- *(pipeline,status)* Flush the router's refusal summary, keyed by kind; lograte tests; sturdier scan tests
+- *(config,transform)* Natural message order, heartbeat after a clock step, transform minors
+- *(config,transform)* Clamp deadlines at a backward clock step, order unknown transform names
+- *(supervisor)* Wait for an abandoned start before restarting its input; t.Fatal only on the test goroutine
+- *(provider)* Poll less often while the backend answers an attempted or older version
+- *(simulated)* Stop emitting once cancelled; refuse an oversize scenario_file at the check
+- *(supervisor)* Wait for every abandoned start of an input, once; docs placement
+- *(supervisor)* Count only the abandoned starts still running in the wait warning
+- *(modbus,opcua)* Name an unknown connection key only when it is safe
+- *(opcua)* Sweep stale own temporaries, refuse a wide key mode, check the trusted file
+- *(opcua)* Ignore implausible timestamps, name ExpandedNodeId data types
+- *(opcua)* Browse names a refusal with the standard status spelling
+- *(opcua)* Sweep plain own temporaries once per PKI directory
+- *(opcua)* Claim a stale own temporary by rename instead of a process-wide guard
+- *(opcua)* Remove a claimed own temporary without following a symlink
+- *(opcua)* Read the claimed directory's identity before the rename
+- *(buffer,output,provider)* Ack at the end of a cut segment, count a failed confirm, reword the stale warning
+- *(opcua)* On Windows, wait for renames in flight before a claim is removed
+- *(opcua)* Settle a long claimed path, wait up to a second, name Linux mount points
+
+### 🚜 Refactor
+
+- *(backoff)* One exponential-jitter backoff for drivers and outputs
+- *(docrules)* One UnknownKey refusal for the modbus and opcua connections
+- *(config)* Split the builder out of config.go
+- *(supervisor)* Move the plugin code to plugins.go
+- *(opcua)* Split dial and subscribe out of session.go and driver.go
+
+### 📚 Documentation
+
+- *(plans)* Plan for the deferred minors cleanup
+- *(buffer)* Ack re-reads the acknowledged frames by design
+- *(configuration)* Reflow the serial port paragraph
+- *(spec)* D6, the serial port is exclusive on Windows only
+- *(plans)* Close the deferred minors cleanup plan
+
+### 🧪 Testing
+
+- *(clock)* Make BlockUntil wake test real, tighten assertions
+- Wait on BlockUntil and bounded polls instead of Gosched spins
+- Restore the advanceUntil deadline, guard the busyWait gap
+- *(output)* Discriminating max_wait check; document UnsealedAge bounds and the client's own transport
+- *(supervisor,cmd)* Count timers above the router flush loop; drop time from the log scan
+- *(plugin)* Wait for the SIGSTOP and for the counted health failure before going on
+- *(plugin,supervisor)* Share the stopped-process wait; wait for SIGSTOP in the supervisor stop test
+- *(modbus)* Unify the type-area message style, rename an area test, add connection refusals
+- *(modbus)* Safe dial-end signal, assert every point type size; rewrap a doc line
+- *(opcua)* The key mode check is Unix only
+- *(cmd)* Time the uptime test from the status token lookup, not the watchdog's
+- *(opcua)* Swap the claimed directory by moving it aside, not deleting it
+- *(plugin)* Await Start's result after Stop instead of polling it
+- *(cmd)* Send the uptime test's status request through httpGet with a bearer option
+
+### ⚙️ Miscellaneous Tasks
+
+- *(modbus)* One point-type table, serial open error texts, test hygiene and diagnostics
+- *(opcuatest)* Remove the unused Server.Drop
+
+## [0.3.0] - 2026-11-02
+
+### 🚀 Features
+
+- *(plugin)* A processor stream opens with the current state of its observed devices
+- *(output)* A plugin output in backoff tries again when its plugin is back
+- *(plugin)* Run_dir and a private fallback keep plugin sockets within the Unix limit
+
+### 🐛 Bug Fixes
+
+- *(plugin)* Processor state review fixes: shared router lock, dead devices, lost state records counted
+- *(output)* Wake and loop test review fixes
+- *(plugin)* Socket fallback review fixes: /tmp when the temp dir is deep, umask-proof root, cleanup asserted
+- *(config)* Refuse duplicate observed devices; one clock offset decision; validation cleanup
+
+### 📚 Documentation
+
+- *(plans)* Plan for processor state on stream open, output wake and socket directory
+- *(plans)* Map every deferred minor of plan 3 to a task
+- Repair the socket troubleshooting rows and rewrap the socket subsection
+- Socket rows tell the first apply from a restart; processor_dropped_total across an outage
+- *(plans)* Close the processor state, output wake and socket directory plan
+- The superseded-copies note belongs to processor_dropped_total, not refused
+
+### 🧪 Testing
+
+- *(config)* Each layer refuses a device observed twice; metrics help names failed outputs
+- Deterministic waits and the assertions plan 3 deferred
+- *(supervisor)* WaitFor sleeps 1 ms between polls; restartClock notes what it mirrors
+- Fix two Windows-only test failures
+
+## [0.2.0] - 2026-10-31
+
+### 🚀 Features
+
+- *(config)* Processors section and plugin output config, SDK v0.1.1
+- *(plugin)* Validate processors and plugin outputs offline against their manifests
+- *(plugin)* Plugin output sender over the Output service
+- *(plugin)* Processor adapter over the Process stream
+- *(plugin)* Synchronous Configure of a plugin output at apply
+- *(supervisor)* Run processors and plugin outputs by difference
+- *(status)* Processors and plugin outputs in /status and /metrics
+
+### 🐛 Bug Fixes
+
+- *(supervisor)* Offer the first births of observed devices to processors
+- *(plugin)* Count the copy a failed processor Send loses as dropped
+- *(schema)* Refuse url and token on plugin outputs
+
+### 🚜 Refactor
+
+- *(output)* One delivery loop behind a Sender
+- *(plugin)* Processor converts derived samples with sampleFromWire
+
+### 📚 Documentation
+
+- *(plans)* Plugin processors and outputs plan approved
+- *(plans)* Plan 3 task 1 done
+- *(plans)* Plan 3 task 2 done
+- *(plans)* Plan 3 task 3 done
+- *(plans)* Plan 3 task 4 done
+- *(plans)* Plan 3 task 5 done
+- *(supervisor)* Processors and plugin outputs in the apply and lock order notes
+- *(plans)* Plan 3 task 6 done
+- Processors, plugin outputs and the plugin-line example
+- *(plans)* Plan 3 task 7 steps 1-2 done
+- Processor outages shorter than death_tolerance, births and refused keys
+- *(plans)* Close plan 3, plugin processors and outputs
+
+### 🧪 Testing
+
+- *(e2e)* Plugin processor and output with the SDK examples
+
+### ⚙️ Miscellaneous Tasks
+
+- Publish a GitHub Release with the binaries on every version tag
+
 ## [0.1.0] - 2026-10-29
 
 ### 🚀 Features
