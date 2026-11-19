@@ -43,7 +43,7 @@ laraplate-edge config validate config.yaml
 | Key | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | yes | | input id |
-| `driver` | yes | | `simulated`, `modbus`, `opcua`, `mqtt`, `file` or `plugin:<id>` in this build. The schema also knows `serial`. |
+| `driver` | yes | | `simulated`, `modbus`, `opcua`, `mqtt`, `file`, `serial` or `plugin:<id>` in this build. |
 | `connection` | no | `{}` | driver settings, an object the schema does not interpret (see the secret rule below) |
 | `death_tolerance` | no | `30s` | how long without a successful read before the input reports its devices dead; `birth` follows at the next successful read |
 | `devices` | yes | | at least one device |
@@ -1129,6 +1129,158 @@ allocate more than a bounded multiple of its own size.
 - The automated tests use files written to temporary directories, never a real measuring machine or share: try
   a new export with `probe` and `browse` before relying on it.
 
+### The `serial` driver
+
+Opens one serial port (a gauge, a caliper behind a Digimatic-to-RS-232 cable, a multiplexer, a bench instrument, a
+barcode reader set to serial mode), cuts the byte stream into frames and turns each frame into a sample of the
+point it belongs to. A barcode scanned at the station (the serial of the part, the order) becomes the context of
+the measurements that follow on the same port. The driver writes to the instrument only the `requests` of the
+document. `examples/serial` is a complete document; [USAGE.md](USAGE.md#serial-ports) describes the `probe` and
+`browse` commands that go with it. USB keyboard-wedge (HID) readers are not supported: set the reader to serial
+mode (see USAGE.md). A frame is text: binary protocols and checksums are not read.
+
+An input opens one port. Several instruments on one port (a multiplexer) are several devices of the input, or
+several points of one device; a port belongs to one input, so two inputs naming the same port are not possible
+at once (the second finds it busy).
+
+**Connection.** An unknown field in `connection`, `framing`, `context` or `requests` is an error, named with its
+path (`connection.<key>: unknown field`). Every error of the driver names the field and never repeats a value,
+a frame or a context value. The line settings keep the names and rules of `modbus` `rtu`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `device` | | required: the port. `/dev/ttyUSB0`, `/dev/serial/by-id/...` (recommended on Linux: it stays the same across replugging) or `COM4` |
+| `baud` | | required: a positive integer |
+| `data_bits` | `8` | 5 to 8 |
+| `parity` | `none` | `none`, `even` or `odd` |
+| `stop_bits` | `1` | 1 or 2 |
+| `framing` | `{terminator: "\r"}` | where a frame ends (see "Framing") |
+| `max_frame` | `1024` | the longest frame, in bytes, from 1 to 65536; a longer one is dropped, read error `frame_too_long` |
+| `encoding` | `utf-8` | `utf-8`, `windows-1252` or `iso-8859-1`, as for `file` |
+| `context` | none | a list of rules `{key, match, group}` (see "Routing and context") |
+| `context_ttl` | none | a positive duration; a context key older than this is dropped. Without it a key lasts until it is set again |
+| `requests` | none | a list of `{command, every}` (see "Requests") |
+| `request_timeout` | `1s` | with `requests`: how long an answer is awaited before the next command may be sent |
+
+JSON and YAML escapes (`"\r"`, `"\n"`, `"\u0002"`) write control characters in `framing` and `requests`; the
+driver has no escape syntax of its own.
+
+`read` is `event` only (`subscribe` and `poll` are refused). `type` is required. `address` is a regular
+expression and is required.
+
+**Framing.** `connection.framing` has exactly one of `terminator`, `length` and `gap`, and an optional `start`:
+
+| Key | Meaning |
+|---|---|
+| `terminator` | a string of 1 to 4 bytes that ends a frame and is not part of it: `"\r"`, `"\r\n"`, `"\u0003"` |
+| `length` | a frame is exactly this many bytes, from 1 to `max_frame` |
+| `gap` | a frame ends after this much silence on the line, at least `20ms`; for an instrument with neither terminator nor fixed length |
+| `start` | with any of the three: one character that begins a frame (`"\u0002"`); the bytes before it are discarded and the character itself is not part of the frame |
+
+- Before routing, CR, LF and NUL around a frame are removed, so a `"\r"` terminator also reads lines ended by
+  `"\r\n"`: every frame is read once and no `"\n"` leads the next value. An empty frame is ignored without a
+  count. The text is then decoded from `encoding`; a frame that is not valid there is dropped (`decode`) and the
+  next one is read normally.
+- With `terminator` or `length`, the bytes of an unfinished frame are dropped (`incomplete_frame`) when nothing
+  more has arrived for 2 s after the last byte, so a half frame left by a cable pulled in mid-message is never
+  joined to the next one. The wait counts from the last byte, not the first, so a slow line (300 baud) may take
+  longer than 2 s to deliver a long frame and still completes it. With `gap` the silence itself ends the frame
+  and this rule does not apply.
+- A frame longer than `max_frame` is dropped (`frame_too_long`) and the reader resynchronises at the next
+  terminator, start character or silence. The framer keeps at most `max_frame`, plus the length of the
+  terminator, plus 2 bytes in memory: a frame of exactly `max_frame` bytes followed by more than two trailing
+  CR, LF or NUL bytes (a gauge that sends `"\r\n\r\n"` after each value) is counted `frame_too_long`. Raise
+  `max_frame` for such an instrument.
+- When the port is lost, what is held in the reader is dropped without a count.
+
+**Routing and context.** Each frame is tried against the `context` rules, in order, then against the points in
+document order across the devices of the input. The first match takes the frame; it is offered to nothing else.
+
+- A **context rule** has `key` (`serial`, `order_ref`, `operation_ref` or `lot`, each at most once),
+  `match` (a regular expression, Go RE2 syntax) and `group` (the capture group that holds the value: `1` by
+  default, `0` for the whole match). A frame that matches sets that key and gives no sample. A match with an empty
+  value clears the key. A `group` the expression does not have is refused.
+- A key keeps its value until a new frame sets it again, or until `context_ttl` passes since it was set; keys are
+  independent. Every sample of the input carries the keys in force **when its frame was read**, never at the
+  time it was routed: a later scan never changes a sample already read, and a measurement read just before the
+  scan of the next part still belongs to the previous one. To make this exact the driver remembers the
+  current value of each key and the one before it, so a frame older than two scans of the same key finds no value
+  for it. The context is kept in memory only: a restart or a reload starts with none (logged at `info` when
+  the input had one). Losing the port does not clear it, so a cable pushed back in does not lose the part;
+  `context_ttl` is the guard against a stale one. Set `context_ttl` to a little more than the longest time a part
+  stays at the station: too short loses the part under measurement, too long (or none) attaches a measurement to
+  the part before it when an operator skips a scan.
+- A change of a context key is logged at `info` with the key and its new value; this is the one place a context
+  value reaches a log. Unmatched frames are logged at `debug` only, quoted, truncated to 80 bytes and
+  rate-limited.
+- A **point**'s `address` is a regular expression; the first capture group, if the expression has one, is the
+  value text, otherwise the whole frame. An expression that needs more groups uses non-capturing ones
+  (`(?:...)`). The text is converted to the point's `type` with the rules of the `mqtt` plain payloads (see
+  "Conversion to the point's `type`" under the `mqtt` driver): lossless, or the sample is `bad` and the read
+  error is `conversion`. Transforms follow as usual. Two points with the same address are allowed but the second
+  never receives a frame: it is logged at `warn` when the document is applied.
+- A frame that no rule and no point matches gives no sample and counts `unmatched`.
+- The time of a sample is the agent's clock when the last byte of its frame was read: instruments on a serial
+  line do not send a time. A sample takes the priority of its point, as for `file`.
+
+**Requests.** For an instrument that answers only when asked, `requests` lists commands sent at fixed intervals:
+
+```yaml
+requests:
+  - {command: "?\r", every: 1s}     # a single gauge asked once a second
+  - {command: "01\r", every: 5s}    # channels of a multiplexer
+  - {command: "02\r", every: 5s}
+```
+
+- `command` is 1 to 64 bytes and `every` at least `100ms`. A command is a read request, as a Modbus read is.
+- Commands go one at a time: after a command the driver waits for a frame or for `request_timeout`, so the
+  instrument never sees a queue. When several are due, the one due earliest goes first, ties in document order.
+  A command whose turn passes while another waits is sent once, late, not twice, and a channel that never answers
+  does not stop the others: they are still asked every cycle.
+- A command that gets no frame within `request_timeout` counts `no_response`; a frame that arrives later is still
+  routed. The driver does not pair answers with commands: the routing above tells them apart (a multiplexer
+  prefixes the channel), as it does for a frame sent unsolicited.
+- Requests start once the port is open and stop when it is lost.
+
+**Opening the port.** `Start` returns at once; the port is opened in the background with a backoff, so a USB
+adapter plugged in later, or a port a reloaded instance still holds, is opened when it becomes free and is
+never a failing start. A failure counts `open`; the log says whether the port is missing, busy or refused by
+permission (on Linux it names the `dialout` group), once per cause until the port opens. The port is exclusive:
+on Windows by the system, on Linux the driver takes it with `TIOCEXCL`, so a second program (or `probe`, while
+the agent runs) gets "port busy" instead of interleaved frames. A read or write error (an adapter unplugged)
+closes the port, counts `port_lost` and goes back to opening.
+
+**Death and birth.** While the port is open every device of the input is renewed on every read cycle, whether
+frames arrive or not, so silence never kills one: a gauge may send nothing for hours. With `requests` it is
+renewed on every frame instead, so an instrument that is asked and never answers is gone. After
+`death_tolerance` with the port not open, or, with `requests`, without any frame, every device of the input is
+reported dead, and the next open (or the next frame) is their birth. The context survives a death. A half
+frame is never carried across a reopening.
+
+**Read errors** (`/status` and `laraplate_edge_input_read_errors_total{input,kind}`):
+
+| Kind | Meaning |
+|---|---|
+| `open` | the port could not be opened: missing, busy or no permission |
+| `port_lost` | a read or write failed on an open port |
+| `frame_too_long` | a frame above `max_frame` was dropped (also the case of the buffer cap above) |
+| `incomplete_frame` | the bytes of an unfinished frame were dropped after 2 s of silence |
+| `decode` | a frame is not valid in `encoding` |
+| `unmatched` | a frame matched no context rule and no point |
+| `conversion` | the captured text does not convert to the point's `type`: a `bad` sample |
+| `no_response` | a request got no frame within `request_timeout` |
+
+`laraplate_edge_input_connected{input}` follows whether the port is open.
+
+**Declared limits.**
+
+- Keyboard-wedge (HID) readers, binary frames and checksums, a context shared between inputs, a context kept
+  across restarts, pairing answers with requests and writing anything but the configured requests are not built.
+  There is no regular-expression framing: a regular expression over a stream cannot tell where a frame ends, so it
+  selects frames (the `address` of a point) instead of cutting them.
+- The automated tests use a pseudo-terminal on Linux and a fake port, never a real instrument; a real COM port is
+  not exercised on Windows. Try a new instrument with `probe` before relying on it.
+
 ## Transforms
 
 A point's `transforms` is a chain of steps applied, in order, to every sample the driver reads, before
@@ -1590,7 +1742,7 @@ Outcomes, as reported to Laraplate:
 
 | Part | Comes with |
 |---|---|
-| drivers other than `simulated`, `modbus`, `opcua`, `mqtt` and `file` | the driver plan of `serial` |
+| drivers other than `simulated`, `modbus`, `opcua`, `mqtt`, `file`, `serial` and `plugin:<id>` | none planned: the catalogue of built-in drivers is complete |
 | output types other than `laraplate-http` and `plugin:<id>` | the MQTT output plan (`laraplate-mqtt`) |
 | `derived` signals and their `transforms` | the CEL expressions plan (design section 7.3) |
 | `secret://keystore/...` references, `outputs[].config` and `processors[].config` included | a later plan with the OS keystore |
@@ -1661,8 +1813,8 @@ is exact, but its `ts` range can span records that are still in the buffer.
 
 - The `opcua` driver is tested against the Go library's own server only, and a panic of the library in one of its goroutines stops the agent: see "Declared limits" under the `opcua` driver.
 - A real serial port is not exercised by the automated tests: the `modbus` `rtu` transport is covered
-  through a fake client, and the RTU framing through `rtuovertcp` against a test server. Try a new serial
-  line with `probe` before relying on it.
+  through a fake client, and the RTU framing through `rtuovertcp` against a test server; the `serial` driver is
+  covered on a fake port and, on Linux, a pseudo-terminal. Try a new serial line with `probe` before relying on it.
 - On `modbus` `rtu` and `rtuovertcp`, an answer that arrives after `timeout` stays on the line and is read
   by the next request; when that request goes to the same unit with the same function and length, the
   late values are taken as its answer and nothing detects it. Keep `timeout` above the slowest unit's

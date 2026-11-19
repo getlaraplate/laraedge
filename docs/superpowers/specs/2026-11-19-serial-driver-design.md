@@ -1,6 +1,6 @@
 # Serial driver: design
 
-**Status:** Approved (2026-11-19). One plan, not yet written.
+**Status:** Approved (2026-11-19). Delivered 2026-11-19 by `../plans/2026-11-19-serial.md`; the spec is complete.
 
 **Date:** 2026-11-19
 
@@ -52,7 +52,7 @@ amd64, arm64 and armv7 and on Windows.
 
 | | Approach | Trade-off |
 |---|---|---|
-| **A (chosen)** | **`go.bug.st/serial`** (BSD-3-Clause; brings `github.com/creack/goselect`, BSD-3-Clause, and `golang.org/x/sys`, already direct) | Maintained, widely used (the Arduino CLI). Lists the ports with USB VID, PID and serial number on Linux and Windows without CGO (its enumerator needs CGO only on macOS, which has no production support), so `browse` can say which COM port is the instrument. Read timeouts per port. A new direct dependency. |
+| **A (chosen)** | **`go.bug.st/serial`** (BSD-3-Clause; brings `golang.org/x/sys`, already direct; v1.8.0 no longer brings `github.com/creack/goselect`, see the amendment below) | Maintained, widely used (the Arduino CLI). Lists the ports with USB VID, PID and serial number on Linux and Windows without CGO (its enumerator needs CGO only on macOS, which has no production support), so `browse` can say which COM port is the instrument. Read timeouts per port. A new direct dependency. |
 | B | `github.com/goburrow/serial` (MIT), already in the module graph through `modbus` | No new dependency, but unmaintained since 2017 and no port listing: `browse` would scan `/dev` and the Windows registry by hand, platform code of our own. |
 | C | Our own layer on `golang.org/x/sys` (termios, the Windows DCB) | No dependency, every line of platform code ours to keep, on armv7 and Windows where such bugs hide best. |
 
@@ -86,7 +86,7 @@ This reverses the parent's HID line; the parent's `serial` row is amended to poi
 | S9 | Death | The port not open beyond `death_tolerance`. Silence never kills a device, since a gauge may send nothing for hours; the exception is an input with `requests`, where no frame at all for `death_tolerance` is death too (an instrument that is asked and never answers is gone). |
 | S10 | Timestamp | The agent's clock when the frame's last byte was read. Instruments on a serial line do not send a time. |
 | S11 | Read | `event` only; `poll` and `subscribe` refuse the document (requests are an input setting, S7). `type` is required. |
-| S12 | Dependencies | `go.bug.st/serial` and its `creack/goselect`, new; `golang.org/x/text/encoding/charmap`, already direct since `file`. No other. |
+| S12 | Dependencies | `go.bug.st/serial`, new (its `creack/goselect` is gone as of v1.8.0, amended 2026-11-19 by `../plans/2026-11-19-serial.md`, R1); `golang.org/x/text/encoding/charmap`, already direct since `file`. No other. |
 
 ## 4. Connection
 
@@ -129,7 +129,7 @@ Rules:
 - With `terminator` or `length`, bytes of an unfinished frame are dropped, kind `incomplete_frame`, when nothing
   more has arrived for `2s` after the last byte, so a half frame from a cable pulled mid-message is never joined to
   the next. The timer counts from the last byte, not the first: a slow line (300 baud) may take longer than `2s` to
-  deliver a long frame and still completes it; a line that keeps sending noise is bounded by `max_frame` instead.
+  deliver a long frame and still completes it; a line that keeps sending noise is bounded by `max_frame` instead. (Amended 2026-11-19 by `../plans/2026-11-19-serial.md`: the bound is a buffer of `max_frame` plus the terminator plus 2 bytes, so a frame of exactly `max_frame` bytes followed by more than two trailing CR, LF or NUL bytes counts `frame_too_long`; the documentation advises raising `max_frame` for such an instrument.)
   With `gap` the silence itself ends the frame, so this rule does not apply.
 - A frame that does not decode in `encoding` is dropped, kind `decode`.
 - When the port is lost, what is in the reader is dropped without a count.
@@ -177,7 +177,7 @@ across the devices of the input. The first match takes it; the frame is offered 
 `match` is a regular expression (Go RE2 syntax); `group` picks the capture group holding the value, default `1`,
 `0` for the whole match. A match with an empty value clears that key. From then on every sample of the input
 carries the input's current context; a key set at time t applies to frames whose last byte was read after t. The
-sample carries the context as it was when its frame was read, so a later scan never changes samples already made.
+sample carries the context as it was when its frame was read, so a later scan never changes samples already made. (Amended 2026-11-19 by `../plans/2026-11-19-serial.md`: the router keeps the current and the previous value of each key, so a frame older than two scans of the same key finds no value for it.)
 
 **Points.** `address` is a regular expression; the first capture group, if the expression has any, is the value
 text, else the whole frame. The text is converted to the point's `type` with the rules of the `mqtt` plain payloads
@@ -220,18 +220,18 @@ the next open (or frame) is their birth. `laraplate_edge_input_connected{input}`
 **Exclusive use.** The port is exclusive on Windows; on Linux the driver asks for exclusive use where the library
 offers it, so a second program (or `probe` while the agent runs) gets a clear "port busy" instead of interleaved
 frames. If the library does not offer it on Linux, the plan records that and the documentation keeps the advice of
-`modbus` `rtu`: stop the input before probing its port.
+`modbus` `rtu`: stop the input before probing its port. (Amended 2026-11-19 by `../plans/2026-11-19-serial.md`, R1: v1.8.0 of the library offers it, with `TIOCEXCL` on open on Linux and the BSDs, so a second non-root open fails with "busy"; the advice to stop the input before probing stays, since the port is exclusive.)
 
 ## 9. Commands and metrics
 
-**`probe <input> [--wait 10s]`:** opens the port, sends the configured requests, and for up to `--wait` (or until
-every point has a value) shows each point's value, type, quality and time, or `no frame`; then the context it would
+**`probe <input>`:** opens the port, sends the configured requests, and for up to 30 s, the time limit of every `probe`
+(or until every point has a value) shows each point's value, type, quality and time, or `no frame`; then the context it would
 set, and up to ten unmatched frames quoted, so a technician can write the expressions. It never sends anything but
-the configured requests, and if the port is busy it says so and that the input may be running.
+the configured requests, and if the port is busy it says so and that the input may be running. (Amended 2026-11-19 by `../plans/2026-11-19-serial.md`, R3: there is no `--wait`, the agent's own 30 s limit applies, as for `mqtt`, and a point that stays silent, a duplicate address included, makes the probe wait all of it. R4: the context and the unmatched frames are printed through the optional `probeNoter` interface of `cmd/laraplate-edge/probe.go`.)
 
-**`browse [<input>]`:** lists the serial ports of the machine with, where known, the USB VID and PID, the product
-and the serial number, and on Linux the stable `/dev/serial/by-id/` path for each. With an input, its configured
-`device` is marked, or reported missing.
+**`browse <input>`:** lists the serial ports of the machine with, where known, the USB VID and PID, the product
+and the serial number, and on Linux the stable `/dev/serial/by-id/` path for each. Its configured
+`device` is marked, or reported missing. (Amended 2026-11-19 by `../plans/2026-11-19-serial.md`, R2: `browse` needs an input, as every `browse` of the agent does; a technician without a document writes a one-input document with any `device`.)
 
 **Metrics:** those of the driver kit, `laraplate_edge_input_connected{input}` and
 `laraplate_edge_input_read_errors_total{input,kind}` with the kinds `open`, `port_lost`, `frame_too_long`,

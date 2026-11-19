@@ -1,0 +1,63 @@
+# Configuration document of the serial demo: a measuring station with a
+# multiplexer that reads two gauges (channels 01 and 02) and a barcode reader
+# set to USB-CDC mode on the same port, sent to a Laraplate running on this
+# machine. The token is read from the environment of the agent: export
+# LARAPLATE_EDGE_TOKEN before running it.
+#
+# Change `device` to your port. On Linux use the /dev/serial/by-id/ path that
+# `browse` shows: it stays the same when the adapter is plugged in again.
+# The user of the agent needs the `dialout` group (or the group that owns the
+# port) on Linux.
+#
+# Check the document offline, find the port, then see what the instrument sends.
+# Stop the input before probing: the port is exclusive.
+#   laraplate-edge config validate config.yaml
+#   laraplate-edge browse station --config config.yaml
+#   laraplate-edge probe station --config config.yaml
+# Docs: docs/CONFIGURATION.md, "The serial driver"; docs/USAGE.md, "Serial ports".
+
+schema: laraplate-edge-config/1
+version: 1
+
+inputs:
+  - id: station
+    driver: serial
+    # The port not open for this long is the death of the devices; a quiet
+    # line never is, except with requests, where no frame at all counts too.
+    death_tolerance: 60s
+    connection:
+      device: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A10K8XYZ-if00-port0
+      baud: 9600
+      # data_bits: 8, parity: none, stop_bits: 1 are the defaults.
+      # A frame ends at a carriage return; a gauge that sends "\r\n" is read as
+      # well, the line feed is dropped before routing.
+      framing: {terminator: "\r"}
+      # The multiplexer answers only when asked: one command at a time, so the
+      # instrument never sees a queue.
+      requests:
+        - {command: "01\r", every: 2s}
+        - {command: "02\r", every: 2s}
+      request_timeout: 500ms
+      # The barcode reader sends the serial of the part and the order. They
+      # become the context of the measurements that follow, until a new scan
+      # or until context_ttl: set it a little above the longest time a part
+      # stays at the station.
+      context:
+        - {key: serial, match: '^SN(\w+)$'}
+        - {key: order_ref, match: '^PO-(\d{4}-\d+)$'}
+      context_ttl: 10m
+    devices:
+      - device: gauge-bore
+        points:
+          # The address is a regular expression; its first capture group is
+          # the value (the whole frame when it has no group).
+          - {signal: bore_diameter, address: '^01A([+-]?\d+\.\d+)$', type: float64, unit: mm, read: event, priority: critical}
+      - device: gauge-depth
+        points:
+          - {signal: depth, address: '^02A([+-]?\d+\.\d+)$', type: float64, unit: mm, read: event, priority: critical}
+
+outputs:
+  - id: laraplate
+    type: laraplate-http
+    url: http://127.0.0.1:8000
+    token: secret://env/LARAPLATE_EDGE_TOKEN
