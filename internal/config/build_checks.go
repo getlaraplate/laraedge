@@ -1,8 +1,9 @@
-// This file holds the cross-document checks (unique ids and signals) and the secret-key helpers.
+// This file holds the cross-document checks (unique ids, signals and serial ports) and the secret-key helpers.
 
 package config
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 )
@@ -59,6 +60,31 @@ func (b *builder) uniqueSignals(doc Document) {
 				see(key{dev.Device, dv.Signal}, dp.key("derived").index(k).key("signal"))
 			}
 		}
+	}
+}
+
+// uniqueSerialPorts refuses two serial inputs naming the same
+// connection.device: a port belongs to one input. The names are compared as
+// written; two paths of one port (a by-id link and its target) are not
+// resolved. On Linux the driver also takes the port with TIOCEXCL, which root
+// ignores, so this check is what keeps two inputs off one port there.
+func (b *builder) uniqueSerialPorts(doc Document) {
+	first := map[string]int{}
+	for i, in := range doc.Inputs {
+		if in.Driver != DriverSerial {
+			continue
+		}
+		var conn struct {
+			Device string `json:"device"`
+		}
+		if json.Unmarshal(in.Connection, &conn) != nil || conn.Device == "" {
+			continue
+		}
+		if j, dup := first[conn.Device]; dup {
+			b.add(path{"inputs"}.index(i).key("connection").key("device"), "the same port as "+path{"inputs"}.index(j).String())
+			continue
+		}
+		first[conn.Device] = i
 	}
 }
 

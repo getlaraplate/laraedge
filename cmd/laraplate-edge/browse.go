@@ -20,6 +20,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/input/file"
 	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/input/opcua"
+	"github.com/getlaraplate/laraedge/internal/input/serial"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/plugin"
 	"github.com/getlaraplate/laraedge/internal/secrets"
@@ -79,6 +80,18 @@ func runBrowse(args []string, stdout, stderr io.Writer) int {
 		}
 
 		return browseFile(doc, boot, cfg, *configFile, *bootstrapPath, *limit, stdout, stderr)
+	}
+	if found && cfg.Driver == config.DriverSerial {
+		if given["node"] || given["depth"] || given["filter"] || given["duration"] || given["limit"] {
+			fmt.Fprintf(stderr, "%s%s\n", prefix, errSerialBrowseFlags)
+			return exitUsage
+		}
+		if err := serial.Browse(cfg, stdout, serial.ListPorts); err != nil {
+			fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+			return exitFailure
+		}
+
+		return exitOK
 	}
 	if given["limit"] {
 		fmt.Fprintf(stderr, "%s%s\n", prefix, errNotFileBrowseLimit)
@@ -190,6 +203,7 @@ const (
 	errMQTTBrowseFlags    = "--node and --depth are for OPC UA and plugin inputs, not for an mqtt input"
 	errOtherBrowseFlags   = "--filter and --duration are for mqtt inputs only"
 	errFileBrowseFlags    = "--node, --depth, --filter and --duration do not apply to a file input; it takes --limit"
+	errSerialBrowseFlags  = "--node, --depth, --filter, --duration and --limit do not apply to a serial input; it lists the host's ports"
 	errNotFileBrowseLimit = "--limit is for file inputs only"
 )
 

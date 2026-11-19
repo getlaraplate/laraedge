@@ -150,3 +150,61 @@ func TestConcurrentReports(t *testing.T) {
 		t.Fatalf("the summary does not count the 1599 suppressed failures:\n%s", out)
 	}
 }
+
+// debugLogger logs every level as JSON lines without the time.
+func debugLogger(logs *lockedBuffer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug, ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		if len(groups) == 0 && a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+
+		return a
+	}}))
+}
+
+func TestTheSummaryIsAtLeastWarnByDefault(t *testing.T) {
+	logs := &lockedBuffer{}
+	r := lograte.New(debugLogger(logs), window, "x: "+summary)
+	r.Report(epoch, "a.unmatched", slog.LevelDebug, "x: unmatched")
+	r.Report(epoch, "a.unmatched", slog.LevelDebug, "x: unmatched")
+	r.Flush(epoch.Add(window))
+
+	if out := logs.String(); !strings.Contains(out, `"level":"WARN","msg":"x: `+summary) {
+		t.Fatalf("default summary not at warn:\n%s", out)
+	}
+}
+
+func TestSummaryAtReportedLevelStaysAtDebugForSteadyDebugTraffic(t *testing.T) {
+	logs := &lockedBuffer{}
+	r := lograte.New(debugLogger(logs), window, "x: "+summary, lograte.SummaryAtReportedLevel())
+
+	// Ten reports a second for five windows.
+	for i := range 5 * 60 * 10 {
+		r.Report(epoch.Add(time.Duration(i)*100*time.Millisecond), "a.unmatched", slog.LevelDebug, "x: unmatched")
+	}
+	r.Flush(epoch.Add(5*window + time.Second))
+
+	out := logs.String()
+	if got := strings.Count(out, summary); got < 5 {
+		t.Fatalf("%d summaries over five windows, want at least 5:\n%s", got, out)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if !strings.Contains(line, `"level":"DEBUG"`) {
+			t.Fatalf("a record above debug: %s", line)
+		}
+	}
+}
+
+func TestSummaryAtReportedLevelTakesTheHighestReportedLevel(t *testing.T) {
+	logs := &lockedBuffer{}
+	r := lograte.New(debugLogger(logs), window, "x: "+summary, lograte.SummaryAtReportedLevel())
+	r.Report(epoch, "a.unmatched", slog.LevelDebug, "x: unmatched")
+	r.Report(epoch, "a.unmatched", slog.LevelDebug, "x: unmatched")
+	r.Report(epoch, "b.lost", slog.LevelInfo, "x: lost")
+	r.Report(epoch, "b.lost", slog.LevelInfo, "x: lost")
+	r.Flush(epoch.Add(window))
+
+	if out := logs.String(); !strings.Contains(out, `"level":"INFO","msg":"x: `+summary) {
+		t.Fatalf("summary not at the highest reported level:\n%s", out)
+	}
+}

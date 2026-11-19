@@ -4,7 +4,7 @@ This guide is for whoever builds, installs and runs the agent. The configuration
 outputs, buffer) is described in [CONFIGURATION.md](CONFIGURATION.md). The design is in the stack:
 `docs/superpowers/specs/2026-10-12-laraplate-edge-agent-design.md`.
 
-What this build provides: the `simulated`, `modbus` and `opcua` input drivers, the level-1 transforms of points, the
+What this build provides: the `simulated`, `modbus`, `opcua`, `mqtt`, `file` and `serial` input drivers, the level-1 transforms of points, the
 `laraplate-http` output, plugins (input drivers, processors and outputs served by external processes), the disk
 buffer with loss markers, the `file` and `laraplate` configuration providers, the `probe`, `config test`, `browse`,
 `opcua trust` and `plugin hash` commands, the status endpoint, JSON logs and the systemd watchdog. The other real
@@ -37,7 +37,7 @@ the `User-Agent` header.
 | `config validate <file> [--plugins-dir <path>]` | checks a configuration document with both validation layers (schema and rules, then what this build provides and the type check of every transform chain), and builds every input through its driver without connecting; with `--plugins-dir` (absolute) every plugin binary must also lie inside that directory, as `plugins_dir` does for the agent; relative paths in a `connection` resolve against the file's directory, as with the `file` provider; applies nothing | 0 and `<file>: valid` on stdout, or 1 and one `<file>: <path>: <problem>` line per problem on stderr |
 | `config test <file> --input <samples.jsonl>` | replays recorded samples through the transform chains of a document and writes the resulting samples to stdout; applies nothing (see "Trying transforms") | 0; 1 when the document is invalid, the sample file is unreadable or has a bad line; 2 on a usage error |
 | `probe <input> (--config <file> \| --bootstrap <path>) [--record <file>]` | reads every point of one input once and prints the raw samples, before transforms; never starts an output; an input served by a plugin is probed by starting its plugin for the duration of the probe (see "Trying transforms" and "Running plugins") | 0; 1 when the document is invalid, the input is unknown or the read fails; 2 on a usage error |
-| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>] [--filter <topic filter>] [--duration <d>] [--limit <n>]` | lists the nodes of an OPC UA server, or of a plugin input whose manifest declares `browse`, to find the addresses of points (see "OPC UA servers" and "Running plugins"); for an `mqtt` input, lists the topics a broker publishes in a time window, with the `topic\|path` addresses of JSON leaves (`--filter` and `--duration`; see "MQTT brokers"); for a `file` input, lists the newest files of the watched directory with their state and the addresses of the newest readable one (`--limit`; see "Report files") | 0; 1 when the document is invalid, the input is unknown or none of `opcua`, `mqtt`, `file` and a plugin that supports browse, or the source cannot be browsed; 2 on a usage error |
+| `browse <input> (--config <file> \| --bootstrap <path>) [--node <nodeid>] [--depth <n>] [--filter <topic filter>] [--duration <d>] [--limit <n>]` | lists the nodes of an OPC UA server, or of a plugin input whose manifest declares `browse`, to find the addresses of points (see "OPC UA servers" and "Running plugins"); for an `mqtt` input, lists the topics a broker publishes in a time window, with the `topic\|path` addresses of JSON leaves (`--filter` and `--duration`; see "MQTT brokers"); for a `file` input, lists the newest files of the watched directory with their state and the addresses of the newest readable one (`--limit`; see "Report files"); for a `serial` input, lists the serial ports of the machine and marks the one the input names (no flag; see "Serial ports") | 0; 1 when the document is invalid, the input is unknown or none of `opcua`, `mqtt`, `file`, `serial` and a plugin that supports browse, or the source cannot be browsed; 2 on a usage error |
 | `opcua trust <input> (--config <file> \| --bootstrap <path>) [--thumbprint <hex>]` | shows the certificate an OPC UA server presents and trusts it (see "OPC UA servers") | 0 when trusted or already trusted; 1 when refused, mismatched or on any other failure; 2 on a usage error |
 | `opcua trust --list --bootstrap <path>` | lists the trusted server certificates | 0; 1 when the bootstrap cannot be read, or no certificate could be listed because a file is unreadable; 2 on a usage error |
 | `status [--listen addr]` | prints the `/status` answer of a running agent, indented; `--listen` defaults to `127.0.0.1:9180`; the bearer token, when the endpoint has one, is read from `LARAPLATE_EDGE_STATUS_TOKEN` | 0, or 1 when the agent does not answer |
@@ -232,6 +232,10 @@ response time: 3µs
 - A `file` input is probed by reading the newest stable file that is not in the ledger, once, without emitting,
   moving or recording it; a point without a sample shows `no file`, `missing_field` or the kind of the refused
   file, and a `source: <file>` line names the file read. See "Report files".
+- A `serial` input is probed by opening its port once (stop the input first: the port is exclusive), sending its
+  requests and waiting up to the 30 seconds of the command for a frame on every point. A point with no frame in
+  that time is printed as `no frame` and is not an error; the context the probe saw and up to ten unmatched frames
+  follow the point lines. See "Serial ports".
 - A plugin input (`driver: plugin:<id>`) is probed by starting its plugin, with the hashes checked as at
   every start, configuring the input, reading each point once and stopping the plugin again. The
   plugin resolves the `secret://` values of its `connection` as the agent does. It runs a plugin
@@ -656,6 +660,131 @@ The troubleshooting table has the symptoms of a file that is not read. Some poin
   parts gives one sample per characteristic and part, each with the serial and the order of its own part (set
   them with `K0014/0` and `K0053/0` after each value line). Set `encoding: windows-1252` for exporters on Windows.
 
+## Serial ports
+
+The `serial` driver ([CONFIGURATION.md](CONFIGURATION.md#the-serial-driver)) reads a gauge, a multiplexer, a bench
+instrument or a barcode reader on a serial port, and its points are regular expressions over the frames they
+send. `examples/serial` is a complete document. Two commands help, `probe` and `browse`; each takes the input id
+and the usual two ways to find the document (`--config <file>`, or `--bootstrap <path>`).
+
+### Getting at the port
+
+- **Linux.** The agent's user must be allowed to open the port: on most distributions the group that owns
+  `/dev/ttyUSB0` and `/dev/ttyACM0` is `dialout` (`sudo usermod -aG dialout <user>`, then log in again; for a
+  systemd service, `SupplementaryGroups=dialout` in the unit). Without it the log says "permission denied" and
+  names the group, and `read_errors` `open` grows.
+- **A stable name.** `/dev/ttyUSB0` becomes `/dev/ttyUSB1` when two adapters are plugged in another order. Use the
+  path under `/dev/serial/by-id/`, which carries the vendor, the product and the serial number of the adapter
+  and does not change: `browse` prints it.
+- **Windows.** Use the name of the port, `COM4`; the Device Manager shows which COM port an adapter took.
+- **Barcode readers.** Most USB readers are shipped as a keyboard (HID), which this driver does not read. Nearly
+  all of them can instead present a virtual serial port (USB-CDC, "virtual COM", "serial emulation"): scan the
+  programming barcode for it in the reader's manual, then use `browse` to find the port. Set the suffix of the
+  reader to a carriage return (also a programming barcode) so that each scan is one frame, and check with `probe`.
+- **The port is exclusive.** While the agent runs an input, no other program, `probe` included, can open its
+  port: it gets "port busy". Stop the input (remove it from the document, or stop the agent) before probing it.
+  On Linux this does not hold for root, which the kernel lets past the exclusive lock: run the agent as its own
+  user in `dialout`, not as root. Two `serial` inputs naming the same `device` are refused by
+  `config validate`.
+
+### Finding the port: `browse`
+
+`browse` needs an input, like every `browse` of the agent. Without a document for the machine yet, write one with
+a single input and any `device`; the one below validates (the output is only there because a document needs one):
+
+```yaml
+schema: laraplate-edge-config/1
+version: 1
+inputs:
+  - id: station
+    driver: serial
+    connection: {device: /dev/ttyUSB0, baud: 9600}
+    devices:
+      - device: gauge
+        points: [{signal: value, address: '^(.+)$', type: string, read: event}]
+outputs:
+  - {id: laraplate, type: laraplate-http, url: "http://127.0.0.1:8000", token: "secret://env/LARAPLATE_EDGE_TOKEN"}
+```
+
+```bash
+laraplate-edge browse station --config station.yaml
+```
+
+```
+  /dev/ttyS0  -  -  -  -
+* /dev/ttyUSB0  /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A10K8XYZ-if00-port0  0403:6001  FT232R USB UART  A10K8XYZ
+```
+
+- One line per port of the machine, sorted by name: the name, the stable `/dev/serial/by-id/` path on Linux, the
+  USB `vid:pid`, the product and the serial number of the adapter, each `-` when unknown.
+- The port the `device` of the input names (by name or by stable path) is marked `*`. When none is, a last line
+  says `device <path>: not found`. Plug the adapter in and out and see which line appears: that is the port.
+- Values come from the USB descriptors and are escaped, so a device cannot disturb the terminal. `browse` takes
+  no flag for this driver (`--limit` and the others are a usage error, exit 2) and opens no port, so it is safe
+  beside a running agent.
+
+### Reading the points once: `probe`
+
+```bash
+laraplate-edge probe station --config config.yaml
+```
+
+```
+gauge-bore	bore_diameter	1.25	float	good
+gauge-depth	depth	no frame
+context: serial=42
+unmatched: "OK"
+response time: 30.0s
+```
+
+- It opens the port once, sends the configured `requests` on their schedule (nothing else is ever written),
+  routes the frames with the document's rules, and prints one line per point, as for the other drivers: device,
+  signal, value, kind and quality, from the first frame that reached the point.
+- It returns as soon as every point has a sample, and gives up after 30 s, the time limit every `probe` has,
+  printing `no frame` for a point that stayed silent. Any silent point therefore makes the probe wait the whole
+  30 s, including a point whose `address` repeats an earlier one (it never receives a frame: the first wins, and
+  the document logs a warning for it). A gauge that sends only when its button is pressed must be pressed during
+  the probe.
+- After the point lines come the notes: `context: <key>=<value>` for each context key a scan set, and up to ten
+  `unmatched: "<frame>"` lines, the frame quoted and cut at 80 bytes, so that a technician can write the
+  expressions for an instrument whose output is not known. The probe is an operator tool: unlike the agent's
+  log, it prints frames and context values on purpose.
+- A port that cannot be opened is exit 1 with the cause: busy (the input may be running: stop it first),
+  missing, or permission denied. `--record <file>` writes the samples as for the other drivers.
+
+### Reading a serial port
+
+The troubleshooting table has the symptoms. Some points of how the driver reads:
+
+- **A frame is text between terminators.** The default terminator is `"\r"`, and a line feed after it is dropped.
+  A gauge that sends something else (`"\r\n"` is fine as `"\r"`; `"\u0003"`, or a fixed `length`) needs `framing`.
+  The quickest way to see what an instrument sends is `probe` with a catch-all point, `'^(.+)$'`, and the
+  `unmatched` notes. Write `terminator`, `start` and `command` with ASCII characters only: they are JSON strings,
+  and a character from `"\u0080"` up is sent and matched as two or more UTF-8 bytes.
+- **The first frame after an open may be lost.** The agent (and `probe`) cannot know whether it opened the port in
+  the middle of a frame, so it waits for a quiet moment (100 ms), a start character or a terminator before reading
+  frames; a tail dropped this way counts `incomplete_frame`. A gauge that streams without pause loses the frame it
+  was sending when the port opened, never reads it half.
+- **Padded values read as numbers.** A numeric point drops the leading zeros of the captured text, so a Digimatic
+  `01A+00012.345` with the address `'^01A([+-]?\d+\.\d+)$'` reads `12.345`.
+- **RS-485 echo.** On a 2-wire RS-485 adapter that echoes what it sends, each request comes back as a frame and
+  frees the request slot before the instrument answers; the answers are still routed to the right point by their
+  expressions. Turn the echo off in the adapter if it can be, or expect `unmatched` counts for the echoes.
+- **The part that a measurement belongs to is the one scanned before it was read.** A scan sets the context
+  (`serial`, `order_ref`, `operation_ref`, `lot`), and every sample read afterwards carries it, until the next scan
+  or `context_ttl`. A measurement read before the scan of the next part still belongs to the previous one, even if
+  the agent routes it a moment later. Set `context_ttl` to a little more than the longest time a part stays at
+  the station.
+- **A reload forgets the part.** The context is in memory only; after a restart or a reload the first
+  measurements carry none until the next scan. Unplugging the adapter does not clear it.
+- **Silence is not death.** A gauge that sends nothing for hours stays alive. Only a port that stays closed beyond
+  `death_tolerance` (or, with `requests`, no frame at all for that long) kills the devices.
+- **Frames never reach the log at `info`.** The context change line (key and value, only when the value changes)
+  and `--log-level debug` (unmatched frames and their summary, rate-limited) are the exceptions.
+- **A flaky adapter backs off.** A port that opens and fails at once is reopened after 0.5 s, 1 s, 2 s and so on up
+  to a minute, with one `warn` for the episode and `port_lost` counted every time; the waits start again from
+  0.5 s, and the next loss is warned again, once the port delivers a frame or stays open for a minute.
+
 ## Running plugins
 
 A plugin is an external process, built on `laraedge-sdk`, that provides an input driver
@@ -932,6 +1061,15 @@ is documented in `laraplate/Modules/MES/docs/MACHINE_CONNECTIVITY.md`.
 | `mqtt` samples carry the time of the connection though the data is old | the sample time is the arrival time unless the document sets a `timestamp`, and a retained message (or one replayed by a persistent session) arrives at each connection | set `timestamp: {path, format}` for the topic, so the payload's own time is used; without it the first sample after a connection can be a stale value stamped now |
 | messages published while the agent was down did not arrive, with `persistent_session: true` | the broker did not keep them: it was restarted without persistence, it expires or drops sessions by policy, the `client_id` changed, or the publisher or the input uses QoS 0 (the delivery is at the lower of the two QoS, and a broker queues only QoS 1 and 2 for an offline client) | publish at QoS 1, keep `qos: 1`, keep the `client_id` stable, and enable session persistence and a long enough expiry on the broker. The agent subscribes again at every connection but cannot recover what the broker dropped. |
 | the document is `rolled_back` with an `mqtt` input error naming `connection.tls.ca_file` (or another `tls` field) | `Start` cannot read the file: it is missing or unreadable, or a relative path was read against the agent's working directory | give an absolute path, readable by the agent's user |
+| a `serial` input `connected` false, `read_errors` `open` growing, the log says the port is missing, busy or permission denied, devices reported dead after `death_tolerance` | the port path is wrong or the adapter is unplugged (`browse` shows the ports), another program (a terminal, `probe`) holds it (the port is exclusive: "busy"), or the agent's user is not in the group that owns it (`dialout` on most Linux distributions) | check the path, prefer `/dev/serial/by-id/...`, close the other program or stop the input before `probe`, add the user to the group and log in again. The input never fails its start for this: it opens the port when it can, and the devices are born at the first open. |
+| a `serial` input `read_errors` `port_lost` growing | an adapter unplugged, a loose cable or a USB hub that resets; the agent closes the port and opens it again with a backoff. A half frame is dropped, never joined to the next one, and the context survives. A port that keeps failing right after it opens is warned once per episode and backs off up to a minute. | fix the cable or the hub; devices die only after `death_tolerance` |
+| a `serial` input: no samples, `read_errors` `unmatched` growing | frames arrive but no `address` matches them: a wrong expression, or a wrong `encoding`, `baud`, `parity` or `framing` that makes the text different from what the instrument shows | `probe` shows the unmatched frames quoted; write the expressions from them. `--log-level debug` logs them too, rate-limited. |
+| a `serial` input: `read_errors` `frame_too_long` growing, values missing | a frame above `max_frame` (the terminator is not the one the instrument sends, or `framing` is missing), or a frame of exactly `max_frame` bytes followed by more than two trailing CR, LF or NUL bytes | set the right `terminator`, `length` or `gap`; raise `max_frame` for an instrument that pads its frames with line ends |
+| a `serial` input: `read_errors` `incomplete_frame` growing | bytes of a frame were left 2 s without news: noise on a line with the wrong settings, a cable pulled mid-message, or a terminator that never comes. One count at each open of the port is normal for an instrument that streams: the tail of the frame it was sending is dropped. | check `baud`, `data_bits`, `parity` and the `terminator`; `probe` |
+| a `serial` input: `read_errors` `decode` growing | a frame is not valid in the `encoding`: an instrument that sends `Ø` or `°` in `windows-1252` under the default `utf-8` | set `encoding: windows-1252` (or `iso-8859-1`); the next frame is read normally |
+| a `serial` input: `read_errors` `no_response` growing | a command got no frame within `request_timeout`: a channel with no instrument, a wrong command or terminator, or an `every` shorter than the instrument takes | check the `command` (in YAML the escape `\r` works only in double quotes), raise `request_timeout`; the other channels are still asked every cycle |
+| a `serial` input: `conversion` growing on values that look right, such as `+00012.345` | not the leading zeros, which a numeric point drops: a decimal comma, a unit or spaces inside the capture, or a value beyond the point's `type` | capture only the number (`'^01A([+-]?\d+\.\d+)'`), or use a `string` point and `regex_extract`; `probe` shows the frame |
+| a `serial` input: samples carry the wrong part, or none | the context is the one set by the last scan before the frame was read, expired by `context_ttl`, or lost by a restart or reload (it is kept in memory only) | set `context_ttl` a little above the longest time a part stays at the station; scan the part again after a restart. A rule that does not match the barcode shows as `unmatched` in `probe`. |
 | the document is `rolled_back` with `cannot open the serial port: it does not exist`, `cannot open the serial port: permission denied` or plain `cannot open the serial port` | the `rtu` input could not open the port: `does not exist` is a wrong `device` path, `permission denied` is a user without access to it, and the plain text is any other failure (on Windows also a port another process already has open) | check the path (`ls -l /dev/ttyUSB0`, adapters change number when replugged: prefer `/dev/serial/by-id/...`), and that the agent's user belongs to the group that owns the port (`dialout` on most Linux distributions). On Linux a second open of the port succeeds, so never run `probe` on an `rtu` input while the agent runs: both would read the same port and corrupt each other's frames. |
 | a document is `rejected` with `plugins.N.sha256: does not match the plugin binary` (or `manifest_sha256 ... plugin.json`) | the file at `path`, or its `plugin.json`, is not the one the entry pins: a rebuilt or replaced plugin, or a hash copied from another build | run `laraplate-edge plugin hash <dir>` on the files you mean to deploy and put the two values in the entry. Nothing changed: the previous document keeps running. If the binary on disk changes under a running plugin, its next restart stops on the same check (restart reason `hash`) and the plugin stays down, `last_error` `the plugin files on disk do not match their hashes`, until the files match again or a new document pins the new ones. While the binary on disk differs from the pinned hash, every new document that keeps that plugin entry is rejected, even one that changes only something else, until the entry's hashes are updated with `plugin hash`. |
 | a document is `rejected` with `plugins.N.path: plugins are disabled: set plugins_dir in the bootstrap` | the agent uses the `laraplate` provider and the bootstrap has no `plugins_dir`, so no plugin may run | set `plugins_dir` in the bootstrap to the directory that holds the plugins and restart the agent (the key is read at start). |
@@ -1008,7 +1146,7 @@ server of the Go library, behind a TCP proxy that simulates the loss of the netw
 certificate), then checks the births, a subscribed value, a polled one and a value changed on the server, the death of both devices after
 the death tolerance when the proxy drops the connection and refuses the next ones, the births and data again
 once it accepts (the session and the subscription created anew), and that no log line holds the endpoint or a
-sample value. A fourth run builds the SDK's `simulated-counter` and runs it as a plugin pinned by `plugin hash`: it checks that its data reaches the backend, that killing the plugin process gives a `bad` sample, a restart and data again (`/status` and the metrics follow), and that a new document with a wrong binary hash is `rejected` while the previous one keeps delivering. A fifth run builds the SDK's `simulated-counter`, `line-state` and `jsonl` and runs them as an input, a processor and an output: it checks that machine and derived samples land in the `jsonl` file, that killing `jsonl` loses nothing, that the `.suspend` file puts the output in `suspended_auth` and that removing it with a `SIGHUP` resumes delivery, that killing `line-state` while its binary is away leaves machine data flowing, sends the derived signal `bad` and then the derived device dead, and that the derived data comes back once the plugin restarts. At the end the file must hold every `source_seq` once, no loss marker, every machine sample (the counter in steps of 1) and only derived values equal to the machine value of the same instant. It is not part of `go test ./...`; CI runs it in
+sample value. A fourth run builds the SDK's `simulated-counter` and runs it as a plugin pinned by `plugin hash`: it checks that its data reaches the backend, that killing the plugin process gives a `bad` sample, a restart and data again (`/status` and the metrics follow), and that a new document with a wrong binary hash is `rejected` while the previous one keeps delivering. A fifth run builds the SDK's `simulated-counter`, `line-state` and `jsonl` and runs them as an input, a processor and an output: it checks that machine and derived samples land in the `jsonl` file, that killing `jsonl` loses nothing, that the `.suspend` file puts the output in `suspended_auth` and that removing it with a `SIGHUP` resumes delivery, that killing `line-state` while its binary is away leaves machine data flowing, sends the derived signal `bad` and then the derived device dead, and that the derived data comes back once the plugin restarts. At the end the file must hold every `source_seq` once, no loss marker, every machine sample (the counter in steps of 1) and only derived values equal to the machine value of the same instant. A sixth run (Linux only) has a `serial` input read a pseudo-terminal: a scanned serial followed by two measurements reaches the backend as two samples with `context.serial`, and a second input with a `requests` command writes it to the port and turns the answer into a sample. It is not part of `go test ./...`; CI runs it in
 its own job on Linux amd64.
 
 ## Running against a local Laraplate

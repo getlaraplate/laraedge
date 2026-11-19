@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"maps"
+	"math"
 	"slices"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ type Reporter struct {
 	log     *slog.Logger
 	window  time.Duration
 	summary string
+	// atReportedLevel drops the warn floor of the summary level.
+	atReportedLevel bool
 
 	mu sync.Mutex
 	// start is when the current window began.
@@ -31,10 +34,26 @@ type Reporter struct {
 	levels map[string]slog.Level
 }
 
+// Option changes a Reporter built by New.
+type Option func(*Reporter)
+
+// SummaryAtReportedLevel writes the summary at the highest level among the
+// failures it counts, so a path that reports at debug keeps its summary at
+// debug. Without it the summary is logged at warn at least.
+func SummaryAtReportedLevel() Option {
+	return func(r *Reporter) { r.atReportedLevel = true }
+}
+
 // New returns a Reporter that logs to log and writes its summary with the
-// message summary at most once per window.
-func New(log *slog.Logger, window time.Duration, summary string) *Reporter {
-	return &Reporter{log: log, window: window, summary: summary, counts: map[string]uint64{}, levels: map[string]slog.Level{}}
+// message summary at most once per window. By default the summary is logged
+// at the highest level among the failures it counts, and at warn at least.
+func New(log *slog.Logger, window time.Duration, summary string, opts ...Option) *Reporter {
+	r := &Reporter{log: log, window: window, summary: summary, counts: map[string]uint64{}, levels: map[string]slog.Level{}}
+	for _, opt := range opts {
+		opt(r)
+	}
+
+	return r
 }
 
 // Report logs the failure in full when it is the first of its kind in this
@@ -76,6 +95,9 @@ func (r *Reporter) flush(now time.Time) {
 
 	var total uint64
 	level := slog.LevelWarn
+	if r.atReportedLevel {
+		level = slog.Level(math.MinInt)
+	}
 	attrs := []any{"window_seconds", int(now.Sub(r.start).Seconds())}
 	for _, kind := range slices.Sorted(maps.Keys(r.counts)) {
 		n := r.counts[kind]
