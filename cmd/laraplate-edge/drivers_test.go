@@ -301,6 +301,33 @@ func TestInputDriversRegisterFile(t *testing.T) {
 	}
 }
 
+// TestInputDriversRegisterSerial: the serial factory is registered and
+// builds an input without opening its port.
+func TestInputDriversRegisterSerial(t *testing.T) {
+	boot := bootstrap.File{AgentID: "plant-a-edge-01", DataDir: t.TempDir(), Config: bootstrap.Config{Provider: bootstrap.ProviderLaraplate}}
+
+	factory := inputDrivers(boot, secrets.NewResolver(), slog.New(slog.DiscardHandler), nil)[config.DriverSerial]
+	if factory == nil {
+		t.Fatal("serial is not registered")
+	}
+
+	cfg := config.Input{
+		ID:         "gauge",
+		Driver:     config.DriverSerial,
+		Connection: json.RawMessage(`{"device":"/dev/laraedge-absent-port","baud":9600}`),
+		Devices: []config.Device{{Device: "gauge-01", Points: []config.Point{
+			{Signal: "bore", Address: `^01A(.+)$`, Type: "float64", Read: config.Read{Mode: config.ReadEvent}},
+		}}},
+	}
+	in, err := factory(cfg, clock.NewFake(time.Date(2026, 11, 19, 8, 0, 0, 0, time.UTC)))
+	if err != nil {
+		t.Fatalf("serial factory: %v", err)
+	}
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestConfigValidateShowsTheFileFactoryMessage: a file input with a qdas
 // connection that sets a csv block is refused by the factory with the
 // field path, never the value.

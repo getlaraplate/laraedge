@@ -21,6 +21,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/input/modbus"
 	"github.com/getlaraplate/laraedge/internal/input/mqtt"
 	"github.com/getlaraplate/laraedge/internal/input/opcua"
+	"github.com/getlaraplate/laraedge/internal/input/serial"
 	"github.com/getlaraplate/laraedge/internal/input/simulated"
 	"github.com/getlaraplate/laraedge/internal/logging"
 	"github.com/getlaraplate/laraedge/internal/provider"
@@ -190,7 +191,7 @@ func runAgent(ctx context.Context, bootstrapPath string, deps agentDeps, reload 
 // through log (decision O13). The mqtt driver keeps its subscription set
 // under data_dir, forms its default client id from the agent id and resolves
 // its passwords through resolver. The file driver keeps its ledger of read
-// files under data_dir.
+// files under data_dir. The serial driver needs only the logger.
 func inputDrivers(boot bootstrap.File, resolver opcua.SecretResolver, log *slog.Logger, extra map[string]input.Factory) map[string]input.Factory {
 	drivers := map[string]input.Factory{
 		config.DriverSimulated: simulated.Factory(configBaseDir(boot)),
@@ -211,6 +212,7 @@ func inputDrivers(boot bootstrap.File, resolver opcua.SecretResolver, log *slog.
 			DataDir: boot.DataDir,
 			Logger:  log,
 		}),
+		config.DriverSerial: serial.Factory(serial.Options{Logger: log}),
 	}
 	maps.Copy(drivers, extra)
 
