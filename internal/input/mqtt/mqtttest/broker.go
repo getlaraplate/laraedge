@@ -82,11 +82,22 @@ type Broker struct {
 	published []Message
 	changed   chan struct{}
 	// subscribed counts, by client id, the SUBSCRIBE packets the broker
-	// processed; changed is closed and replaced at every one too.
+	// answered with a SUBACK; changed is closed and replaced at every one
+	// too.
 	subscribed map[string]int
 	// granted holds, by topic filter, the client id that last subscribed to
-	// it with the subscription granted.
+	// it with the subscription granted, once its SUBACK is sent.
 	granted map[string]string
+	// pending holds the filters a SUBSCRIBE granted until its SUBACK is
+	// sent: mochi calls OnSubscribed before it writes the SUBACK, and a
+	// message published in between could reach the client first.
+	pending map[subscription][]string
+}
+
+// subscription names a SUBSCRIBE packet of a client.
+type subscription struct {
+	clientID string
+	packetID uint16
 }
 
 // Message is a PUBLISH packet the broker received from a client.
@@ -132,6 +143,7 @@ func Start(t testing.TB, opts Options) *Broker {
 
 		subscribed: map[string]int{},
 		granted:    map[string]string{},
+		pending:    map[subscription][]string{},
 	}
 	b.SetRefused(opts.Refuse...)
 	if err := server.AddHook(&authHook{users: opts.Users, broker: b}, nil); err != nil {
@@ -263,9 +275,9 @@ func (b *Broker) WaitPublished(clientID string, n int) []Message {
 	}
 }
 
-// WaitSubscribed waits until the broker has processed n SUBSCRIBE packets
-// from clientID, so a message published afterwards reaches it, retained or
-// not. It fails the test after a timeout, so call it from the test goroutine.
+// WaitSubscribed waits until the broker has answered n SUBSCRIBE packets
+// from clientID with their SUBACK, so a message published afterwards reaches
+// it after the SUBACK, retained or not. It fails the test after a timeout, so call it from the test goroutine.
 func (b *Broker) WaitSubscribed(clientID string, n int) {
 	b.t.Helper()
 
@@ -292,8 +304,8 @@ func (b *Broker) WaitSubscribed(clientID string, n int) {
 }
 
 // WaitSubscribedTo waits until the broker has granted a client's
-// subscription to filter, so a message published afterwards on a matching
-// topic reaches it, and returns that client's id. It fails the test after a
+// subscription to filter and sent its SUBACK, so a message published
+// afterwards on a matching topic reaches it after the SUBACK, and returns that client's id. It fails the test after a
 // timeout, so call it from the test goroutine.
 func (b *Broker) WaitSubscribedTo(filter string) string {
 	b.t.Helper()
@@ -530,7 +542,7 @@ type recordHook struct {
 func (h *recordHook) ID() string { return "mqtttest-record" }
 
 func (h *recordHook) Provides(b byte) bool {
-	return b == mochi.OnConnect || b == mochi.OnSubscribe || b == mochi.OnSubscribed || b == mochi.OnPublish
+	return b == mochi.OnConnect || b == mochi.OnSubscribe || b == mochi.OnSubscribed || b == mochi.OnPacketSent || b == mochi.OnPublish
 }
 
 func (h *recordHook) OnPublish(cl *mochi.Client, pk packets.Packet) (packets.Packet, error) {
@@ -571,11 +583,36 @@ func (h *recordHook) OnSubscribed(cl *mochi.Client, pk packets.Packet, reasonCod
 	h.broker.mu.Lock()
 	defer h.broker.mu.Unlock()
 
-	h.broker.subscribed[cl.ID]++
+	var granted []string
 	for i, sub := range pk.Filters {
 		if i < len(reasonCodes) && reasonCodes[i] < packets.ErrUnspecifiedError.Code {
-			h.broker.granted[sub.Filter] = cl.ID
+			granted = append(granted, sub.Filter)
 		}
+	}
+	h.broker.pending[subscription{cl.ID, pk.PacketID}] = granted
+}
+
+// OnPacketSent counts a SUBSCRIBE, and records the filters it granted, once
+// its SUBACK is written: a PUBLISH the broker writes afterwards follows it on
+// the connection.
+func (h *recordHook) OnPacketSent(cl *mochi.Client, pk packets.Packet, _ []byte) {
+	if cl.Net.Inline || pk.FixedHeader.Type != packets.Suback {
+		return
+	}
+
+	h.broker.mu.Lock()
+	defer h.broker.mu.Unlock()
+
+	key := subscription{cl.ID, pk.PacketID}
+	granted, ok := h.broker.pending[key]
+	if !ok {
+		return
+	}
+	delete(h.broker.pending, key)
+
+	h.broker.subscribed[cl.ID]++
+	for _, filter := range granted {
+		h.broker.granted[filter] = cl.ID
 	}
 	close(h.broker.changed)
 	h.broker.changed = make(chan struct{})
