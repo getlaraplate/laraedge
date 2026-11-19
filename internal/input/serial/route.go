@@ -4,6 +4,7 @@ import (
 	"errors"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -64,13 +65,16 @@ type router struct {
 	keys   map[string]contextHistory
 }
 
-// routed is the outcome of one frame: a sample, a context change, or a Kind
+// routed is the outcome of one frame: a sample, a context frame, or a Kind
 // naming why the frame was dropped (a conversion also carries its bad sample).
+// ContextChanged is true when a context frame changed the value in force at
+// its read time (an expired value counts as absent, absent as empty).
 type routed struct {
-	Sample       *model.Sample
-	Kind         string
-	ContextKey   string
-	ContextValue string
+	Sample         *model.Sample
+	Kind           string
+	ContextKey     string
+	ContextValue   string
+	ContextChanged bool
 }
 
 // newRouter compiles the points of cfg in document order across devices. The
@@ -136,8 +140,9 @@ func (r *router) route(frame []byte, at time.Time) routed {
 		}
 		value := m[rule.Group]
 		h, had := r.keys[rule.Key]
+		changed := r.valueAt(h, at) != value
 		r.keys[rule.Key] = contextHistory{cur: contextEntry{value: value, set: at}, prev: h.cur, hasPrev: had}
-		return routed{ContextKey: rule.Key, ContextValue: value}
+		return routed{ContextKey: rule.Key, ContextValue: value, ContextChanged: changed}
 	}
 	for _, p := range r.points {
 		m := p.address.FindStringSubmatch(text)
@@ -149,7 +154,7 @@ func (r *router) route(frame []byte, at time.Time) routed {
 			value = m[1]
 		}
 		s := model.Sample{Device: p.device, Signal: p.signal, TS: at, Priority: p.point.Priority, Context: r.context(at)}
-		if v, ok := driverkit.ConvertText(p.point.Type, value); ok {
+		if v, ok := driverkit.ConvertText(p.point.Type, numberText(p.point.Type, value)); ok {
 			s.Value, s.Quality = v, model.Good
 			return routed{Sample: &s}
 		}
@@ -159,27 +164,56 @@ func (r *router) route(frame []byte, at time.Time) routed {
 	return routed{Kind: KindUnmatched}
 }
 
+// valueAt returns the value of a key in force at at: empty when none was set by
+// then or when it is older than the TTL.
+func (r *router) valueAt(h contextHistory, at time.Time) string {
+	e, ok := h.pick(at)
+	if !ok {
+		return ""
+	}
+	if r.conn.ContextTTL > 0 && at.Sub(e.set) > r.conn.ContextTTL {
+		return ""
+	}
+	return e.value
+}
+
+// numberText prepares the value text of a numeric point for conversion:
+// surrounding spaces are trimmed and the leading zeros of the integer part
+// dropped, keeping an optional sign and one digit before the point or when the
+// integer part is all zeros ("+00012.345" is "+12.345", "-0001.5" is "-1.5",
+// "000" is "0", "00.5" is "0.5"), since gauges pad their values. Text of a
+// string or bool point is returned unchanged.
+func numberText(typ, text string) string {
+	if typ == "string" || typ == "bool" {
+		return text
+	}
+	text = strings.TrimSpace(text)
+	sign := ""
+	if text != "" && (text[0] == '+' || text[0] == '-') {
+		sign, text = text[:1], text[1:]
+	}
+	digits := len(text) - len(strings.TrimLeft(text, "0123456789"))
+	zeros := len(text[:digits]) - len(strings.TrimLeft(text[:digits], "0"))
+	if zeros == digits && zeros > 0 {
+		zeros--
+	}
+	return sign + text[zeros:]
+}
+
 // context returns a copy of the current context as of at, keys older than the
 // TTL dropped; nil when nothing is left.
 func (r *router) context(at time.Time) *model.Context {
 	var c model.Context
 	for key, h := range r.keys {
-		e, ok := h.pick(at)
-		if !ok || e.value == "" {
-			continue
-		}
-		if r.conn.ContextTTL > 0 && at.Sub(e.set) > r.conn.ContextTTL {
-			continue
-		}
 		switch key {
 		case "serial":
-			c.Serial = e.value
+			c.Serial = r.valueAt(h, at)
 		case "order_ref":
-			c.OrderRef = e.value
+			c.OrderRef = r.valueAt(h, at)
 		case "operation_ref":
-			c.OperationRef = e.value
+			c.OperationRef = r.valueAt(h, at)
 		case "lot":
-			c.Lot = e.value
+			c.Lot = r.valueAt(h, at)
 		}
 	}
 	if c.IsEmpty() {

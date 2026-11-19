@@ -10,6 +10,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/clock"
 	"github.com/getlaraplate/laraedge/internal/config"
 	edgeinput "github.com/getlaraplate/laraedge/internal/input"
+	"github.com/getlaraplate/laraedge/internal/input/driverkit"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
@@ -92,6 +93,8 @@ func TestFramesBecomeSamples(t *testing.T) {
 	if !h.in.Health().Connected {
 		t.Fatal("not connected with the port open")
 	}
+	// A quiet read cycle syncs the framer on a frame boundary.
+	h.step()
 
 	h.port.feed("SN7\r01A1.5\r")
 	h.step()
@@ -113,6 +116,13 @@ func TestFramesBecomeSamples(t *testing.T) {
 		t.Fatalf("context change log = %v", set)
 	}
 
+	// The same scan again changes nothing and is not logged again.
+	h.port.feed("SN7\r")
+	h.step()
+	if set := h.logs.at(t, "INFO", msgContextSet); len(set) != 1 {
+		t.Fatalf("context change logged %d times for the same scan, want 1", len(set))
+	}
+
 	h.port.feed("01Axyz\r99\r")
 	h.step()
 	if h.readErrors(KindConversion) != 1 || h.readErrors(KindUnmatched) != 1 {
@@ -129,17 +139,25 @@ func TestFramesBecomeSamples(t *testing.T) {
 	if len(dropped) != 1 || dropped[0]["value"] != nil {
 		t.Fatalf("context dropped log = %v", dropped)
 	}
+	fed := []string{"SN7", "01A1.5", "01Axyz", "99"}
 	for _, l := range h.logs.lines(t) {
-		if l["level"] != "DEBUG" && l["msg"] != msgContextSet && strings.Contains(strings.Join(values(l), " "), "xyz") {
-			t.Fatalf("a frame in a log line above debug: %v", l)
+		if l["level"] == "DEBUG" || l["msg"] == msgContextSet {
+			continue
+		}
+		text := strings.Join(values(l), " ")
+		for _, frame := range fed {
+			if strings.Contains(text, frame) {
+				t.Fatalf("frame %q in a log line above debug: %v", frame, l)
+			}
 		}
 	}
 }
 
+// values returns the string attributes of a log line but its time.
 func values(m map[string]any) []string {
 	var out []string
-	for _, v := range m {
-		if s, ok := v.(string); ok {
+	for k, v := range m {
+		if s, ok := v.(string); ok && k != "time" {
 			out = append(out, s)
 		}
 	}
@@ -149,6 +167,7 @@ func values(m map[string]any) []string {
 func TestUnmatchedFrameLogTruncated(t *testing.T) {
 	h := newRunHarness(t, nil)
 	h.start()
+	h.step()
 	h.port.feed(strings.Repeat("x", 100) + "\r")
 	h.step()
 	lines := h.logs.at(t, "DEBUG", msgUnmatched)
@@ -160,6 +179,7 @@ func TestUnmatchedFrameLogTruncated(t *testing.T) {
 func TestUnpluggedMidFrame(t *testing.T) {
 	h := newRunHarness(t, nil)
 	h.start()
+	h.step()
 
 	h.port.feed("SN7\r")
 	h.step()
@@ -181,11 +201,16 @@ func TestUnpluggedMidFrame(t *testing.T) {
 		t.Fatalf("open errors = %d, want 1", h.readErrors(KindOpen))
 	}
 
+	// The first read after reopening starts in the middle of a frame: its
+	// tail is dropped up to the terminator and counted once.
 	h.port.feed(".5\r01A2.0\r")
 	h.step()
 	got := h.samples()
 	if len(got) != 1 || got[0].Value.Float != 2.0 {
 		t.Fatalf("samples = %+v, want only 2.0", got)
+	}
+	if h.readErrors(kindIncompleteFrame) != 1 || h.readErrors(KindUnmatched) != 0 {
+		t.Fatalf("read errors = %v, want one incomplete_frame and no unmatched", h.in.Health().ReadErrors)
 	}
 	if got[0].Context == nil || got[0].Context.Serial != "7" {
 		t.Fatalf("context = %+v, want serial 7 kept across the loss", got[0].Context)
@@ -363,5 +388,138 @@ func TestDuplicateAddressWarned(t *testing.T) {
 	lines := h.logs.at(t, "WARN", msgDuplicateAddress)
 	if len(lines) != 1 || lines[0]["point"] != "devices.1.points.0" || lines[0]["input"] != "gauges" {
 		t.Fatalf("duplicate address warnings = %v", lines)
+	}
+}
+
+func TestCloseLogsNoDropOfAnExpiredContext(t *testing.T) {
+	h := newRunHarness(t, map[string]any{"context_ttl": "1s"})
+	h.start()
+	h.step()
+	h.port.feed("SN7\r")
+	h.step()
+	h.advance(2 * time.Second)
+	h.close()
+	if dropped := h.logs.at(t, "INFO", msgContextDropped); len(dropped) != 0 {
+		t.Fatalf("context dropped logged with every key expired: %v", dropped)
+	}
+}
+
+func TestSteadyUnmatchedFramesStayAtDebug(t *testing.T) {
+	h := newRunHarness(t, nil)
+	h.start()
+	h.step()
+	for range 3 {
+		h.port.feed("99\r98\r")
+		h.step()
+		h.clk.Advance(unmatchedWindow)
+		h.clk.BlockUntil(t, idleTimers)
+	}
+	h.port.feed("97\r")
+	h.close()
+
+	summaries := h.logs.at(t, "DEBUG", msgUnmatchedSummary)
+	if len(summaries) < 3 {
+		t.Fatalf("%d summaries at debug over three windows, want at least 3", len(summaries))
+	}
+	for _, l := range h.logs.lines(t) {
+		if l["level"] != "DEBUG" && l["msg"] != msgContextDropped {
+			t.Fatalf("a record above debug for unmatched frames: %v", l)
+		}
+	}
+}
+
+func TestFlappingPortBacksOff(t *testing.T) {
+	h := newRunHarness(t, nil)
+	h.opener.loseNext(5)
+	h.start()
+
+	// Every open succeeds and the first read fails: the waits still grow,
+	// 0.5 s, 1 s, 2 s, 4 s, 8 s, as for an open that fails.
+	if h.opener.count() != 1 || h.readErrors(KindPortLost) != 1 {
+		t.Fatalf("after start: opens %d, port_lost %d", h.opener.count(), h.readErrors(KindPortLost))
+	}
+	for i, wait := range []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second} {
+		h.advance(wait - ReadTimeout)
+		if h.opener.count() != i+1 {
+			t.Fatalf("open %d came before its wait of %v", i+2, wait)
+		}
+		h.step()
+		if h.opener.count() != i+2 {
+			t.Fatalf("opens = %d after a wait of %v, want %d", h.opener.count(), wait, i+2)
+		}
+	}
+	if got := h.readErrors(KindPortLost); got != 5 {
+		t.Fatalf("port_lost = %d, want 5", got)
+	}
+	if lost := h.logs.at(t, "WARN", msgPortLost); len(lost) != 1 {
+		t.Fatalf("port lost warned %d times in one episode, want 1", len(lost))
+	}
+
+	// The sixth open holds; a frame ends the episode and resets the backoff.
+	h.advance(8 * time.Second)
+	if h.opener.count() != 6 || !h.port.isOpen() {
+		t.Fatalf("opens = %d, open %v", h.opener.count(), h.port.isOpen())
+	}
+	h.step()
+	h.port.feed("01A1.0\r")
+	h.step()
+	h.port.fail()
+	h.step()
+	if lost := h.logs.at(t, "WARN", msgPortLost); len(lost) != 2 {
+		t.Fatalf("port lost warned %d times after a frame, want 2", len(lost))
+	}
+	h.advance(500 * time.Millisecond)
+	if h.opener.count() != 7 {
+		t.Fatalf("opens = %d, want 7 after a reset backoff of 0.5 s", h.opener.count())
+	}
+}
+
+func TestAPortOpenForBackoffMaxResetsTheBackoff(t *testing.T) {
+	h := newRunHarness(t, nil)
+	h.opener.loseNext(3)
+	h.start()
+	h.advance(500*time.Millisecond + time.Second)
+	if h.opener.count() != 3 {
+		t.Fatalf("opens = %d, want 3", h.opener.count())
+	}
+	// The fourth open, after 2 s, holds for BackoffMax without a frame.
+	h.advance(2 * time.Second)
+	if h.opener.count() != 4 || !h.port.isOpen() {
+		t.Fatalf("opens = %d, open %v", h.opener.count(), h.port.isOpen())
+	}
+	h.advance(driverkit.BackoffMax)
+	h.port.fail()
+	h.step()
+	h.advance(500 * time.Millisecond)
+	if h.opener.count() != 5 {
+		t.Fatalf("opens = %d, want 5 after a reset backoff of 0.5 s", h.opener.count())
+	}
+}
+
+func TestGapFrameStampedAtItsLastByte(t *testing.T) {
+	h := newRunHarness(t, map[string]any{"framing": map[string]any{"gap": "50ms"}})
+	h.start()
+	h.step()
+	h.step()
+	h.port.feed("01A1.5")
+	h.step()
+	lastByte := h.clk.Now()
+	h.stepUntil(5, func() bool { return len(h.samples()) == 1 })
+	if s := h.samples()[0]; s.Value.Float != 1.5 || !s.TS.Equal(lastByte) {
+		t.Fatalf("sample = %+v, want 1.5 at %v", s, lastByte)
+	}
+}
+
+func TestAGaugeStreamingAcrossTheOpenGivesNoHalfFrame(t *testing.T) {
+	h := newRunHarness(t, nil)
+	h.start()
+	h.port.feed("5.250\r01A+1.000\r")
+	h.step()
+	got := h.samples()
+	if len(got) != 1 || got[0].Value.Float != 1.0 {
+		t.Fatalf("samples = %+v, want only 1.0", got)
+	}
+	if h.readErrors(kindIncompleteFrame) != 1 || h.readErrors(KindUnmatched) != 0 {
+		t.Fatalf("read errors = %v", h.in.Health().ReadErrors)
 	}
 }

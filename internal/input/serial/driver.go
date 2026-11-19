@@ -12,6 +12,7 @@ import (
 	"github.com/getlaraplate/laraedge/internal/config"
 	edgeinput "github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/input/driverkit"
+	"github.com/getlaraplate/laraedge/internal/lograte"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
@@ -48,6 +49,9 @@ type Input struct {
 	deps deps
 
 	health driverkit.Health
+	// unmatched rate-limits the unmatched frame log; its summary stays at
+	// debug, the level of the frames it counts.
+	unmatched *lograte.Reporter
 
 	// mu guards the fields below.
 	mu      sync.Mutex
@@ -112,7 +116,10 @@ func newInput(cfg config.Input, clk clock.Clock, opts Options, d deps) (*Input, 
 		d.jitter = rand.Float64
 	}
 
-	in := &Input{cfg: cfg, clk: clk, log: log, conn: conn, router: r, deps: d}
+	in := &Input{
+		cfg: cfg, clk: clk, log: log, conn: conn, router: r, deps: d,
+		unmatched: lograte.New(log, unmatchedWindow, msgUnmatchedSummary, lograte.SummaryAtReportedLevel()),
+	}
 	for _, dev := range cfg.Devices {
 		if !slices.Contains(in.devices, dev.Device) {
 			in.devices = append(in.devices, dev.Device)
@@ -152,8 +159,10 @@ func (in *Input) Start(ctx context.Context, emit func(model.Record)) error {
 }
 
 // Close stops the input and waits for its goroutines, closing the port.
-// After Close returns emit is never called. The context held in memory is
-// dropped, which is logged once (without its values). It is safe on an input
+// After Close returns emit is never called. The summary of the unmatched
+// frames counted in a window that has passed is logged. The context held in memory is
+// dropped, which is logged once (without its values) when a key is still in
+// force. It is safe on an input
 // never started and when called twice.
 func (in *Input) Close() error {
 	in.mu.Lock()
@@ -166,9 +175,11 @@ func (in *Input) Close() error {
 	}
 	in.wg.Wait()
 
+	in.unmatched.Flush(in.clk.Now())
+
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	if in.started && !in.dropLogged && len(in.router.keys) > 0 {
+	if in.started && !in.dropLogged && in.router.context(in.clk.Now()) != nil {
 		in.dropLogged = true
 		in.log.Info(msgContextDropped, "input", in.cfg.ID)
 	}

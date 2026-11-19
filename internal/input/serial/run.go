@@ -10,7 +10,6 @@ import (
 
 	edgeinput "github.com/getlaraplate/laraedge/internal/input"
 	"github.com/getlaraplate/laraedge/internal/input/driverkit"
-	"github.com/getlaraplate/laraedge/internal/lograte"
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
@@ -53,29 +52,32 @@ const readBufferSize = 4096
 // reader is the state of the goroutine owning the port; only that goroutine
 // uses it.
 type reader struct {
-	in        *Input
-	emit      func(model.Record)
-	life      *edgeinput.Lifecycle
-	framer    *framer
-	unmatched *lograte.Reporter
-	// warned holds the open failure causes logged since the last open.
+	in      *Input
+	emit    func(model.Record)
+	life    *edgeinput.Lifecycle
+	framer  *framer
+	backoff *driverkit.Backoff
+	// warned holds the open failure causes logged since the port last held.
 	warned map[string]bool
-	buf    []byte
+	// lostWarned is set once a loss of the port was logged, until a frame is
+	// read: a port that flaps is warned once per episode.
+	lostWarned bool
+	buf        []byte
 }
 
 // run opens the port with the backoff, reads it until it is lost, and opens
 // it again, until ctx is done (spec section 8).
 func (in *Input) run(ctx context.Context, emit func(model.Record), life *edgeinput.Lifecycle) {
 	r := &reader{
-		in:        in,
-		emit:      emit,
-		life:      life,
-		framer:    newFramer(in.conn.Framing, in.conn.MaxFrame),
-		unmatched: lograte.New(in.log, unmatchedWindow, msgUnmatchedSummary),
-		warned:    map[string]bool{},
-		buf:       make([]byte, readBufferSize),
+		in:      in,
+		emit:    emit,
+		life:    life,
+		framer:  newFramer(in.conn.Framing, in.conn.MaxFrame),
+		backoff: driverkit.NewBackoff(in.clk, in.deps.jitter),
+		warned:  map[string]bool{},
+		buf:     make([]byte, readBufferSize),
 	}
-	backoff := driverkit.NewBackoff(in.clk, in.deps.jitter)
+	backoff := r.backoff
 
 	for ctx.Err() == nil {
 		port, err := in.deps.open(in.conn.Device, in.conn.Mode)
@@ -88,8 +90,6 @@ func (in *Input) run(ctx context.Context, emit func(model.Record), life *edgeinp
 			continue
 		}
 
-		clear(r.warned)
-		backoff.Reset()
 		in.health.SetConnected(true)
 		err = r.serve(ctx, port)
 		_ = port.Close()
@@ -100,7 +100,10 @@ func (in *Input) run(ctx context.Context, emit func(model.Record), life *edgeinp
 		}
 
 		in.health.CountError(KindPortLost)
-		in.log.Warn(msgPortLost, "input", in.cfg.ID, "error", err.Error())
+		if !r.lostWarned {
+			r.lostWarned = true
+			in.log.Warn(msgPortLost, "input", in.cfg.ID, "error", err.Error())
+		}
 		if backoff.Wait(ctx) != nil {
 			return
 		}
@@ -132,9 +135,13 @@ func (r *reader) warnOpen(err error) {
 
 // serve reads the open port one cycle at a time until ctx is done (nil) or a
 // read or a write fails (the error). Requests are scheduled from the open
-// on and dropped with the port.
+// on and dropped with the port. The port holds once it delivers a frame or
+// stays open for BackoffMax: only then are the backoff and the logged open
+// causes reset, so a port that opens and fails at once still backs off.
 func (r *reader) serve(ctx context.Context, port Port) error {
 	in := r.in
+	opened := in.clk.Now()
+	held := false
 	var sched *scheduler
 	if len(in.conn.Requests) > 0 {
 		sched = newScheduler(in.conn.Requests, in.conn.RequestTimeout, in.clk.Now())
@@ -150,7 +157,7 @@ func (r *reader) serve(ctx context.Context, port Port) error {
 		}
 		at := in.clk.Now()
 
-		var frames [][]byte
+		var frames []frame
 		var kinds []string
 		if n > 0 {
 			frames, kinds = r.framer.push(r.buf[:n], at)
@@ -160,12 +167,20 @@ func (r *reader) serve(ctx context.Context, port Port) error {
 		for _, kind := range kinds {
 			in.health.CountError(kind)
 		}
+		if len(frames) > 0 {
+			r.lostWarned = false
+		}
+		if !held && (len(frames) > 0 || at.Sub(opened) >= driverkit.BackoffMax) {
+			held = true
+			r.backoff.Reset()
+			clear(r.warned)
+		}
 
 		if sched == nil || len(frames) > 0 {
 			r.renew()
 		}
-		for _, frame := range frames {
-			r.handle(frame, at)
+		for _, f := range frames {
+			r.handle(f.data, f.at)
 		}
 
 		if sched == nil {
@@ -193,7 +208,7 @@ func (r *reader) renew() {
 }
 
 // handle routes one frame read at at: it emits the sample, logs a context
-// change, and counts the kind of a frame dropped or converted badly.
+// change (a frame repeating the value in force is not logged), and counts the kind of a frame dropped or converted badly.
 func (r *reader) handle(frame []byte, at time.Time) {
 	in := r.in
 	got := in.router.route(frame, at)
@@ -203,10 +218,10 @@ func (r *reader) handle(frame []byte, at time.Time) {
 	switch {
 	case got.Sample != nil:
 		r.emit(model.SampleRecord(*got.Sample))
-	case got.ContextKey != "":
+	case got.ContextChanged:
 		in.log.Info(msgContextSet, "input", in.cfg.ID, "key", got.ContextKey, "value", got.ContextValue)
 	case got.Kind == KindUnmatched:
-		r.unmatched.Report(at, KindUnmatched, slog.LevelDebug, msgUnmatched, "input", in.cfg.ID, "frame", quoteFrame(frame))
+		in.unmatched.Report(at, KindUnmatched, slog.LevelDebug, msgUnmatched, "input", in.cfg.ID, "frame", quoteFrame(frame))
 	}
 }
 

@@ -44,7 +44,7 @@ func Browse(cfg config.Input, w io.Writer, list func() ([]PortInfo, error)) erro
 		}
 		ids := "-"
 		if p.VID != "" || p.PID != "" {
-			ids = p.VID + ":" + p.PID
+			ids = escapeText(p.VID) + ":" + escapeText(p.PID)
 		}
 		if _, err := fmt.Fprintf(w, "%s%s  %s  %s  %s  %s\n", mark, escapeText(p.Name), dash(p.StablePath), ids, dash(p.Product), dash(p.SerialNumber)); err != nil {
 			return err

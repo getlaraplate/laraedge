@@ -80,14 +80,14 @@ func (in *Input) ProbePoints(ctx context.Context) ([]model.Sample, map[PointRef]
 		}
 		at := in.clk.Now()
 
-		var frames [][]byte
+		var frames []frame
 		if n > 0 {
 			frames, _ = framer.push(buf[:n], at)
 		} else {
 			frames, _ = framer.tick(at)
 		}
-		for _, frame := range frames {
-			if q := probeRoute(router, frame, at, got, kinds, contexts); q != "" && len(unmatched) < maxProbeUnmatched {
+		for _, f := range frames {
+			if q := probeRoute(router, f.data, f.at, got, kinds, contexts); q != "" && len(unmatched) < maxProbeUnmatched {
 				unmatched = append(unmatched, q)
 			}
 		}
@@ -180,7 +180,7 @@ func (in *Input) setNotes(contexts map[string]string, unmatched []string) {
 	var notes []string
 	for _, key := range probeContextKeys {
 		if v, ok := contexts[key]; ok {
-			notes = append(notes, "context: "+key+"="+v)
+			notes = append(notes, "context: "+key+"="+escapeText(v))
 		}
 	}
 	for _, q := range unmatched {
@@ -192,7 +192,8 @@ func (in *Input) setNotes(contexts map[string]string, unmatched []string) {
 }
 
 // ProbeNotes returns the lines the last probe saw besides the samples:
-// "context: <key>=<value>" for each context key set, in the order serial,
+// "context: <key>=<value>" for each context key set (the value escaped as
+// browse escapes text), in the order serial,
 // order_ref, operation_ref, lot, then up to ten "unmatched: <frame>" lines,
 // the frame quoted and cut at 80 bytes. Probe is an operator tool: values are
 // printed on purpose.

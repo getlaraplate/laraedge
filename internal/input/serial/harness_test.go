@@ -142,6 +142,9 @@ type fakeOpener struct {
 	mu      sync.Mutex
 	results []error
 	calls   int
+	// lost is how many of the next successful opens give a port whose first
+	// read fails.
+	lost int
 }
 
 func (o *fakeOpener) open(device string, mode Mode) (Port, error) {
@@ -156,7 +159,10 @@ func (o *fakeOpener) open(device string, mode Mode) (Port, error) {
 		}
 	}
 	o.port.mu.Lock()
-	o.port.failed = false
+	o.port.failed = o.lost > 0
+	if o.lost > 0 {
+		o.lost--
+	}
 	o.port.writeFailed = false
 	o.port.open = true
 	o.port.mu.Unlock()
@@ -168,6 +174,14 @@ func (o *fakeOpener) then(results ...error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.results = append(o.results, results...)
+}
+
+// loseNext makes the next n successful opens give a port that fails at its
+// first read.
+func (o *fakeOpener) loseNext(n int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.lost += n
 }
 
 func (o *fakeOpener) count() int {

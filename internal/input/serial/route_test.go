@@ -207,3 +207,68 @@ func TestRouteRuleBeforePoint(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestRouteZeroPaddedNumbers(t *testing.T) {
+	r := mustRouter(t, Connection{Encoding: "utf-8"},
+		config.Device{Device: "a", Points: []config.Point{evPoint("w", `^01A(.+)$`, "float64")}},
+		config.Device{Device: "b", Points: []config.Point{evPoint("n", `^02A(.+)$`, "int64")}},
+		config.Device{Device: "c", Points: []config.Point{evPoint("s", `^03A(.+)$`, "string")}},
+	)
+	tests := []struct {
+		frame string
+		float float64
+		int   int64
+	}{
+		{"01A+00012.345", 12.345, 0},
+		{"01A-0001.5", -1.5, 0},
+		{"01A00.5", 0.5, 0},
+		{"01A 007.25 ", 7.25, 0},
+		{"02A000", 0, 0},
+		{"02A-0042", 0, -42},
+		{"02A+0042", 0, 42},
+	}
+	for _, tt := range tests {
+		got := r.route([]byte(tt.frame), t0)
+		if got.Sample == nil || got.Kind != "" || got.Sample.Quality != model.Good {
+			t.Fatalf("%s: got %+v", tt.frame, got)
+		}
+		if got.Sample.Value.Float != tt.float || got.Sample.Value.Int != tt.int {
+			t.Fatalf("%s: value %+v", tt.frame, got.Sample.Value)
+		}
+	}
+	if got := r.route([]byte("03A0012"), t0); got.Sample == nil || got.Sample.Value.Str != "0012" {
+		t.Fatalf("string point changed: %+v", got)
+	}
+	for _, bad := range []string{"01A+-12", "01A0x12", "01A+"} {
+		if got := r.route([]byte(bad), t0); got.Kind != KindConversion {
+			t.Fatalf("%s: got %+v, want conversion", bad, got)
+		}
+	}
+}
+
+func TestRouteContextChanged(t *testing.T) {
+	conn := Connection{Encoding: "utf-8", ContextTTL: 10 * time.Minute, Context: []ContextRule{rule("serial", `^SN(\w*)$`, 1)}}
+	r := mustRouter(t, conn, config.Device{Device: "a", Points: []config.Point{evPoint("w", `^01A(.+)$`, "float64")}})
+	steps := []struct {
+		frame   string
+		at      time.Duration
+		changed bool
+	}{
+		{"SN", 0, false},
+		{"SN42", 0, true},
+		{"SN42", time.Minute, false},
+		{"SN43", 2 * time.Minute, true},
+		{"SN43", 13 * time.Minute, true},
+		{"SN", 14 * time.Minute, true},
+		{"SN", 15 * time.Minute, false},
+	}
+	for i, s := range steps {
+		got := r.route([]byte(s.frame), t0.Add(s.at))
+		if got.ContextKey != "serial" || got.ContextChanged != s.changed {
+			t.Fatalf("step %d %s: got %+v, want changed %v", i, s.frame, got, s.changed)
+		}
+	}
+	if got := r.route([]byte("01A1"), t0); got.ContextChanged {
+		t.Fatalf("a sample reports a context change: %+v", got)
+	}
+}

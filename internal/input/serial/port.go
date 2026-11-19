@@ -44,7 +44,8 @@ type Port interface {
 // Opener opens a port; OpenPort is the production one.
 type Opener func(device string, mode Mode) (Port, error)
 
-// OpenPort opens device with mode and sets the read timeout. Errors are
+// OpenPort opens device with mode, sets the read timeout and flushes what
+// the port received before the open (the tail of a frame). Errors are
 // wrapped into ErrPortBusy, ErrPortMissing or ErrPortPermission when the
 // cause is known.
 func OpenPort(device string, mode Mode) (Port, error) {
@@ -72,6 +73,10 @@ func OpenPort(device string, mode Mode) (Port, error) {
 	if err := p.SetReadTimeout(ReadTimeout); err != nil {
 		_ = p.Close()
 		return nil, fmt.Errorf("set serial read timeout: %w", err)
+	}
+	if err := p.ResetInputBuffer(); err != nil {
+		_ = p.Close()
+		return nil, fmt.Errorf("flush serial input: %w", err)
 	}
 	return p, nil
 }

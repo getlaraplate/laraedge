@@ -15,12 +15,14 @@ type framerStep struct {
 	tick   bool
 	frames []string
 	kinds  []string
+	// stamps, when set, are the read times of the frames.
+	stamps []time.Duration
 }
 
 func runFramer(t *testing.T, fr *framer, steps []framerStep) {
 	t.Helper()
 	for i, s := range steps {
-		var frames [][]byte
+		var frames []frame
 		var kinds []string
 		if s.tick {
 			frames, kinds = fr.tick(frameT0.Add(s.at))
@@ -28,8 +30,10 @@ func runFramer(t *testing.T, fr *framer, steps []framerStep) {
 			frames, kinds = fr.push([]byte(s.data), frameT0.Add(s.at))
 		}
 		got := make([]string, 0, len(frames))
+		stamps := make([]time.Duration, 0, len(frames))
 		for _, f := range frames {
-			got = append(got, string(f))
+			got = append(got, string(f.data))
+			stamps = append(stamps, f.at.Sub(frameT0))
 		}
 		want := s.frames
 		if want == nil {
@@ -40,6 +44,9 @@ func runFramer(t *testing.T, fr *framer, steps []framerStep) {
 		}
 		if len(kinds) != len(s.kinds) || (len(kinds) > 0 && !reflect.DeepEqual(kinds, s.kinds)) {
 			t.Fatalf("step %d: kinds = %v, want %v", i, kinds, s.kinds)
+		}
+		if s.stamps != nil && !reflect.DeepEqual(stamps, s.stamps) {
+			t.Fatalf("step %d: frames read at %v, want %v", i, stamps, s.stamps)
 		}
 	}
 }
@@ -69,12 +76,15 @@ func TestFramer(t *testing.T) {
 		{"gap", Framing{Gap: 50 * ms}, 1024, []framerStep{
 			{data: "AB"}, {at: 20 * ms, data: "CD"},
 			{at: 60 * ms, tick: true},
-			{at: 71 * ms, tick: true, frames: []string{"ABCD"}},
+			{at: 71 * ms, tick: true, frames: []string{"ABCD"}, stamps: []time.Duration{20 * ms}},
 			{at: 80 * ms, tick: true},
 		}},
 		{"gap push after silence completes previous frame", Framing{Gap: 50 * ms}, 1024, []framerStep{
-			{data: "AB"}, {at: 100 * ms, data: "CD", frames: []string{"AB"}},
-			{at: 200 * ms, tick: true, frames: []string{"CD"}},
+			{data: "AB"}, {at: 100 * ms, data: "CD", frames: []string{"AB"}, stamps: []time.Duration{0}},
+			{at: 200 * ms, tick: true, frames: []string{"CD"}, stamps: []time.Duration{100 * ms}},
+		}},
+		{"terminator frames read at the push", cr, 1024, []framerStep{
+			{data: "1."}, {at: 30 * ms, data: "5\r2", frames: []string{"1.5"}, stamps: []time.Duration{30 * ms}},
 		}},
 		{"start", Framing{Terminator: []byte("\x03"), Start: 2, HasStart: true}, 1024, []framerStep{
 			{data: "xx\x02AB\x03", frames: []string{"AB"}},
@@ -150,29 +160,119 @@ func TestFramer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runFramer(t, newFramer(tt.framing, tt.maxFrame), tt.steps)
+			runFramer(t, synced(newFramer(tt.framing, tt.maxFrame)), tt.steps)
+		})
+	}
+}
+
+// synced returns fr past its sync point, as after a quiet read cycle one
+// second before frameT0, so that the steps start on a frame boundary.
+func synced(fr *framer) *framer {
+	fr.tick(frameT0.Add(-time.Second))
+	return fr
+}
+
+func TestFramerSync(t *testing.T) {
+	ms := time.Millisecond
+	cr := Framing{Terminator: []byte("\r")}
+	incomplete := []string{"incomplete_frame"}
+	tests := []struct {
+		name    string
+		framing Framing
+		steps   []framerStep
+	}{
+		{"terminator drops the half frame up to it", cr, []framerStep{
+			{data: "5.250\r01A+1.000\r", frames: []string{"01A+1.000"}, kinds: incomplete},
+		}},
+		{"a terminator first drops nothing", cr, []framerStep{
+			{data: "\r1.5\r", frames: []string{"1.5"}},
+		}},
+		{"only noise before the terminator is not counted", Framing{Terminator: []byte("\x03")}, []framerStep{
+			{data: "\r\n\x00\x031.5\x03", frames: []string{"1.5"}},
+		}},
+		{"multi-byte terminator split across reads", Framing{Terminator: []byte("\r\n")}, []framerStep{
+			{data: "x\r"},
+			{at: ms, data: "\n2\r\n", frames: []string{"2"}, kinds: incomplete},
+		}},
+		{"a quiet cycle first drops nothing", cr, []framerStep{
+			{tick: true},
+			{at: 100 * ms, data: "1.5\r", frames: []string{"1.5"}},
+		}},
+		{"a quiet cycle after a half frame drops it once", cr, []framerStep{
+			{data: "5.2"},
+			{at: 100 * ms, tick: true, kinds: incomplete},
+			{at: 200 * ms, data: "1.5\r", frames: []string{"1.5"}},
+		}},
+		{"a quiet cycle after noise counts nothing", cr, []framerStep{
+			{data: "\n"},
+			{at: 100 * ms, tick: true},
+			{at: 200 * ms, data: "1.5\r", frames: []string{"1.5"}},
+		}},
+		{"two seconds of silence end sync like a quiet cycle", cr, []framerStep{
+			{data: "12"},
+			{at: 3 * time.Second, data: "3\r", frames: []string{"3"}, kinds: incomplete},
+		}},
+		{"a start character ends sync", Framing{Length: 2, Start: 2, HasStart: true}, []framerStep{
+			{data: "XYZ\x02AB", frames: []string{"AB"}, kinds: incomplete},
+		}},
+		{"a start character first drops nothing", Framing{Terminator: []byte("\x03"), Start: 2, HasStart: true}, []framerStep{
+			{data: "\x02AB\x03", frames: []string{"AB"}},
+		}},
+		{"length waits for a quiet cycle", Framing{Length: 4}, []framerStep{
+			{data: "ABCDEFGH"},
+			{at: 100 * ms, tick: true, kinds: incomplete},
+			{at: 200 * ms, data: "1234", frames: []string{"1234"}},
+		}},
+		{"gap drops the bytes before the first silence", Framing{Gap: 50 * ms}, []framerStep{
+			{data: "AB"}, {at: 20 * ms, data: "CD"},
+			{at: 71 * ms, tick: true, kinds: incomplete},
+			{at: 100 * ms, data: "EF"},
+			{at: 200 * ms, tick: true, frames: []string{"EF"}, stamps: []time.Duration{100 * ms}},
+		}},
+		{"gap after a quiet start", Framing{Gap: 50 * ms}, []framerStep{
+			{tick: true},
+			{at: 60 * ms, data: "AB"},
+			{at: 200 * ms, tick: true, frames: []string{"AB"}, stamps: []time.Duration{60 * ms}},
+		}},
+		{"gap needs a silence of gap, not one quiet cycle", Framing{Gap: 500 * ms}, []framerStep{
+			{tick: true},
+			{at: 100 * ms, data: "CD"},
+			{at: 200 * ms, tick: true},
+			{at: 700 * ms, tick: true, kinds: incomplete},
+			{at: 800 * ms, data: "EF"},
+			{at: 1400 * ms, tick: true, frames: []string{"EF"}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runFramer(t, newFramer(tt.framing, 1024), tt.steps)
 		})
 	}
 }
 
 func TestFramerReset(t *testing.T) {
-	fr := newFramer(Framing{Terminator: []byte("\r")}, 1024)
+	fr := synced(newFramer(Framing{Terminator: []byte("\r")}, 1024))
 	fr.push([]byte("12"), frameT0)
 	fr.reset()
-	runFramer(t, fr, []framerStep{{at: time.Millisecond, data: "9\r", frames: []string{"9"}}})
+	// The pending "12" is dropped without a count; after the reset the
+	// framer syncs again, so the tail read first is not a frame.
+	runFramer(t, fr, []framerStep{
+		{at: time.Millisecond, data: "9\r", kinds: []string{"incomplete_frame"}},
+		{at: 2 * time.Millisecond, data: "8\r", frames: []string{"8"}},
+	})
 }
 
 func TestFramerFramesDoNotAliasBuffer(t *testing.T) {
-	fr := newFramer(Framing{Terminator: []byte("\r")}, 1024)
+	fr := synced(newFramer(Framing{Terminator: []byte("\r")}, 1024))
 	frames, _ := fr.push([]byte("AB\r"), frameT0)
 	fr.push([]byte("XY\r"), frameT0)
-	if string(frames[0]) != "AB" {
-		t.Fatalf("frame changed to %q", frames[0])
+	if string(frames[0].data) != "AB" {
+		t.Fatalf("frame changed to %q", frames[0].data)
 	}
 }
 
 func TestFramerBufferStaysBounded(t *testing.T) {
-	fr := newFramer(Framing{Gap: 50 * time.Millisecond}, 4)
+	fr := synced(newFramer(Framing{Gap: 50 * time.Millisecond}, 4))
 	fr.push([]byte("A"+strings.Repeat("\x00", 10000)), frameT0)
 	if len(fr.buf) > fr.bufCap() {
 		t.Fatalf("buffer holds %d bytes, cap %d", len(fr.buf), fr.bufCap())

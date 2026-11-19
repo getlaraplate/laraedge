@@ -12,6 +12,10 @@ import (
 	"github.com/getlaraplate/laraedge/internal/model"
 )
 
+// lineSync is a terminator fed first so that the probe's framer, which
+// drops bytes until a sync point, starts on a frame boundary.
+const lineSync = "\r"
+
 // probeResult is what a Probe call returned.
 type probeResult struct {
 	samples []model.Sample
@@ -40,6 +44,7 @@ func (h *runHarness) probe(t *testing.T, cancelWhenIdle bool) probeResult {
 
 func TestProbeReadsOneSampleForEveryPoint(t *testing.T) {
 	h := newRunHarness(t, nil)
+	h.port.feed(lineSync)
 	h.port.feed("SN9\r01A1.5\r02A2.5\r01A9\r")
 
 	got := h.probe(t, false)
@@ -65,6 +70,7 @@ func TestProbeReadsOneSampleForEveryPoint(t *testing.T) {
 
 func TestProbeSaysNoFrameForASilentPointAndKeepsUnmatchedFrames(t *testing.T) {
 	h := newRunHarness(t, nil)
+	h.port.feed(lineSync)
 	h.port.feed("01A1.5\r")
 	for i := range 12 {
 		h.port.feed(fmt.Sprintf("junk%d\r", i))
@@ -92,6 +98,7 @@ func TestProbeSaysNoFrameForASilentPointAndKeepsUnmatchedFrames(t *testing.T) {
 
 func TestProbeTruncatesAnUnmatchedFrameTo80Bytes(t *testing.T) {
 	h := newRunHarness(t, nil)
+	h.port.feed(lineSync)
 	h.port.feed("ZZ" + strings.Repeat("x", 100) + "\r")
 	h.probe(t, true)
 
@@ -108,6 +115,7 @@ func TestProbeNotesListContextKeysInFixedOrder(t *testing.T) {
 		{"key": "serial", "match": `^SN(\d+)$`},
 		{"key": "order_ref", "match": `^O(\d+)$`},
 	}})
+	h.port.feed(lineSync)
 	h.port.feed("L7\rO5\rSN9\r")
 	h.probe(t, true)
 
@@ -145,6 +153,7 @@ func TestProbeOfABusyPortSaysSo(t *testing.T) {
 
 func TestProbeSendsTheRequestsOnTheSchedule(t *testing.T) {
 	h := newRunHarness(t, map[string]any{"requests": []map[string]any{{"command": "W\r", "every": "1s"}}})
+	h.port.feed(lineSync)
 	h.port.feed("01A1\r02A2\r")
 	got := h.probe(t, false)
 	if got.err != nil || len(got.samples) != 2 {
@@ -199,5 +208,43 @@ func TestBrowseMatchesTheStablePathAndReportsAMissingDevice(t *testing.T) {
 	boom := errors.New("enumerate failed")
 	if err := Browse(h.cfg, &buf, func() ([]PortInfo, error) { return nil, boom }); !errors.Is(err, boom) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestProbeNotesEscapeTheContextValue(t *testing.T) {
+	h := newRunHarness(t, map[string]any{"context": []map[string]any{{"key": "serial", "match": `^SN(.+)$`}}})
+	h.port.feed(lineSync)
+	h.port.feed("SNA\x1b[2JB\r")
+	h.probe(t, true)
+
+	want := []string{`context: serial=A\x1b[2JB`}
+	if !slices.Equal(h.in.ProbeNotes(), want) {
+		t.Errorf("notes = %q, want %q", h.in.ProbeNotes(), want)
+	}
+}
+
+func TestBrowseEscapesTheUSBIDs(t *testing.T) {
+	h := newRunHarness(t, nil)
+	list := func() ([]PortInfo, error) {
+		return []PortInfo{{Name: "/dev/ttyUSB0", VID: "04\n03", PID: "\x1b[2J"}}, nil
+	}
+	var buf bytes.Buffer
+	if err := Browse(h.cfg, &buf, list); err != nil {
+		t.Fatal(err)
+	}
+	if want := `* /dev/ttyUSB0  -  04\n03:\x1b[2J  -  -` + "\n"; buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
+	}
+}
+
+func TestProbeDropsTheHalfFrameReadAtTheOpen(t *testing.T) {
+	h := newRunHarness(t, nil)
+	h.port.feed("5.250\r01A+1.000\r02A2\r")
+	got := h.probe(t, false)
+	if got.err != nil || len(got.samples) != 2 || got.samples[0].Value.Float != 1.0 || got.samples[1].Value.Float != 2 {
+		t.Fatalf("probe = %+v", got)
+	}
+	if notes := h.in.ProbeNotes(); len(notes) != 0 {
+		t.Fatalf("notes = %q, want none (the half frame is not unmatched)", notes)
 	}
 }

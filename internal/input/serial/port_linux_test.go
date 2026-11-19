@@ -59,6 +59,25 @@ func TestOpenPortReadsAndWritesAPseudoTerminal(t *testing.T) {
 	}
 }
 
+// TestOpenPortDropsWhatArrivedBeforeTheOpen: bytes the instrument sent
+// before the open (the tail of a frame) are flushed, never read as a frame.
+func TestOpenPortDropsWhatArrivedBeforeTheOpen(t *testing.T) {
+	master, slave := ptytest.Open(t)
+	if _, err := master.Write([]byte("5.250\r")); err != nil {
+		t.Fatalf("master write: %v", err)
+	}
+	port, err := serial.OpenPort(slave, testMode)
+	if err != nil {
+		t.Fatalf("OpenPort: %v", err)
+	}
+	t.Cleanup(func() { _ = port.Close() })
+
+	buf := make([]byte, 16)
+	if n, err := port.Read(buf); n != 0 || err != nil {
+		t.Fatalf("first Read = %q, %v; want nothing", buf[:n], err)
+	}
+}
+
 func TestOpenPortTwiceIsBusy(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores TIOCEXCL")
