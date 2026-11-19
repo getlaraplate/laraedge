@@ -104,6 +104,7 @@ func (in *Input) ProbePoints(ctx context.Context) ([]model.Sample, map[PointRef]
 				readErr = err
 				break
 			}
+			framer.commandSent()
 		}
 	}
 

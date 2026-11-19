@@ -59,8 +59,9 @@ type reader struct {
 	backoff *driverkit.Backoff
 	// warned holds the open failure causes logged since the port last held.
 	warned map[string]bool
-	// lostWarned is set once a loss of the port was logged, until a frame is
-	// read: a port that flaps is warned once per episode.
+	// lostWarned is set once a loss of the port was logged, until the port
+	// holds (a frame read or BackoffMax open): a port that flaps is warned
+	// once per episode.
 	lostWarned bool
 	buf        []byte
 }
@@ -174,6 +175,7 @@ func (r *reader) serve(ctx context.Context, port Port) error {
 			held = true
 			r.backoff.Reset()
 			clear(r.warned)
+			r.lostWarned = false
 		}
 
 		if sched == nil || len(frames) > 0 {
@@ -196,6 +198,7 @@ func (r *reader) serve(ctx context.Context, port Port) error {
 			if _, err := port.Write(cmd); err != nil {
 				return err
 			}
+			r.framer.commandSent()
 		}
 	}
 }

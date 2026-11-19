@@ -523,3 +523,48 @@ func TestAGaugeStreamingAcrossTheOpenGivesNoHalfFrame(t *testing.T) {
 		t.Fatalf("read errors = %v", h.in.Health().ReadErrors)
 	}
 }
+
+func TestGapPolledFirstAnswerAfterOpenIsRead(t *testing.T) {
+	h := newRunHarness(t, map[string]any{
+		"framing":  map[string]any{"gap": "200ms"},
+		"requests": []map[string]any{{"command": "A\r", "every": "10s"}},
+	})
+	h.start()
+	h.step()
+	if got := h.port.written(); !slices.Equal(got, []string{"A\r"}) {
+		t.Fatalf("writes = %q", got)
+	}
+	h.port.feed("01A1.5")
+	h.step()
+	h.stepUntil(5, func() bool { return len(h.samples()) == 1 })
+	if s := h.samples()[0]; s.Value.Float != 1.5 {
+		t.Fatalf("sample = %+v, want 1.5", s)
+	}
+	if n := h.readErrors(kindIncompleteFrame); n != 0 {
+		t.Fatalf("incomplete_frame = %d, want 0", n)
+	}
+}
+
+func TestAPortHeldWithoutFramesWarnsEachLostEpisode(t *testing.T) {
+	h := newRunHarness(t, nil)
+	h.start()
+	h.advance(driverkit.BackoffMax)
+	h.port.fail()
+	h.step()
+	if lost := h.logs.at(t, "WARN", msgPortLost); len(lost) != 1 {
+		t.Fatalf("port lost warned %d times, want 1", len(lost))
+	}
+	h.advance(500 * time.Millisecond)
+	if h.opener.count() != 2 || !h.port.isOpen() {
+		t.Fatalf("opens = %d, open %v", h.opener.count(), h.port.isOpen())
+	}
+	h.advance(driverkit.BackoffMax)
+	h.port.fail()
+	h.step()
+	if lost := h.logs.at(t, "WARN", msgPortLost); len(lost) != 2 {
+		t.Fatalf("port lost warned %d times after a held port, want 2", len(lost))
+	}
+	if got := h.readErrors(KindPortLost); got != 2 {
+		t.Fatalf("port_lost = %d, want 2", got)
+	}
+}

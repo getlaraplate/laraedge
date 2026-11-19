@@ -28,7 +28,7 @@ type frame struct {
 // reset after a port loss, starts syncing: it drops bytes until a sync point,
 // which is a quiet read cycle (tick), a start character (with start), a
 // terminator (with terminator; the bytes up to and including it are dropped),
-// or, with gap, the first silence of gap. Dropped bytes other than CR, LF and
+// or, with gap, the first silence of gap, or a command written to the port. Dropped bytes other than CR, LF and
 // NUL count incomplete_frame once per sync.
 type framer struct {
 	framing  Framing
@@ -94,18 +94,30 @@ func (f *framer) push(b []byte, at time.Time) ([]frame, []string) {
 // tick is called for a read cycle that brought no byte: the line was quiet for
 // one read timeout. It ends a gap frame after the silence, drops stale bytes,
 // and is a sync point (with gap, once the silence lasts gap: it counts from
-// the last byte, or from the first tick when no byte came yet).
+// the last byte, or from one read timeout before the first tick when no byte
+// came yet), and so is a command written (commandSent).
 func (f *framer) tick(at time.Time) ([]frame, []string) {
 	if f.syncing {
 		if f.framing.Gap == 0 {
 			return nil, f.endSync(nil)
 		}
 		if !f.hasLast {
-			f.last, f.hasLast = at, true
-			return nil, nil
+			// The input buffer was flushed at open, so the line was quiet
+			// for at least this read timeout: count the silence from then.
+			f.last, f.hasLast = at.Add(-ReadTimeout), true
 		}
 	}
 	return f.expire(at)
+}
+
+// commandSent is called right after a command was written to the port. While
+// syncing with no byte dropped, what follows is the answer to it, so the
+// command is a sync point; bytes already dropped are still a fragment and the
+// sync goes on.
+func (f *framer) commandSent() {
+	if f.syncing && f.syncDropped == 0 {
+		f.endSync(nil)
+	}
 }
 
 // expire ends a gap frame after the silence and drops stale bytes; while

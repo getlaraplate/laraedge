@@ -10,11 +10,13 @@ import (
 var frameT0 = time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 
 type framerStep struct {
-	at     time.Duration
-	data   string
-	tick   bool
-	frames []string
-	kinds  []string
+	at   time.Duration
+	data string
+	tick bool
+	// command is a command written (commandSent).
+	command bool
+	frames  []string
+	kinds   []string
 	// stamps, when set, are the read times of the frames.
 	stamps []time.Duration
 }
@@ -24,7 +26,9 @@ func runFramer(t *testing.T, fr *framer, steps []framerStep) {
 	for i, s := range steps {
 		var frames []frame
 		var kinds []string
-		if s.tick {
+		if s.command {
+			fr.commandSent()
+		} else if s.tick {
 			frames, kinds = fr.tick(frameT0.Add(s.at))
 		} else {
 			frames, kinds = fr.push([]byte(s.data), frameT0.Add(s.at))
@@ -241,6 +245,34 @@ func TestFramerSync(t *testing.T) {
 			{at: 700 * ms, tick: true, kinds: incomplete},
 			{at: 800 * ms, data: "EF"},
 			{at: 1400 * ms, tick: true, frames: []string{"EF"}},
+		}},
+		{"gap of one read timeout: the first quiet cycle ends sync", Framing{Gap: ReadTimeout}, []framerStep{
+			{at: ReadTimeout, tick: true},
+			{at: 150 * ms, data: "AB"},
+			{at: 400 * ms, tick: true, frames: []string{"AB"}, stamps: []time.Duration{150 * ms}},
+		}},
+		{"gap counts the first silence from one read timeout back", Framing{Gap: 500 * ms}, []framerStep{
+			{at: 100 * ms, tick: true},
+			{at: 400 * ms, tick: true},
+			{at: 500 * ms, tick: true},
+			{at: 550 * ms, data: "EF"},
+			{at: 1200 * ms, tick: true, frames: []string{"EF"}},
+		}},
+		{"a command ends sync in gap mode", Framing{Gap: 500 * ms}, []framerStep{
+			{at: 100 * ms, tick: true},
+			{at: 100 * ms, command: true},
+			{at: 150 * ms, data: "AB"},
+			{at: 800 * ms, tick: true, frames: []string{"AB"}, stamps: []time.Duration{150 * ms}},
+		}},
+		{"a command ends sync in terminator mode", cr, []framerStep{
+			{command: true},
+			{at: ms, data: "1.5\r", frames: []string{"1.5"}},
+		}},
+		{"a command after pending bytes leaves the fragment dropped", Framing{Gap: 500 * ms}, []framerStep{
+			{data: "5.2"},
+			{at: ms, command: true},
+			{at: 20 * ms, data: "1"},
+			{at: 700 * ms, tick: true, kinds: incomplete},
 		}},
 	}
 	for _, tt := range tests {

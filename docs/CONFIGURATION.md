@@ -1199,8 +1199,11 @@ expression and is required.
 - When the port is lost, what is held in the reader is dropped without a count.
 - A port can be opened in the middle of a frame (an instrument that streams, an adapter plugged back in while the
   gauge sends). Whatever reached the port before the open is flushed, and the reader then drops bytes until a sync
-  point: a read cycle of 100 ms with nothing on the line, a `start` character, or a `terminator` (the bytes up to
-  and including it are dropped). With `gap` the first silence of `gap` is the sync point (the bytes before it are
+  point: a read cycle of 100 ms with nothing on the line, a `start` character, a `terminator` (the bytes up to
+  and including it are dropped), or a command of `requests` written to the port (what follows is its answer, so
+  the first answer of a polled instrument is read, unless bytes were already dropped). With `gap` the first
+  silence of `gap` is the sync point, counted from one read timeout before the first quiet cycle (the buffer was
+  flushed at the open), so a `gap` of 100 ms or less ends at the first quiet cycle (the bytes before it are
   dropped). Dropped bytes other than CR, LF and NUL count `incomplete_frame` once. So
   `...5.250\r01A+1.000\r` arriving in the first read gives only `01A+1.000`.
 
@@ -1272,7 +1275,7 @@ the agent runs) gets "port busy" instead of interleaved frames. Linux does not e
 agent running as root does not keep another root program (or a second input naming the port another way) off the
 port. Run the agent as its own user in the `dialout` group. A read or write error (an adapter unplugged) closes
 the port, counts `port_lost` and goes back to opening. Each loss is counted, but it is logged at `warn` once per
-episode, which ends when a frame is read. The backoff, and the once-per-cause open warnings, start again only once
+episode, which ends, like the backoff's, once the port holds. The backoff, and the once-per-cause open warnings, start again only once
 the port holds: it delivered a frame, or stayed open for a minute (the backoff maximum). A port that opens and
 fails at its first read (a flaky adapter) therefore still backs off up to a minute instead of reopening twice a
 second.

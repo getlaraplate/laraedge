@@ -138,7 +138,11 @@ Rules:
   is a read cycle with no byte (the line quiet for one read timeout), a `start` character, or a `terminator` (the
   bytes up to and including it are dropped); with `gap`, the silence that ends a gap frame ends the sync (the
   bytes before the first silence are dropped). Dropped bytes other than CR, LF and NUL count `incomplete_frame`
-  once per sync. `probe` uses a fresh framer and so syncs too.
+  once per sync. `probe` uses a fresh framer and so syncs too. (Amended 2026-11-19, minors fix: a command written
+  to the port while syncing with no byte dropped is a sync point, since what follows is its answer, so the first
+  answer of a polled instrument after an open is read; with `gap`, the first quiet cycle counts its silence from
+  one read timeout before it, the buffer having been flushed at the open, so a `gap` of one read timeout or less
+  ends the sync there.)
 
 ## 6. Requests
 
@@ -225,7 +229,7 @@ tests.
 goes back to opening with backoff. Requests stop until the port is open again. (Amended 2026-11-19, final review:
 the backoff and the once-per-cause open warnings reset only once the port holds, having delivered a frame or stayed
 open for the backoff maximum; `port_lost` is counted on every loss and logged at `warn` once per episode, which
-ends when a frame is read. A port that opens and fails at once thus backs off like one that does not open.)
+ends when a frame is read. A port that opens and fails at once thus backs off like one that does not open. Amended 2026-11-19, minors fix: the episode ends where the backoff resets, a frame read or the port open for the backoff maximum.)
 
 **Death and birth.** While the port is open the devices of the input are renewed on every read cycle, frames or
 not (without `requests`), or on every frame (with `requests`). Beyond

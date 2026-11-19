@@ -783,7 +783,7 @@ The troubleshooting table has the symptoms. Some points of how the driver reads:
   and `--log-level debug` (unmatched frames and their summary, rate-limited) are the exceptions.
 - **A flaky adapter backs off.** A port that opens and fails at once is reopened after 0.5 s, 1 s, 2 s and so on up
   to a minute, with one `warn` for the episode and `port_lost` counted every time; the waits start again from
-  0.5 s once the port delivers a frame or stays open for a minute.
+  0.5 s, and the next loss is warned again, once the port delivers a frame or stays open for a minute.
 
 ## Running plugins
 
