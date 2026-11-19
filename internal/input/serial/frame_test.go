@@ -121,6 +121,21 @@ func TestFramer(t *testing.T) {
 			{data: "1"}, {at: 1500 * ms, data: "2"}, {at: 3 * time.Second, data: "\r", frames: []string{"12"}},
 		}},
 		{"empty after trimming", cr, 1024, []framerStep{{data: "\r\r\n\x00\r", frames: nil}}},
+		{"crlf gauge with values of exactly max frame", cr, 8, []framerStep{
+			{data: "12345678\r\n12345678\r\n", frames: []string{"12345678", "12345678"}},
+		}},
+		{"crlf terminator too long by the carry is counted", Framing{Terminator: []byte("\r\n")}, 4, []framerStep{
+			{data: "00000\r\n12\r\n", frames: []string{"12"}, kinds: []string{"frame_too_long"}},
+		}},
+		{"gap leading crlf not counted", Framing{Gap: 50 * ms}, 4, []framerStep{
+			{data: "\r\nABCD"}, {at: 100 * ms, tick: true, frames: []string{"ABCD"}},
+		}},
+		{"gap trailing crlf not counted", Framing{Gap: 50 * ms}, 4, []framerStep{
+			{data: "ABCD\r\n"}, {at: 100 * ms, tick: true, frames: []string{"ABCD"}},
+		}},
+		{"length with start trailing noise", Framing{Length: 4, Start: 2, HasStart: true}, 4, []framerStep{
+			{data: "\x02ABCD\r\n", frames: []string{"ABCD"}},
+		}},
 		{"nothing pending tick", cr, 1024, []framerStep{{at: 5 * time.Second, tick: true}}},
 	}
 	for _, tt := range tests {

@@ -131,16 +131,27 @@ func (f *framer) feed(c byte, frames [][]byte, kinds []string) ([][]byte, []stri
 		}
 		return frames, kinds
 	}
+	if len(f.buf) == 0 && fr.Length == 0 && isFrameNoise(c) {
+		// Leading CR, LF and NUL are trimmed from the frame, so they do not
+		// count toward max_frame; never buffering them keeps it that way.
+		if len(term) == 1 && c == term[0] {
+			f.inFrame = false
+		}
+		return frames, kinds
+	}
 	f.buf = append(f.buf, c)
 	switch {
 	case len(term) > 0:
 		if bytes.HasSuffix(f.buf, term) {
 			f.buf = f.buf[:len(f.buf)-len(term)]
-			frames = f.emit(frames)
 			f.inFrame = false
-			return frames, kinds
+			if len(trimFrame(f.buf)) > f.maxFrame {
+				f.buf = f.buf[:0]
+				return frames, append(kinds, kindFrameTooLong)
+			}
+			return f.emit(frames), kinds
 		}
-		if len(f.buf) > f.maxFrame+len(term)-1 {
+		if f.contentLen() > f.maxFrame+len(term)-1 {
 			return frames, f.tooLong(kinds)
 		}
 	case fr.Length > 0:
@@ -149,7 +160,7 @@ func (f *framer) feed(c byte, frames [][]byte, kinds []string) ([][]byte, []stri
 			f.inFrame = false
 		}
 	default:
-		if len(f.buf) > f.maxFrame {
+		if f.contentLen() > f.maxFrame {
 			return frames, f.tooLong(kinds)
 		}
 	}
@@ -175,4 +186,14 @@ func (f *framer) tooLong(kinds []string) []string {
 
 func trimFrame(b []byte) []byte {
 	return bytes.Trim(b, "\r\n\x00")
+}
+
+func isFrameNoise(c byte) bool {
+	return c == '\r' || c == '\n' || c == 0
+}
+
+// contentLen is the pending size without trailing CR, LF and NUL, which are
+// trimmed from the frame and so never count toward max_frame.
+func (f *framer) contentLen() int {
+	return len(bytes.TrimRight(f.buf, "\r\n\x00"))
 }
