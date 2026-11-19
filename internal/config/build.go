@@ -162,5 +162,6 @@ func build(root map[string]any, lenient bool) (Document, []string, error) {
 	b.uniqueIDs(doc)
 	b.processorRules(doc)
 	b.uniqueSignals(doc)
+	b.uniqueSerialPorts(doc)
 	return doc, b.msgs, nil
 }

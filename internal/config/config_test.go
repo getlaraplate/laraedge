@@ -1070,3 +1070,29 @@ func TestParseOrdersUnknownTransformNamesByName(t *testing.T) {
 		t.Errorf("messages =\n%s\nwant\n%s", strings.Join(msgs, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// serialInputs returns a document with one serial input per device, in order,
+// and one simulated input naming the first device.
+func serialInputs(devices ...string) string {
+	doc := "schema: laraplate-edge-config/1\ninputs:\n"
+	for i, dev := range devices {
+		doc += fmt.Sprintf("  - id: gauge-%d\n    driver: serial\n    connection: {device: '%s', baud: 9600}\n    devices:\n      - device: g%d\n        points:\n          - {signal: w, address: '^(.+)$', type: float64, read: event}\n", i, dev, i)
+	}
+	doc += "  - id: sim\n    driver: simulated\n    connection: {device: '" + devices[0] + "', scenario: s.json}\n    devices:\n      - device: sim\n        points:\n          - {signal: s, address: a, read: event}\n"
+	return doc + "outputs:\n  - {id: main, type: laraplate-http, url: 'https://erp.example.com', token: 'secret://env/TOKEN'}\n"
+}
+
+func TestParseRefusesTwoSerialInputsOnTheSamePort(t *testing.T) {
+	_, msgs, err := config.Parse([]byte(serialInputs("/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB0")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"inputs.2.connection.device: the same port as inputs.0"}; !slices.Equal(msgs, want) {
+		t.Fatalf("messages = %q, want %q", msgs, want)
+	}
+
+	_, msgs, err = config.Parse([]byte(serialInputs("/dev/ttyUSB0", "/dev/ttyUSB1")))
+	if err != nil || len(msgs) != 0 {
+		t.Fatalf("two ports refused: %q, %v", msgs, err)
+	}
+}
