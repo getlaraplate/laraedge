@@ -122,8 +122,16 @@ var countingAttributes = []string{
 	"suppressed", "window_seconds", "attempt", "attempts",
 }
 
+// durationAttributes are the log attributes the agent writes as Go durations:
+// the clock offset of the skew warning and its threshold. The offset is
+// measured on the runner, so its digits are any number ("-692ms") and collide
+// with a counter sample by chance. A value that does not parse as a duration
+// is scanned like any other.
+var durationAttributes = []string{"offset", "threshold"}
+
 // withoutCountingAttributes returns the JSON line without the numeric
-// countingAttributes, and without time and level whatever their type.
+// countingAttributes, the durationAttributes holding a duration, and time and
+// level whatever their type.
 func withoutCountingAttributes(t *testing.T, line string) string {
 	t.Helper()
 
@@ -136,6 +144,13 @@ func withoutCountingAttributes(t *testing.T, line string) string {
 		// both can hold digits that match a sample value.
 		if _, isNumber := fields[key].(float64); isNumber || key == "time" || key == "level" {
 			delete(fields, key)
+		}
+	}
+	for _, key := range durationAttributes {
+		if text, isText := fields[key].(string); isText {
+			if _, err := time.ParseDuration(text); err == nil {
+				delete(fields, key)
+			}
 		}
 	}
 	out, err := json.Marshal(fields)
@@ -368,6 +383,18 @@ outputs:
 	}
 	if lines == 0 {
 		t.Fatal("no log line captured")
+	}
+}
+
+func TestDurationAttributesAreNotScanned(t *testing.T) {
+	skew := `{"time":"2026-11-17T14:20:33.539Z","level":"WARN","msg":"output: the agent clock differs from the backend's; check NTP","output":"backend","offset":"-692ms","threshold":"1s"}`
+	if holdsNumber(withoutCountingAttributes(t, skew), "692") {
+		t.Fatal("the clock offset of a skew warning was scanned as a sample value")
+	}
+
+	notADuration := `{"level":"WARN","msg":"m","offset":"692"}`
+	if !holdsNumber(withoutCountingAttributes(t, notADuration), "692") {
+		t.Fatal("an offset that is not a duration was dropped from the scan")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -35,6 +36,29 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 	defer b.mu.Unlock()
 
 	return b.buf.Write(p)
+}
+
+// String returns everything written so far.
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
+}
+
+// describeNotification is the handle, status and value of n, for failure
+// messages.
+func describeNotification(n notification) string {
+	if n.Value == nil {
+		return fmt.Sprintf("%d:<nil>", n.Handle)
+	}
+
+	var value any
+	if n.Value.Value != nil {
+		value = n.Value.Value.Value()
+	}
+
+	return fmt.Sprintf("%d:%v:%v", n.Handle, n.Value.Status, value)
 }
 
 // records returns the JSON records written so far.
@@ -593,14 +617,22 @@ func TestSubscribeDeliversInitialValuesAndChanges(t *testing.T) {
 	initial := map[uint32]any{}
 	timeout := time.After(guard)
 
+	// seen keeps every notification for the failure message: a run that
+	// times out says whether nothing arrived or something else did.
+	var seen []string
+
 	for len(initial) < 2 {
 		select {
-		case n := <-ch:
+		case n, ok := <-ch:
+			if !ok {
+				t.Fatalf("notification channel closed; initial values = %v, seen %v", initial, seen)
+			}
+			seen = append(seen, describeNotification(n))
 			if (n.Handle == 1 || n.Handle == 2) && n.Value != nil && n.Value.Value != nil {
 				initial[n.Handle] = n.Value.Value.Value()
 			}
 		case <-timeout:
-			t.Fatalf("initial values = %v, want handles 1 and 2", initial)
+			t.Fatalf("initial values = %v, want handles 1 and 2; statuses %v, seen %v", initial, statuses, seen)
 		}
 	}
 
